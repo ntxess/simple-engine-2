@@ -147,7 +147,7 @@
     <ClCompile Include="src\core\interface\IDataStoreSerializer.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="src\editor\EditorSceneData.cpp">
+    <ClCompile Include="src\editor\EditorSceneAdapter.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
@@ -338,7 +338,7 @@
     <ClInclude Include="src\core\serializer\JsonDataStoreSerializer.hpp">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="src\editor\EditorSceneData.hpp">
+    <ClInclude Include="src\editor\EditorSceneAdapter.hpp">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

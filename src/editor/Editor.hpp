@@ -1,7 +1,7 @@
 #pragma once
 
 #include "EditorComponentVisitor.hpp"
-#include "EditorSceneData.hpp"
+#include "EditorSceneAdapter.hpp"
 #include "EditorSceneVisitor.hpp"
 #include "../core/ApplicationContext.hpp"
 #include "../core/Components.hpp"
@@ -127,9 +127,9 @@ private:
     std::atomic<bool> m_forwardFrameEnabled;
 
     // Current loaded scene data
-    std::unordered_map<std::string, std::unique_ptr<EditorSceneData>> m_editorSceneMap;
+    std::unordered_map<std::string, std::unique_ptr<EditorSceneAdapter>> m_editorSceneMap;
     std::string m_selectedSceneKey;
-    EditorSceneData* m_selectedSceneData;
+    EditorSceneAdapter* m_selectedSceneData;
     sf::Sprite m_gameView;
 
     // Component Data used for modifying properties in PropertiesPanel

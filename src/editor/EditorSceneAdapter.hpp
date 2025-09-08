@@ -5,11 +5,11 @@
 #include "entt/entity/entity.hpp"
 #include <memory>
 
-class EditorSceneData
+class EditorSceneAdapter
 {
 public:
-    EditorSceneData() = delete;
-    EditorSceneData(std::unique_ptr<IScene> scn, unsigned int width, unsigned int height, const sf::ContextSettings& settings);
+    EditorSceneAdapter() = delete;
+    EditorSceneAdapter(std::unique_ptr<IScene> scn, unsigned int width, unsigned int height, const sf::ContextSettings& settings);
 
     void processInput();
     void processEvent(const sf::Event& event);

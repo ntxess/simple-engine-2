@@ -196,7 +196,7 @@
     </PreLinkEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="src\editor\EditorSceneData.cpp" />
+    <ClCompile Include="src\editor\EditorSceneAdapter.cpp" />
     <ClCompile Include="src\core\interface\IDataStoreSerializer.cpp" />
     <ClCompile Include="src\core\serializer\JsonDataStoreSerializer.cpp" />
     <ClCompile Include="src\core\serializer\GameDataStoreSerializer.cpp" />
@@ -243,7 +243,7 @@
     <ClCompile Include="src\core\manager\WayPointManager.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="src\editor\EditorSceneData.hpp" />
+    <ClInclude Include="src\editor\EditorSceneAdapter.hpp" />
     <ClInclude Include="src\core\serializer\JsonDataStoreSerializer.hpp" />
     <ClInclude Include="src\core\serializer\GameDataStoreSerializer.hpp" />
     <ClInclude Include="src\core\util\DataStore.hpp" />

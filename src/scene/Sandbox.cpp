@@ -3,14 +3,12 @@
 Sandbox::Sandbox()
     : m_appContext(nullptr)
     , m_player(entt::null)
-{
-}
+{}
 
 Sandbox::Sandbox(ApplicationContext* sysData)
     : m_appContext(sysData)
     , m_player(entt::null)
-{
-}
+{}
 
 Sandbox::~Sandbox()
 {

@@ -14,6 +14,7 @@
 class CollisionSystem : public ISystem
 {
 public:
+    CollisionSystem() = delete;
     CollisionSystem(entt::registry& reg, const sf::Vector2f& center, const sf::Vector2u& size);
 
     constexpr std::string_view name() const;

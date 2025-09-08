@@ -63,21 +63,21 @@ void Editor::init()
     // Initializing all the scenes for selection
     int width = m_appContext->configData.get<int>("width").value();
     int height = m_appContext->configData.get<int>("height").value();
-    m_editorSceneMap["Sandbox"] = std::make_unique<EditorSceneData>(
+    m_editorSceneMap["Sandbox"] = std::make_unique<EditorSceneAdapter>(
         std::make_unique<Sandbox>(m_appContext),
         width,
         height,
         settings
     );
 
-    m_editorSceneMap["MainMenu"] = std::make_unique<EditorSceneData>(
+    m_editorSceneMap["MainMenu"] = std::make_unique<EditorSceneAdapter>(
         std::make_unique<MainMenu>(m_appContext),
         width,
         height,
         settings
     );
 
-    m_editorSceneMap["GameOfLifeSim"] = std::make_unique<EditorSceneData>(
+    m_editorSceneMap["GameOfLifeSim"] = std::make_unique<EditorSceneAdapter>(
         std::make_unique<GameOfLifeSim>(m_appContext),
         width,
         height,
@@ -179,6 +179,8 @@ entt::registry& Editor::getRegistry()
 {
     if (m_selectedSceneData)
         return m_selectedSceneData->getRegistry();
+    else
+		throw std::runtime_error("No selected scene data available to get registry from.");
 }
 
 void Editor::setupDockPanel(const ImVec2& panPos, const ImVec2& panSize, const char* panID, const ImGuiID& dockID) const

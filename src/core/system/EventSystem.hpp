@@ -18,7 +18,7 @@ private:
     };
 
 public:
-    EventSystem() = default;
+    EventSystem() = delete;
     EventSystem(std::chrono::milliseconds watchdogTime);
 
     constexpr std::string_view name() const;
