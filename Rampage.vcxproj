@@ -196,6 +196,7 @@
     </PreLinkEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="src\core\util\EventBus.cpp" />
     <ClCompile Include="src\editor\EditorSceneAdapter.cpp" />
     <ClCompile Include="src\core\interface\IDataStoreSerializer.cpp" />
     <ClCompile Include="src\core\serializer\JsonDataStoreSerializer.cpp" />
@@ -241,8 +242,11 @@
     <ClCompile Include="src\scene\MainMenu.cpp" />
     <ClCompile Include="src\scene\Sandbox.cpp" />
     <ClCompile Include="src\core\manager\WayPointManager.cpp" />
+    <ClCompile Include="src\core\util\TaskScheduler.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="src\core\util\EventBus.hpp" />
+    <ClInclude Include="src\core\util\BoundedQueue.hpp" />
     <ClInclude Include="src\editor\EditorSceneAdapter.hpp" />
     <ClInclude Include="src\core\serializer\JsonDataStoreSerializer.hpp" />
     <ClInclude Include="src\core\serializer\GameDataStoreSerializer.hpp" />
@@ -306,6 +310,7 @@
     <ClInclude Include="src\scene\Sandbox.hpp" />
     <ClInclude Include="src\scene\Scenes.hpp" />
     <ClInclude Include="src\core\manager\WayPointManager.hpp" />
+    <ClInclude Include="src\core\util\TaskScheduler.hpp" />
   </ItemGroup>
   <ItemGroup>
     <None Include="config\config.json" />

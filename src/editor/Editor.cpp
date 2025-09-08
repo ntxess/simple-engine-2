@@ -394,7 +394,8 @@ void Editor::renderPropertiesPanel(const ImVec2& pos, const ImVec2& size)
 
     static std::unordered_map<entt::entity, bool> closableGroups;
 
-    const auto& view = m_selectedSceneData->getRegistry().view<entt::entity>();
+    //const auto& view = m_selectedSceneData->getRegistry().view<entt::entity>();
+    const auto& view = m_selectedSceneData->getRegistry().view<Sprite>();
     for (const auto& entityID : view)
     {
         // Initialize the closable groups and components if it is a new entityID
