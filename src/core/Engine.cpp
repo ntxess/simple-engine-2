@@ -7,24 +7,10 @@ Engine::Engine(const std::string& relativeConfigPath, std::unique_ptr<IScene> in
     : m_appContext(std::make_shared<ApplicationContext>())
     , m_windowActive(true)
 {
-    // Start logging in the console until configuration file is read.
-    Logger::getInstance().setupConsoleLog();
-
     LOG_INFO(Logger::get()) << "Initializing system. Reading main configuration file...";
 
     if (m_appContext->configDataSerializer.load(relativeConfigPath, m_appContext->configData))
     {
-        LOG_INFO(Logger::get()) << "Successfully read config file.";
-
-        Logger::getInstance().toggleLogging(m_appContext->configData.get<bool>("debug-mode").value_or(false));
-        Logger::getInstance().setFilterSeverity(m_appContext->configData.get<std::string>("debug-log-filter-severity").value_or("warning"));
-
-        auto logPath = m_appContext->configData.get<std::string>("debug-log-folder").value_or("log/");
-        LOG_INFO(Logger::get()) << "Now logging to file. Log file located at: " << logPath.c_str();
-
-        Logger::getInstance().removeAllSinks();
-        Logger::getInstance().setupFileLog(logPath.c_str());
-
         configureWindow(std::move(initialScene));
     }
     else
@@ -42,7 +28,7 @@ Engine::Engine(const std::string& relativeConfigPath, std::unique_ptr<IScene> in
 */
 void Engine::run()
 {
-    LOG_INFO(Logger::get()) << "----- Main thread started! -----";
+    LOG_INFO(Logger::get()) << "----- Main thread started -----";
 
     startThreads();
 
@@ -97,7 +83,7 @@ void Engine::run()
         }
     }
 
-    LOG_INFO(Logger::get()) << "----- Main thread ended! -----";
+    LOG_INFO(Logger::get()) << "----- Main thread ended -----";
 }
 
 void Engine::startThreads()
@@ -147,7 +133,7 @@ void Engine::configureWindow(std::unique_ptr<IScene> initialScene)
 */
 void Engine::physicThread()
 {
-    LOG_INFO(Logger::get()) << "----- Physic thread started! -----";
+    LOG_INFO(Logger::get()) << "----- Physic thread started -----";
 
     float newTime, frameTime;
     float currentTime = m_appContext->clock.getElapsedTime().asSeconds();
@@ -172,7 +158,7 @@ void Engine::physicThread()
     m_inputConsumer.release();
     m_inputProducer.release();
 
-    LOG_INFO(Logger::get()) << "----- Physic thread ended! -----";
+    LOG_INFO(Logger::get()) << "----- Physic thread ended -----";
 }
 
 /**
@@ -180,7 +166,7 @@ void Engine::physicThread()
 */
 void Engine::renderThread()
 {
-    LOG_INFO(Logger::get()) << "----- Render thread started! -----";
+    LOG_INFO(Logger::get()) << "----- Render thread started -----";
 
     m_appContext->window.setActive(true);
 
@@ -198,7 +184,7 @@ void Engine::renderThread()
     m_inputConsumer.release();
     m_inputProducer.release();
 
-    LOG_INFO(Logger::get()) << "----- Render thread ended! -----";
+    LOG_INFO(Logger::get()) << "----- Render thread ended -----";
 }
 
 /**
@@ -206,14 +192,14 @@ void Engine::renderThread()
 */
 void Engine::audioThread()
 {
-    LOG_INFO(Logger::get()) << "----- Audio thread started! -----";
+    LOG_INFO(Logger::get()) << "----- Audio thread started -----";
 
     //while (m_windowActive)
     //{
 
     //}
 
-    LOG_INFO(Logger::get()) << "----- Audio thread ended! -----";
+    LOG_INFO(Logger::get()) << "----- Audio thread ended -----";
 }
 
 /**
@@ -221,12 +207,12 @@ void Engine::audioThread()
 */
 void Engine::resourceThread()
 {
-    LOG_INFO(Logger::get()) << "----- Resource thread started! -----";
+    LOG_INFO(Logger::get()) << "----- Resource thread started -----";
 
     //while (m_windowActive)
     //{
 
     //}
 
-    LOG_INFO(Logger::get()) << "----- Resource thread ended! -----";
+    LOG_INFO(Logger::get()) << "----- Resource thread ended -----";
 }

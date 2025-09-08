@@ -119,7 +119,7 @@ void TaskScheduler::init()
 
     for (size_t i = 0; i < m_numThreads; ++i)
     {
-        LOG_INFO(Logger::get()) << "TaskScheduler worker thread [" << i << "] started";
+        LOG_INFO(Logger::get()) << "----- TaskScheduler worker thread [" << i << "] started -----";
         m_threads.emplace_back(&TaskScheduler::workerLoop, this);
     }
 }
