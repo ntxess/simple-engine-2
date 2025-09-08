@@ -18,6 +18,7 @@
 #include "SFML/Graphics/Font.hpp"
 #include "SFML/Graphics/Text.hpp"
 #include <memory>
+#include <sstream>
 
 class Editor : public IScene
 {

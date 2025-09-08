@@ -317,6 +317,9 @@
     <None Include="config\font.json" />
     <None Include="config\texture.json" />
   </ItemGroup>
+  <ItemGroup>
+    <Font Include="assets\font\Prototype.ttf" />
+  </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>

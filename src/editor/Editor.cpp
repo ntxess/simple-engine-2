@@ -33,7 +33,10 @@ Editor::~Editor()
 
 void Editor::init()
 {
-    if (!m_defaultFont.loadFromFile("E:\\Dev\\Rampage\\assets\\font\\Prototype.ttf"))
+    DataStore fontConfigPath;
+    m_appContext->configDataSerializer.load("config/font.json", fontConfigPath);
+    auto cwd = std::filesystem::current_path().string();
+    if (!m_defaultFont.loadFromFile(cwd + fontConfigPath.get<std::string>("default_font").value()))
     {
         LOG_FATAL(Logger::get()) << "Failed to load default font.";
     }
@@ -523,7 +526,14 @@ void Editor::displayEntityVisualizers()
 
         if (m_enableEntityPosition)
         {
-            sf::String ID("\t " + std::to_string(spriteEntity.getPosition().x) + ", " + std::to_string(spriteEntity.getPosition().y) + ")");
+            std::ostringstream oss;
+            oss << "\t "
+                << std::fixed << std::setprecision(2)
+                << spriteEntity.getPosition().x << ", "
+                << spriteEntity.getPosition().y;
+
+            sf::String ID(oss.str());
+
             sf::Text IDText(ID, m_defaultFont, 20);
             IDText.setPosition(
                 spriteEntity.getPosition().x + spriteEntity.getGlobalBounds().getSize().x,

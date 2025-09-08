@@ -362,4 +362,7 @@
     <None Include="config\config.json" />
     <None Include="config\texture.json" />
   </ItemGroup>
+  <ItemGroup>
+    <Font Include="assets\font\Prototype.ttf" />
+  </ItemGroup>
 </Project>
