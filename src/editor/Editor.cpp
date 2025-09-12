@@ -194,18 +194,14 @@ entt::registry& Editor::getRegistry()
 void Editor::setupComponentTrackers(entt::registry& reg)
 {
     // Update this whenever we add a new renderable component
-    trackComponentType<Effects>(reg);
-    trackComponentType<EffectsList>(reg);
+    trackComponentType<Sprite>(reg);
+    trackComponentType<UpdateEntityPolling>(reg);
+    trackComponentType<UpdateEntityEvent>(reg);
     trackComponentType<EntityStatus>(reg);
-    trackComponentType<Hitbox>(reg);
+	trackComponentType<EffectsList>(reg);
     trackComponentType<MovementPattern>(reg);
     trackComponentType<PlayerInput>(reg);
-    trackComponentType<SceneViewRenderer>(reg);
-    trackComponentType<Sprite>(reg);
-    trackComponentType<StatusModEvent>(reg);
     trackComponentType<TeamTag>(reg);
-    trackComponentType<UpdateEntityEvent>(reg);
-    trackComponentType<UpdateEntityPolling>(reg);
 }
 
 void Editor::setupComponentVisitors(IComponentVisitor* visitor)
@@ -490,6 +486,8 @@ void Editor::renderPropertiesPanel(const ImVec2& pos, const ImVec2& size)
     const auto& view = m_selectedSceneData->getRegistry().view<entt::entity>();
     for (const auto& entityID : view)
     {
+        if (m_selectedSceneData->entities.find(entityID) == m_selectedSceneData->entities.end())
+			continue;
 
         auto& [isEntityPropClosed , entityProp] = m_selectedSceneData->entities.at(entityID);
 
