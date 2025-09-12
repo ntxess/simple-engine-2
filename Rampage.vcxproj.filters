@@ -87,7 +87,7 @@
     <ClCompile Include="src\editor\EditorComponentVisitor.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="src\editor\EditorSceneVisitor.cpp">
+    <ClCompile Include="src\editor\EditorSceneModifierVisitor.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="src\core\Engine.cpp">
@@ -278,7 +278,7 @@
     <ClInclude Include="src\editor\EditorComponentVisitor.hpp">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="src\editor\EditorSceneVisitor.hpp">
+    <ClInclude Include="src\editor\EditorSceneModifierVisitor.hpp">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="src\core\Engine.hpp">

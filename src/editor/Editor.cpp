@@ -14,7 +14,6 @@ Editor::Editor()
     , m_enableEntityPosition(false)
     , m_enableQuadTreeVisualizer(false)
     , m_enableLogViewer(false)
-    , m_totalEntity(0)
     , m_startButtonEnabled(false)
     , m_forwardFrameEnabled(false)
     , m_selectedSceneData(nullptr)
@@ -62,10 +61,11 @@ void Editor::init()
     io.ConfigWindowsMoveFromTitleBarOnly = true;
     io.ConfigDockingAlwaysTabBar = true; // ImGUI bug: Setting this true, will prevent you from using SetNextWindowSizeConstraints
                                          // which is needed for ratio-resizing of the scene view rendering panel
-
+    
     // Initializing all the scenes for selection
     int width = m_appContext->configData.get<int>("width").value();
     int height = m_appContext->configData.get<int>("height").value();
+
     m_editorSceneMap["Sandbox"] = std::make_unique<EditorSceneAdapter>(
         std::make_unique<Sandbox>(m_appContext),
         width,
@@ -90,8 +90,13 @@ void Editor::init()
     // Load in first scene of map
     m_selectedSceneKey = m_editorSceneMap.begin()->first;
     m_selectedSceneData = m_editorSceneMap.begin()->second.get();
-    m_gameView.setTexture(m_editorSceneMap[m_selectedSceneKey]->getRenderTexture().getTexture());
+    m_gameView.setTexture(m_selectedSceneData->getRenderTexture().getTexture());
+
+    // Track and Register Components for properties panel
+    setupComponentTrackers(m_selectedSceneData->getRegistry());
+    setupComponentVisitors(&m_componentVisitor);
 }
+
 
 void Editor::processEvent(const sf::Event& event)
 {
@@ -101,13 +106,13 @@ void Editor::processEvent(const sf::Event& event)
 void Editor::processInput()
 {
     if (m_startButtonEnabled)
-        m_editorSceneMap[m_selectedSceneKey]->processInput();
+        m_selectedSceneData->processInput();
 }
 
 void Editor::update()
 {
     if (m_startButtonEnabled || m_forwardFrameEnabled) {
-        m_editorSceneMap[m_selectedSceneKey]->update();
+        m_selectedSceneData->update();
         m_forwardFrameEnabled = false;
     }
 }
@@ -173,9 +178,9 @@ void Editor::setApplicationContext(ApplicationContext* data)
     m_appContext = data;
 }
 
-void Editor::accept(ISceneVisitor* visitor)
+void Editor::accept(ISceneVisitor* visitor, entt::entity entityID)
 {
-    visitor->visit(this);
+    visitor->visit(this, entityID);
 }
 
 entt::registry& Editor::getRegistry()
@@ -184,6 +189,37 @@ entt::registry& Editor::getRegistry()
         return m_selectedSceneData->getRegistry();
     else
 		throw std::runtime_error("No selected scene data available to get registry from.");
+}
+
+void Editor::setupComponentTrackers(entt::registry& reg)
+{
+    // Update this whenever we add a new renderable component
+    trackComponentType<Effects>(reg);
+    trackComponentType<EffectsList>(reg);
+    trackComponentType<EntityStatus>(reg);
+    trackComponentType<Hitbox>(reg);
+    trackComponentType<MovementPattern>(reg);
+    trackComponentType<PlayerInput>(reg);
+    trackComponentType<SceneViewRenderer>(reg);
+    trackComponentType<Sprite>(reg);
+    trackComponentType<StatusModEvent>(reg);
+    trackComponentType<TeamTag>(reg);
+    trackComponentType<UpdateEntityEvent>(reg);
+    trackComponentType<UpdateEntityPolling>(reg);
+}
+
+void Editor::setupComponentVisitors(IComponentVisitor* visitor)
+{
+    // Update this whenever we add a new renderable component
+    registerComponentVisitor<Sprite>(visitor);
+    registerComponentVisitor<UpdateEntityPolling>(visitor);
+    registerComponentVisitor<UpdateEntityEvent>(visitor);
+    registerComponentVisitor<EntityStatus>(visitor);
+    registerComponentVisitor<EffectsList>(visitor);
+    registerComponentVisitor<MovementPattern>(visitor, [this](const entt::entity& entity) {
+        this->wayPointCanvasCallback(entity);
+    });
+    registerComponentVisitor<TeamTag>(visitor);
 }
 
 void Editor::setupDockPanel(const ImVec2& panPos, const ImVec2& panSize, const char* panID, const ImGuiID& dockID) const
@@ -242,7 +278,61 @@ void Editor::renderDebugPanel(const ImVec2& pos, const ImVec2& size)
             ImGui::Checkbox("Display Quad-Tree Visualizer", &m_enableQuadTreeVisualizer);
 
             ImGui::EndTable();
-            ImGui::SliderInt("Spawn Entity", &m_totalEntity, 0, 10000);
+            
+            ImGui::BeginDisabled(m_startButtonEnabled);
+            static int selectedEntityAmount = 60;
+            static int prevEntityAmount = 0;
+
+            ImGui::SliderInt("Entity Amount", &selectedEntityAmount, 0, 1000);
+
+            if (ImGui::Button("Replace Entity", ImVec2(buttonWidth, buttonHeight)))
+            {
+                auto view = m_selectedSceneData->getRegistry().view<TeamTag>();
+                for (const auto& entityID : view)
+                {
+                    auto& team = m_selectedSceneData->getRegistry().get<TeamTag>(entityID);
+                    if (team.tag == Team::ENEMY)
+                    {
+                        m_selectedSceneData->getRegistry().destroy(entityID);
+                        m_selectedSceneData->get()->accept(&m_sceneModifierVisitor, entityID);
+                    }
+                }
+
+                // Generate a ton of sprite for testing in random places within the boundary of the window
+                generateEntities(selectedEntityAmount);
+                prevEntityAmount = selectedEntityAmount;
+            }
+
+            ImGui::SameLine();
+
+            if (ImGui::Button("Generate Entity", ImVec2(buttonWidth, buttonHeight)))
+            {
+                generateEntities(selectedEntityAmount);
+                prevEntityAmount += selectedEntityAmount;
+            }
+
+            ImGui::SameLine();
+
+            if (ImGui::Button("Remove Entity", ImVec2(buttonWidth, buttonHeight)))
+            {
+                // Destroy all of the old generated entities
+                auto view = m_selectedSceneData->getRegistry().view<TeamTag>();
+                for (const auto& entityID : view)
+                {
+                    auto& team = m_selectedSceneData->getRegistry().get<TeamTag>(entityID);
+                    if (team.tag == Team::ENEMY)
+                    {
+                        m_selectedSceneData->getRegistry().destroy(entityID);
+                        m_selectedSceneData->get()->accept(&m_sceneModifierVisitor, entityID);
+                    }
+                }
+                prevEntityAmount = 0;
+            }
+
+            static int frameRateTarget = 60;
+            if (ImGui::SliderInt("Frame Rate", &frameRateTarget, 0, 255))
+                m_appContext->deltaTime = static_cast<float>(1000.f / frameRateTarget);
+            ImGui::EndDisabled();
         }
     }
 
@@ -253,8 +343,10 @@ void Editor::renderDebugPanel(const ImVec2& pos, const ImVec2& size)
             if (ImGui::Selectable(sceneName.c_str(), m_selectedSceneKey == sceneName))
             {
                 m_selectedSceneKey = sceneName;
-                m_selectedSceneData = m_editorSceneMap[sceneName].get();
-                //m_reg = &m_editorSceneMap[sceneName]->getRegistry();
+                m_selectedSceneData = m_editorSceneMap.at(sceneName).get();
+
+                // Re-register all the tracker so that the properties panel update real-time
+                setupComponentTrackers(m_selectedSceneData->getRegistry());
             }
         }
     }
@@ -346,11 +438,11 @@ void Editor::renderSceneViewPanel(const ImVec2& pos, const ImVec2& size)
     ImGui::Begin("Scene View Panel", nullptr, 0);
     ImGui::PopStyleVar();
 
-    auto& renderTexture = m_editorSceneMap[m_selectedSceneKey]->getRenderTexture();
+    auto& renderTexture = m_selectedSceneData->getRenderTexture();
 
     // Clear the previous buffer then call to the actual scenes render function
     renderTexture.clear();
-    m_editorSceneMap[m_selectedSceneKey]->render();
+    m_selectedSceneData->render();
 
     displayEntityVisualizers();
     displayCollisionSystemVisualizer();
@@ -395,77 +487,51 @@ void Editor::renderPropertiesPanel(const ImVec2& pos, const ImVec2& size)
     ImGui::SetNextWindowSize(size, ImGuiCond_Once);
     ImGui::Begin("Properties Panel", nullptr, ImGuiWindowFlags_AlwaysVerticalScrollbar);
 
-    static std::unordered_map<entt::entity, bool> closableGroups;
-
-    //const auto& view = m_selectedSceneData->getRegistry().view<entt::entity>();
-    const auto& view = m_selectedSceneData->getRegistry().view<Sprite>();
+    const auto& view = m_selectedSceneData->getRegistry().view<entt::entity>();
     for (const auto& entityID : view)
     {
-        // Initialize the closable groups and components if it is a new entityID
-        if (!closableGroups.count(entityID) || !m_entities.count(entityID))
-        {
-            closableGroups[entityID] = true;
-            m_entities.emplace(entityID, ComponentPropData(entityID));
-            updateWayPointCanvas(entityID, m_entities[entityID]);
-        }
 
-        //std::string ID = "Entity " + std::to_string(static_cast<unsigned int>(entityID));
-        if (ImGui::CollapsingHeader(m_entities[entityID].name.c_str(), &closableGroups[entityID]))
+        auto& [isEntityPropClosed , entityProp] = m_selectedSceneData->entities.at(entityID);
+
+        if (ImGui::CollapsingHeader(entityProp.name.c_str(), isEntityPropClosed))
         {
             ImGui::BeginDisabled(m_startButtonEnabled);
-            ImGui::BeginChild(("##EntityColm" + m_entities[entityID].name).c_str(), { ImGui::GetWindowWidth() - 26.f, 0.f }, ImGuiChildFlags_AutoResizeY);
+            ImGui::BeginChild(("##EntityColm" + entityProp.name).c_str(), { ImGui::GetWindowWidth() - 26.f, 0.f }, ImGuiChildFlags_AutoResizeY);
 
-            renderComponentProperties<Sprite>(
-                entityID,
-                "Sprite##" + m_entities[entityID].name,
-                m_entities[entityID].closableComponents[0],
-                m_componentVisitor
-            );
-
-            renderComponentProperties<UpdateEntityPolling>(
-                entityID,
-                "UpdateEntityPolling##" + m_entities[entityID].name,
-                m_entities[entityID].closableComponents[1],
-                m_componentVisitor
-            );
-
-            renderComponentProperties<UpdateEntityEvent>(
-                entityID,
-                "UpdateEntityEvent##" + m_entities[entityID].name,
-                m_entities[entityID].closableComponents[2],
-                m_componentVisitor
-            );
-
-            renderComponentProperties<EntityStatus>(
-                entityID,
-                "EntityStatus##" + m_entities[entityID].name,
-                m_entities[entityID].closableComponents[3],
-                m_componentVisitor
-            );
-
-            renderComponentProperties<EffectsList>(
-                entityID,
-                "EffectsList##" + m_entities[entityID].name,
-                m_entities[entityID].closableComponents[4],
-                m_componentVisitor
-            );
-
-            renderComponentProperties<MovementPattern>(
-                entityID,
-                "MovementPattern##" + m_entities[entityID].name,
-                m_entities[entityID].closableComponents[5],
-                m_componentVisitor,
-                [this](const entt::entity& entity) {
-                    this->wayPointCanvasCallback(entity);
+            bool hasClosedSomething = false;
+            for (auto& [isCompClosed, propCompType] : entityProp.components)
+            {
+                if (ImGui::CollapsingHeader((propCompType.name() + std::string("##") + entityProp.name).c_str(), &isCompClosed, ImGuiTreeNodeFlags_DefaultOpen))
+                {
+                    m_selectedSceneData->renderFunc.at(propCompType)(m_selectedSceneData->getRegistry(), entityID);
                 }
-            );
 
-            renderComponentProperties<TeamTag>(
-                entityID,
-                "TeamTag##" + m_entities[entityID].name,
-                m_entities[entityID].closableComponents[6],
-                m_componentVisitor
-            );
+				// Delay the removal of the component until after the loop to avoid invalidating the iterator
+                hasClosedSomething |= isCompClosed;
+            }
+
+            if (hasClosedSomething)
+            {
+                // Erase all closed components from the properties panel
+                const auto& it = std::find_if(
+                    entityProp.components.begin(), 
+                    entityProp.components.end(), 
+                    [](const std::pair<bool, std::type_index>& comp) { 
+                        return comp.first == false; 
+				});
+
+                if (it != entityProp.components.end())
+                {
+                    std::type_index typeIndex = it->second;
+
+                    if (typeIndex == typeid(Sprite))
+                    {
+                        m_selectedSceneData->get()->accept(&m_sceneModifierVisitor, entityID);
+                    }
+                    entityProp.components.erase(it);
+                    LOG_DEBUG(Logger::get()) << "Removed component [" << typeIndex.name() << "] from entity [" << static_cast<unsigned int>(entityID) << "]";
+				}
+            }
 
             ImGui::EndChild();
             ImGui::EndDisabled();
@@ -477,7 +543,7 @@ void Editor::renderPropertiesPanel(const ImVec2& pos, const ImVec2& size)
 
 void Editor::displayEntityVisualizers()
 {
-    auto& sceneRenderTexture = m_editorSceneMap[m_selectedSceneKey]->getRenderTexture();
+    auto& sceneRenderTexture = m_selectedSceneData->getRenderTexture();
     const auto& view = m_selectedSceneData->getRegistry().view<Sprite>();
     for (const auto& entityID : view)
     {
@@ -504,8 +570,8 @@ void Editor::displayEntityVisualizers()
             border.setFillColor(sf::Color::Transparent);
             border.setOutlineThickness(2);
 
-            // TODO: Remove findEntityID for a more robust solution, think visitor for scenes (maybe)
-            entt::entity player = findEntityID<PlayerInput>();
+            // TODO: Remove findEntityID for a more robust solution
+            static entt::entity player = findEntityID<PlayerInput>();
             if (player != entt::null &&
                 player != entityID &&
                 m_selectedSceneData->getRegistry().get<Sprite>(player).getGlobalBounds().intersects(spriteEntity.getGlobalBounds()))
@@ -522,6 +588,18 @@ void Editor::displayEntityVisualizers()
                 border.setOutlineColor(sf::Color::Green);
             }
             sceneRenderTexture.draw(border);
+        }
+
+        if (m_enableEntityHeading)
+        {
+            sf::RectangleShape northHeading(sf::Vector2f(50, 2));
+            sf::RectangleShape eastHeading(sf::Vector2f(50, 2));
+            northHeading.setPosition(spriteEntity.getPosition());
+            northHeading.setRotation(spriteEntity.getRotation() - 90);
+            eastHeading.setPosition(spriteEntity.getPosition());
+            eastHeading.setRotation(spriteEntity.getRotation());
+            sceneRenderTexture.draw(northHeading);
+            sceneRenderTexture.draw(eastHeading);
         }
 
         if (m_enableEntityPosition)
@@ -548,8 +626,8 @@ void Editor::displayCollisionSystemVisualizer()
 {
     if (m_enableQuadTreeVisualizer)
     {
-        auto& sceneRenderTexture = m_editorSceneMap[m_selectedSceneKey]->getRenderTexture();
-        auto manager = static_cast<Sandbox*>(m_editorSceneMap[m_selectedSceneKey]->get())->getSystemManager();
+        auto& sceneRenderTexture = m_selectedSceneData->getRenderTexture();
+        auto manager = static_cast<Sandbox*>(m_selectedSceneData->get())->getSystemManager();
         manager->getSystem<CollisionSystem>()->draw(sceneRenderTexture);
     }
 }
@@ -582,18 +660,20 @@ ImVec2 Editor::getCenteredTLPos(const ImVec2& region, const float& aspectRatio)
 
 void Editor::wayPointCanvasCallback(const entt::entity& entityID)
 {
+    auto& [_, compProp] = m_selectedSceneData->entities.at(entityID);
+
     if (ImGui::Button(
-        ("Set New Path##PathDesigner" + m_entities[entityID].name).c_str(),
+        ("Set New Path##PathDesigner" + compProp.name).c_str(),
         { ImGui::GetWindowWidth(), 22.f }
     ))
     {
-        m_entities[entityID].isWaypointEditorOpen = true;
+        compProp.isWaypointEditorOpen = true;
     }
     ImGui::NewLine();
 
-    if (m_entities[entityID].isWaypointEditorOpen)
+    if (compProp.isWaypointEditorOpen)
     {
-        drawWayPointCanvas(entityID, m_entities[entityID]);
+        drawWayPointCanvas(entityID, compProp);
     }
 }
 
@@ -720,6 +800,7 @@ void Editor::drawWayPointContextMenu(const entt::entity& entityID, ComponentProp
 
 void Editor::updateWayPointCanvas(const entt::entity& entityID, ComponentPropData& cmpntData)
 {
+	// Populate the waypoint canvas with the current movement pattern of the entity
     if (m_selectedSceneData->getRegistry().all_of<MovementPattern, Sprite>(entityID))
     {
         auto& movement = m_selectedSceneData->getRegistry().get<MovementPattern>(entityID);
@@ -848,5 +929,51 @@ void Editor::processWayPointCanvasInput(const ImVec2& size, const ImVec2& origin
 
         // Clamp zoom to prevent flipping or disappearing
         cmpntData.zoom = ImClamp(cmpntData.zoom, 0.1f, 10.0f);
+    }
+}
+
+void Editor::generateEntities(size_t numOfEntities)
+{
+    float width = static_cast<float>(m_appContext->configData.get<int>("width").value());
+    float height = static_cast<float>(m_appContext->configData.get<int>("height").value());
+
+    // Generate a ton of sprite for testing in random places within the boundary of the window
+    std::random_device dev;
+    std::mt19937 rng(dev());
+    std::uniform_int_distribution<std::mt19937::result_type> dist6(0, static_cast<unsigned int>(width));
+
+    for (size_t i = 0; i < numOfEntities; i++)
+    {
+        std::unique_ptr<WayPoint> root = nullptr;
+        WayPoint* last = nullptr;
+
+        for (size_t j = 0; j <= size_t(dist6(rng)) % 10; j++)
+        {
+            std::unique_ptr<WayPoint> point = std::make_unique<WayPoint>(sf::Vector2f{ float(dist6(rng) % int(width)), float(dist6(rng) % int(height)) });
+
+            if (j != 0)
+            {
+                last->link(std::move(point));
+                last->nextWP->distanceTotal = last->distanceTotal + last->distanceToNext;
+                last = last->next();
+            }
+            else
+            {
+                root = std::move(point);
+                last = root.get();
+            }
+        }
+
+        // Entity create and store into the scene's ENTT::entity registry
+        entt::entity mob = m_selectedSceneData->createEntity();
+        m_selectedSceneData->getRegistry().emplace<Sprite>(mob, m_appContext->textureManager["player"]);
+        m_selectedSceneData->getRegistry().get<Sprite>(mob).setPosition(root->coordinate.x, root->coordinate.y);
+        m_selectedSceneData->getRegistry().emplace<EntityStatus>(mob);
+        m_selectedSceneData->getRegistry().get<EntityStatus>(mob).values["HP"] = 100.f;
+        m_selectedSceneData->getRegistry().get<EntityStatus>(mob).values["Speed"] = 0.5f;
+        m_selectedSceneData->getRegistry().emplace<TeamTag>(mob, Team::ENEMY);
+        m_selectedSceneData->getRegistry().emplace<MovementPattern>(mob, std::move(root), true);
+
+        updateWayPointCanvas(mob, m_selectedSceneData->entities.at(mob).second);
     }
 }

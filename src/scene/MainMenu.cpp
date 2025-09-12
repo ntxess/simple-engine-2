@@ -55,9 +55,9 @@ void MainMenu::setApplicationContext(ApplicationContext* context)
     m_appContext = context;
 }
 
-void MainMenu::accept(ISceneVisitor* visitor)
+void MainMenu::accept(ISceneVisitor* visitor, entt::entity entityID)
 {
-    visitor->visit(this);
+    visitor->visit(this, entityID);
 }
 
 entt::registry& MainMenu::getRegistry()

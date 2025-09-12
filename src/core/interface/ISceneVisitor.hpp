@@ -1,5 +1,7 @@
 #pragma once
 
+#include "entt/entity/entity.hpp"
+
 class Sandbox;
 class MainMenu;
 class GameOfLifeSim;
@@ -9,8 +11,8 @@ class ISceneVisitor
 {
 public:
     virtual ~ISceneVisitor() = default;
-    virtual void visit(const Sandbox* sandbox) = 0;
-    virtual void visit(const MainMenu* mainMenu) = 0;
-    virtual void visit(const GameOfLifeSim* gameOfLifeSim) = 0;
-    virtual void visit(const Editor* editor) = 0;
+    virtual void visit(Sandbox* sandbox, entt::entity entityID) = 0;
+    virtual void visit(MainMenu* mainMenu, entt::entity entityID) = 0;
+    virtual void visit(GameOfLifeSim* gameOfLifeSim, entt::entity entityID) = 0;
+    virtual void visit(Editor* editor, entt::entity entityID) = 0;
 };

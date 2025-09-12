@@ -54,43 +54,43 @@ void Sandbox::init()
         });
     m_reg.get<EffectsList>(m_player).effectsList.push_back({ EffectType::TEMPTIMED, Effects{"HP", -10.f, std::chrono::milliseconds(5000)} });
 
-    // Generate a ton of sprite for testing in random places within the boundary of the window
-    std::random_device dev;
-    std::mt19937 rng(dev());
-    std::uniform_int_distribution<std::mt19937::result_type> dist6(0, static_cast<unsigned int>(width));
+    //// Generate a ton of sprite for testing in random places within the boundary of the window
+    //std::random_device dev;
+    //std::mt19937 rng(dev());
+    //std::uniform_int_distribution<std::mt19937::result_type> dist6(0, static_cast<unsigned int>(width));
 
-    for (size_t i = 0; i < 10; i++)
-    {
-        std::unique_ptr<WayPoint> root = nullptr;
-        WayPoint* last = nullptr;
+    //for (size_t i = 0; i < 10000; i++)
+    //{
+    //    std::unique_ptr<WayPoint> root = nullptr;
+    //    WayPoint* last = nullptr;
 
-        for (size_t j = 0; j <= size_t(dist6(rng)) % 10; j++)
-        {
-            std::unique_ptr<WayPoint> point = std::make_unique<WayPoint>(sf::Vector2f{ float(dist6(rng) % int(width / 2.f)), float(dist6(rng) % int(height / 2.f)) });
+    //    for (size_t j = 0; j <= size_t(dist6(rng)) % 10; j++)
+    //    {
+    //        std::unique_ptr<WayPoint> point = std::make_unique<WayPoint>(sf::Vector2f{ float(dist6(rng) % int(width)), float(dist6(rng) % int(height)) });
 
-            if (j != 0)
-            {
-                last->link(std::move(point));
-                last->nextWP->distanceTotal = last->distanceTotal + last->distanceToNext;
-                last = last->next();
-            }
-            else
-            {
-                root = std::move(point);
-                last = root.get();
-            }
-        }
+    //        if (j != 0)
+    //        {
+    //            last->link(std::move(point));
+    //            last->nextWP->distanceTotal = last->distanceTotal + last->distanceToNext;
+    //            last = last->next();
+    //        }
+    //        else
+    //        {
+    //            root = std::move(point);
+    //            last = root.get();
+    //        }
+    //    }
 
-        // Entity create and store into the scene's ENTT::entity registry
-        entt::entity mob = m_reg.create();
-        m_reg.emplace<Sprite>(mob, m_appContext->textureManager["player"]);
-        m_reg.get<Sprite>(mob).setPosition(root->coordinate.x, root->coordinate.y);
-        m_reg.emplace<EntityStatus>(mob);
-        m_reg.get<EntityStatus>(mob).values["HP"] = 100.f;
-        m_reg.get<EntityStatus>(mob).values["Speed"] = 250.f;
-        m_reg.emplace<TeamTag>(mob, Team::ENEMY);
-        m_reg.emplace<MovementPattern>(mob, std::move(root), true);
-    }
+    //    // Entity create and store into the scene's ENTT::entity registry
+    //    entt::entity mob = m_reg.create();
+    //    m_reg.emplace<Sprite>(mob, m_appContext->textureManager["player"]);
+    //    m_reg.get<Sprite>(mob).setPosition(root->coordinate.x, root->coordinate.y);
+    //    m_reg.emplace<EntityStatus>(mob);
+    //    m_reg.get<EntityStatus>(mob).values["HP"] = 100.f;
+    //    m_reg.get<EntityStatus>(mob).values["Speed"] = 0.5f;
+    //    m_reg.emplace<TeamTag>(mob, Team::ENEMY);
+    //    m_reg.emplace<MovementPattern>(mob, std::move(root), true);
+    //}
 
     m_system.addSystem<CollisionSystem>(m_reg, sf::Vector2f{ 0.f, 0.f }, m_appContext->window.getSize());
     m_system.addSystem<EventSystem>(std::chrono::milliseconds(36000));
@@ -189,9 +189,9 @@ void Sandbox::setApplicationContext(ApplicationContext* context)
     m_appContext = context;
 }
 
-void Sandbox::accept(ISceneVisitor* visitor)
+void Sandbox::accept(ISceneVisitor* visitor, entt::entity entityID)
 {
-    visitor->visit(this);
+    visitor->visit(this, entityID);
 }
 
 entt::registry& Sandbox::getRegistry()

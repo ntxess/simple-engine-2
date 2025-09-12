@@ -5,6 +5,7 @@
 #include "SFML/Audio.hpp"
 #include "SFML/Graphics.hpp"
 #include <atomic>
+#include <chrono>
 #include <memory>
 #include <semaphore>
 #include <thread>
@@ -32,6 +33,5 @@ private:
     std::thread m_renderThread;
     std::thread m_audioThread;
     std::thread m_resourceThread;
-    std::binary_semaphore m_inputProducer{ 0 };
-    std::binary_semaphore m_inputConsumer{ 1 };
+    std::mutex m_mutex;
 };

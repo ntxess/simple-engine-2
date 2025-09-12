@@ -20,17 +20,17 @@ constexpr size_t numQueueCapacity = 200;
 
 struct ApplicationContext
 {
-    sf::Clock                        clock;
-    sf::RenderWindow                 window;
-    sf::View                         viewport;
-    float                            aspectRatio;
-    float                            deltaTime;
-    DataStore                        configData;
-    DataStore                        gameData;
-    JsonDataStoreSerializer          configDataSerializer;
-    GameDataStoreSerializer          gameDataSerializer;
-    ResourceManager<sf::Texture>     textureManager;
-    ResourceManager<sf::SoundBuffer> audioManager;
-    SceneManager                     sceneManager;
-    EventBus                         eventBus{ numEventThread, numQueueCapacity };
+	sf::Clock                        clock;
+	sf::RenderWindow                 window;
+	sf::View                         viewport;
+	float                            aspectRatio;
+	float                            deltaTime;
+	DataStore                        configData;
+	DataStore                        gameData;
+	JsonDataStoreSerializer          configDataSerializer;
+	GameDataStoreSerializer          gameDataSerializer;
+	ResourceManager<sf::Texture>     textureManager;
+	ResourceManager<sf::SoundBuffer> audioManager;
+	SceneManager                     sceneManager;
+	EventBus                         eventBus{ numEventThread, numQueueCapacity };
 };

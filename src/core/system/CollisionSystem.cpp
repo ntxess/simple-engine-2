@@ -154,6 +154,13 @@ void CollisionSystem::collisionUpdate(entt::registry& reg)
 void CollisionSystem::remove(entt::registry& reg, const entt::entity entityID)
 {
     m_quadTree->remove(reg, entityID);
+    LOG_INFO(Logger::get()) << "Removed entity [" << static_cast<unsigned int>(entityID) << "] from Quadtree";
+}
+
+void CollisionSystem::clear()
+{
+    m_quadTree->clear();
+    LOG_INFO(Logger::get()) << "Cleared all entities from Quadtree";
 }
 
 void CollisionSystem::draw(sf::RenderTexture& rt)

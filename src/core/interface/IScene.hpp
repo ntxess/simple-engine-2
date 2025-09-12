@@ -18,6 +18,6 @@ public:
     virtual void pause() = 0;
     virtual void resume() = 0;
     virtual void setApplicationContext(ApplicationContext* context) = 0;
-    virtual void accept(ISceneVisitor* visitor) = 0;
+    virtual void accept(ISceneVisitor* visitor, entt::entity entityID) = 0;
     virtual entt::registry& getRegistry() = 0;
 };

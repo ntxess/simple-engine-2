@@ -2,7 +2,7 @@
 
 #include "EditorComponentVisitor.hpp"
 #include "EditorSceneAdapter.hpp"
-#include "EditorSceneVisitor.hpp"
+#include "EditorSceneModifierVisitor.hpp"
 #include "../core/ApplicationContext.hpp"
 #include "../core/Components.hpp"
 #include "../core/Systems.hpp"
@@ -17,33 +17,13 @@
 #include "entt/entity/registry.hpp"
 #include "SFML/Graphics/Font.hpp"
 #include "SFML/Graphics/Text.hpp"
+#include <functional>
 #include <memory>
 #include <sstream>
 
 class Editor : public IScene
 {
 private:
-    struct ComponentPropData
-    {
-        entt::entity entityID{};
-        std::string name;
-        std::array<bool, 7> closableComponents{};
-
-        // Waypoint Editor
-        bool isWaypointEditorOpen{ false };
-        ImVector<ImVec2> points;
-        ImVec2 scrolling{ 0.f, 0.f };
-        float zoom = 1.0f;
-
-        ComponentPropData() = default;
-        ComponentPropData(entt::entity entityID)
-            : entityID(entityID)
-            , name("Entity " + std::to_string(static_cast<unsigned int>(entityID)))
-        {
-            closableComponents.fill(true);
-        }
-    };
-
     enum class WayPointEditMode
     {
         Add,
@@ -64,10 +44,12 @@ public:
     void pause() override;
     void resume() override;
     void setApplicationContext(ApplicationContext* context) override;
-    void accept(ISceneVisitor* visitor) override;
+    void accept(ISceneVisitor* visitor, entt::entity entityID) override;
     entt::registry& getRegistry() override;
 
 private:
+    void setupComponentTrackers(entt::registry& reg);
+    void setupComponentVisitors(IComponentVisitor* visitor);
     void setupDockPanel(const ImVec2& panPos, const ImVec2& panSize, const char* panID, const ImGuiID& dockID) const;
     void renderDebugPanel(const ImVec2& pos, const ImVec2& size);
     void renderPerformancePanel(const ImVec2& pos, const ImVec2& size);
@@ -90,17 +72,55 @@ private:
     void updateWayPointComponent(const entt::entity& entityID, ComponentPropData& cmpntData, WayPointEditMode mode);
     void processWayPointCanvasInput(const ImVec2& size, const ImVec2& origin, const entt::entity& entityID, ComponentPropData& cmpntData);
 
+    void generateEntities(size_t numOfEntities);
+
     template<typename... Args>
     entt::entity findEntityID();
 
     template<typename T>
-    bool renderComponentProperties(
-        const entt::entity& entityID, 
-        std::string_view componentID, 
-        bool& visible, 
-        EditorComponentVisitor& visitor,
-        std::function<void(const entt::entity&)> callback = nullptr
-    );
+    void trackComponentType(entt::registry& reg)
+    {
+        LOG_INFO(Logger::get()) << "Tracking [" << typeid(T).name() << "] component";
+
+        // The lambda signature must match: void(entt::registry&, entt::entity)
+        reg.on_construct<T>().connect<&Editor::onComponentConstruct<T>>(this);
+        reg.on_destroy<T>().connect<&Editor::onComponentDestroy<T>>(this);
+    }
+
+    template<typename T>
+    void onComponentConstruct(entt::registry& registry, entt::entity entityID)
+    {
+        LOG_INFO(Logger::get()) << "Entity [" << static_cast<unsigned int>(entityID) << "] onComponentConstruct() triggered";
+        m_selectedSceneData->entities.at(entityID).second.components.emplace_back(std::pair{ true, std::type_index(typeid(T)) });
+    }
+
+    template<typename T>
+    void onComponentDestroy(entt::registry& registry, entt::entity entityID)
+    {
+        LOG_INFO(Logger::get()) << "Entity [" << static_cast<unsigned int>(entityID) << "] onComponentDestroy() triggered";
+
+        auto& components = m_selectedSceneData->entities.at(entityID).second.components;
+        components.erase(
+            std::remove_if(
+                components.begin(),
+                components.end(),
+                [](const std::pair<bool, std::type_index>& comp) {
+                    return comp.second == std::type_index(typeid(T));
+                }
+            ),
+            components.end()
+        );
+    }
+
+    template<typename T>
+    void registerComponentVisitor(IComponentVisitor* visitor, std::function<void(const entt::entity&)> callback = std::function<void(const entt::entity&)>{})
+    {
+        m_selectedSceneData->renderFunc[std::type_index(typeid(T))] = [visitor, callback](entt::registry& reg, const entt::entity entityID) {
+            auto& component = reg.get<T>(entityID);
+            component.accept(visitor, entityID);
+            if (callback) callback(entityID);
+        };
+    }
 
 private:
     ApplicationContext* m_appContext;
@@ -122,7 +142,6 @@ private:
     bool m_enableQuadTreeVisualizer;
     bool m_enableLogViewer;
     ImVec2 m_sceneDrawScale;
-    int m_totalEntity;
 
     std::atomic<bool> m_startButtonEnabled;
     std::atomic<bool> m_forwardFrameEnabled;
@@ -133,11 +152,12 @@ private:
     EditorSceneAdapter* m_selectedSceneData;
     sf::Sprite m_gameView;
 
-    // Component Data used for modifying properties in PropertiesPanel
-    std::unordered_map<entt::entity, ComponentPropData> m_entities;
+    //// Component Data used for modifying properties in PropertiesPanel
+    //std::unordered_map<entt::entity, std::pair<bool, ComponentPropData>> m_entities;
+    //std::unordered_map<std::type_index, std::function<void(entt::registry&, entt::entity)>> m_renderFunc;
 
     EditorComponentVisitor m_componentVisitor;
-    EditorSceneVisitor m_sceneVisitor;
+    EditorSceneModifierVisitor m_sceneModifierVisitor;
 };
 
 template<typename... Args>
@@ -151,35 +171,4 @@ inline entt::entity Editor::findEntityID()
     }
 
     return entt::null;
-}
-
-template<typename T>
-inline bool Editor::renderComponentProperties(const entt::entity& entityID, std::string_view componentID, bool& visible, EditorComponentVisitor& visitor, std::function<void(const entt::entity&)> callback)
-{
-    if (!m_selectedSceneData->getRegistry().all_of<T>(entityID))
-    {
-        return false;
-    }
-
-    if (ImGui::CollapsingHeader(componentID.data(), &visible, ImGuiTreeNodeFlags_DefaultOpen))
-    {
-        auto& component = m_selectedSceneData->getRegistry().get<T>(entityID);
-        component.accept(&visitor, entityID);
-
-        if (callback)
-        {
-            callback(entityID);
-        }
-    }
-
-    if (!visible)
-    {
-        // TODO: Remove the sprite component from QuadTree
-        m_selectedSceneData->getRegistry().remove<T>(entityID);
-        //static_cast<Sandbox*>(
-        // m_sceneMap[m_selectedSceneKey]->scene.get())->getSystemManager()->getSystem<CollisionSystem>()->remove(*m_reg, entityID);
-        return false;
-    }
-
-    return true;
 }

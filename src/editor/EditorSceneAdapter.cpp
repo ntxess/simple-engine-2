@@ -6,6 +6,12 @@ EditorSceneAdapter::EditorSceneAdapter(std::unique_ptr<IScene> scn, unsigned int
     m_scene->init();
     m_renderTextureID = m_scene->getRegistry().create();
     m_scene->getRegistry().emplace<SceneViewRenderer>(m_renderTextureID, width, height, settings);
+
+    // Sync the already generated entities to the map of ComponentPropData at start to prevent invalid index
+    for (const auto& entityID : m_scene->getRegistry().view<entt::entity>())
+    {
+        createCompPropEntry(entityID);
+    }
 }
 
 void EditorSceneAdapter::processInput()
@@ -43,3 +49,16 @@ IScene* EditorSceneAdapter::get() const
     return m_scene.get();
 }
 
+entt::entity EditorSceneAdapter::createEntity()
+{
+    entt::entity entityID = m_scene->getRegistry().create();
+    LOG_DEBUG(Logger::get()) << "Entity [" << static_cast<unsigned int>(entityID) << "] created";
+    createCompPropEntry(entityID);
+    return entityID;
+}
+
+void EditorSceneAdapter::createCompPropEntry(const entt::entity entityID)
+{
+    LOG_INFO(Logger::get()) << "Syncing entity [" << static_cast<unsigned int>(entityID) << "] with ComponentPropData map";
+    entities.emplace(entityID, std::pair{ true, ComponentPropData{entityID} });
+}

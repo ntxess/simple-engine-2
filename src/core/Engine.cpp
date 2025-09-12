@@ -112,10 +112,10 @@ void Engine::configureWindow(std::unique_ptr<IScene> initialScene)
     unsigned int width = m_appContext->configData.get<int>("width").value_or(1920);
     unsigned int height = m_appContext->configData.get<int>("height").value_or(1080);
     m_appContext->aspectRatio = static_cast<float>(width) / static_cast<float>(height);
-    m_appContext->deltaTime = static_cast<float>(1.f / m_appContext->configData.get<double>("frame-rate").value_or(60));
+    m_appContext->deltaTime = static_cast<float>(1000.f / m_appContext->configData.get<double>("frame-rate").value_or(60.f));
     m_appContext->window.create(sf::VideoMode(width, height), name, sf::Style::Default, settings);
     m_appContext->window.setActive(false);
-    m_appContext->window.setFramerateLimit(static_cast<unsigned int>(m_appContext->configData.get<double>("frame-rate").value_or(60)));
+    m_appContext->window.setFramerateLimit(static_cast<unsigned int>(m_appContext->configData.get<double>("frame-rate").value_or(60.f)));
     m_appContext->sceneManager.addScene(std::move(initialScene), true, m_appContext.get());
     m_appContext->sceneManager.processChange();
 
@@ -135,28 +135,28 @@ void Engine::physicThread()
 {
     LOG_INFO(Logger::get()) << "----- Physic thread started -----";
 
-    float newTime, frameTime;
-    float currentTime = m_appContext->clock.getElapsedTime().asSeconds();
-    float accumulator = 0.0f;
+    auto prevTime = std::chrono::steady_clock::now();
+    double accumulator = 0.0f;
 
     while (m_windowActive)
     {
-        newTime = m_appContext->clock.getElapsedTime().asSeconds();
-        frameTime = newTime - currentTime;
-        currentTime = newTime;
-        accumulator += frameTime;
+        auto currTime = std::chrono::steady_clock::now();
+        auto elapsedTime = std::chrono::duration<double, std::milli>(currTime - prevTime).count();
+        prevTime = currTime;
+        accumulator += elapsedTime;
 
+        // While the delay between frames is larger than the expected delta time, 
+        // run the update() call until we catch up before the next render() call.
+        // This has the benfit of maintaining a constant update tick but also catchup 
+        // to real-time if the engine ever hits a major lag point.
         while (m_windowActive && accumulator >= m_appContext->deltaTime)
         {
-            m_inputConsumer.acquire();
+            std::unique_lock<std::mutex> guard(m_mutex);
             m_appContext->sceneManager.getActiveScene()->update();
-            m_inputProducer.release();
+            guard.unlock();
             accumulator -= m_appContext->deltaTime;
         }
     }
-
-    m_inputConsumer.release();
-    m_inputProducer.release();
 
     LOG_INFO(Logger::get()) << "----- Physic thread ended -----";
 }
@@ -174,15 +174,12 @@ void Engine::renderThread()
     {
         m_appContext->window.clear();
         m_appContext->sceneManager.processChange();
-        m_inputProducer.acquire();
+        std::unique_lock<std::mutex> guard(m_mutex);
         m_appContext->sceneManager.getActiveScene()->processInput();
-        m_inputConsumer.release();
+        guard.unlock();
         m_appContext->sceneManager.getActiveScene()->render();
         m_appContext->window.display();
     }
-
-    m_inputConsumer.release();
-    m_inputProducer.release();
 
     LOG_INFO(Logger::get()) << "----- Render thread ended -----";
 }

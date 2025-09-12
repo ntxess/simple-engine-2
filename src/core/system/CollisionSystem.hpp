@@ -20,6 +20,7 @@ public:
     constexpr std::string_view name() const;
     void update(entt::registry& reg, const float& dt = 0.f);
     void remove(entt::registry& reg, const entt::entity entityID);
+    void clear();
     void draw(sf::RenderTexture& rt);
 
 private:

@@ -176,9 +176,9 @@ void GameOfLifeSim::setApplicationContext(ApplicationContext* context)
     m_appContext = context;
 }
 
-void GameOfLifeSim::accept(ISceneVisitor* visitor)
+void GameOfLifeSim::accept(ISceneVisitor* visitor, entt::entity entityID)
 {
-    visitor->visit(this);
+    visitor->visit(this, entityID);
 }
 
 entt::registry& GameOfLifeSim::getRegistry()

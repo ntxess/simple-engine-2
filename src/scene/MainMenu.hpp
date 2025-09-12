@@ -24,7 +24,7 @@ public:
     void pause() override final;
     void resume() override final;
     void setApplicationContext(ApplicationContext* context) override final;
-    void accept(ISceneVisitor* visitor) override final;
+    void accept(ISceneVisitor* visitor, entt::entity entityID) override final;
     entt::registry& getRegistry() override final;
 
 private:

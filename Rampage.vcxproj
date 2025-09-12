@@ -236,7 +236,7 @@
     <ClCompile Include="src\core\util\QuadTree.cpp" />
     <ClCompile Include="src\editor\Editor.cpp" />
     <ClCompile Include="src\editor\EditorComponentVisitor.cpp" />
-    <ClCompile Include="src\editor\EditorSceneVisitor.cpp" />
+    <ClCompile Include="src\editor\EditorSceneModifierVisitor.cpp" />
     <ClCompile Include="src\main.cpp" />
     <ClCompile Include="src\scene\GameOfLifeSim.cpp" />
     <ClCompile Include="src\scene\MainMenu.cpp" />
@@ -304,7 +304,7 @@
     <ClInclude Include="src\core\util\QuadTree.hpp" />
     <ClInclude Include="src\editor\Editor.hpp" />
     <ClInclude Include="src\editor\EditorComponentVisitor.hpp" />
-    <ClInclude Include="src\editor\EditorSceneVisitor.hpp" />
+    <ClInclude Include="src\editor\EditorSceneModifierVisitor.hpp" />
     <ClInclude Include="src\scene\GameOfLifeSim.hpp" />
     <ClInclude Include="src\scene\MainMenu.hpp" />
     <ClInclude Include="src\scene\Sandbox.hpp" />
