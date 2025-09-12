@@ -48,7 +48,6 @@ public:
     entt::registry& getRegistry() override;
 
 private:
-    void setupComponentTrackers(entt::registry& reg);
     void setupComponentVisitors(IComponentVisitor* visitor);
     void setupDockPanel(const ImVec2& panPos, const ImVec2& panSize, const char* panID, const ImGuiID& dockID) const;
     void renderDebugPanel(const ImVec2& pos, const ImVec2& size);
@@ -76,41 +75,6 @@ private:
 
     template<typename... Args>
     entt::entity findEntityID();
-
-    template<typename T>
-    void trackComponentType(entt::registry& reg)
-    {
-        LOG_INFO(Logger::get()) << "Tracking [" << typeid(T).name() << "] component";
-
-        // The lambda signature must match: void(entt::registry&, entt::entity)
-        reg.on_construct<T>().connect<&Editor::onComponentConstruct<T>>(this);
-        reg.on_destroy<T>().connect<&Editor::onComponentDestroy<T>>(this);
-    }
-
-    template<typename T>
-    void onComponentConstruct(entt::registry& registry, entt::entity entityID)
-    {
-        LOG_INFO(Logger::get()) << "Entity [" << static_cast<unsigned int>(entityID) << "] onComponentConstruct() triggered";
-        m_selectedSceneData->entities.at(entityID).second.components.emplace_back(std::pair{ true, std::type_index(typeid(T)) });
-    }
-
-    template<typename T>
-    void onComponentDestroy(entt::registry& registry, entt::entity entityID)
-    {
-        LOG_INFO(Logger::get()) << "Entity [" << static_cast<unsigned int>(entityID) << "] onComponentDestroy() triggered";
-
-        auto& components = m_selectedSceneData->entities.at(entityID).second.components;
-        components.erase(
-            std::remove_if(
-                components.begin(),
-                components.end(),
-                [](const std::pair<bool, std::type_index>& comp) {
-                    return comp.second == std::type_index(typeid(T));
-                }
-            ),
-            components.end()
-        );
-    }
 
     template<typename T>
     void registerComponentVisitor(IComponentVisitor* visitor, std::function<void(const entt::entity&)> callback = std::function<void(const entt::entity&)>{})
@@ -151,10 +115,6 @@ private:
     std::string m_selectedSceneKey;
     EditorSceneAdapter* m_selectedSceneData;
     sf::Sprite m_gameView;
-
-    //// Component Data used for modifying properties in PropertiesPanel
-    //std::unordered_map<entt::entity, std::pair<bool, ComponentPropData>> m_entities;
-    //std::unordered_map<std::type_index, std::function<void(entt::registry&, entt::entity)>> m_renderFunc;
 
     EditorComponentVisitor m_componentVisitor;
     EditorSceneModifierVisitor m_sceneModifierVisitor;

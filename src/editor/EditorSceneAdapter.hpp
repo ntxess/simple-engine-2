@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../core/component/SceneViewRenderer.hpp"
+#include "../core/Components.hpp"
 #include "../core/interface/IScene.hpp"
 #include "../core/util/Logger.hpp"
 #include "imgui.h"
@@ -53,7 +53,46 @@ public:
     sf::RenderTexture& getRenderTexture() const;
     IScene* get() const;
     entt::entity createEntity();
-    void createCompPropEntry(const entt::entity entityID);
+
+private:
+    void setupComponentTrackers(entt::registry& reg);
+
+    template<typename T>
+    void trackComponentType(entt::registry& reg)
+    {
+        LOG_INFO(Logger::get()) << "Tracking [" << typeid(T).name() << "] component";
+
+        // The lambda signature must match: void(entt::registry&, entt::entity)
+        reg.on_construct<T>().connect<&EditorSceneAdapter::onComponentConstruct<T>>(this);
+        reg.on_destroy<T>().connect<&EditorSceneAdapter::onComponentDestroy<T>>(this);
+    }
+
+    template<typename T>
+    void onComponentConstruct(entt::registry& registry, entt::entity entityID)
+    {
+        if (entities.find(entityID) == entities.end())
+            entities.emplace(entityID, std::pair{ true, ComponentPropData{entityID} });
+        entities.at(entityID).second.components.emplace_back(std::pair{ true, std::type_index(typeid(T)) });
+        LOG_INFO(Logger::get()) << "Entity [" << static_cast<unsigned int>(entityID) << "] onComponentConstruct() triggered. Added [" << typeid(T).name() << "]";
+    }
+
+    template<typename T>
+    void onComponentDestroy(entt::registry& registry, entt::entity entityID)
+    {
+        auto& components = entities.at(entityID).second.components;
+        components.erase(
+            std::remove_if(
+                components.begin(),
+                components.end(),
+                [](const std::pair<bool, std::type_index>& comp) {
+                    return comp.second == std::type_index(typeid(T));
+                }
+            ),
+            components.end()
+        );
+
+        LOG_INFO(Logger::get()) << "Entity [" << static_cast<unsigned int>(entityID) << "] onComponentDestroy() triggered. Removed [" << typeid(T).name() << "]";
+    }
 
 public:
     // Assist rendering of Properties Panel

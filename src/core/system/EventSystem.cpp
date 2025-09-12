@@ -1,7 +1,8 @@
 #include "EventSystem.hpp"
 
-EventSystem::EventSystem(std::chrono::milliseconds watchdogTime)
-    : m_eventWatchdogTime(watchdogTime)
+EventSystem::EventSystem(entt::registry& piplineReg, std::chrono::milliseconds watchdogTime)
+    : m_piplineReg(piplineReg)
+    , m_eventWatchdogTime(watchdogTime)
 {}
 
 constexpr std::string_view EventSystem::name() const
@@ -9,20 +10,20 @@ constexpr std::string_view EventSystem::name() const
     return "EventSystem";
 }
 
-void EventSystem::update(entt::registry& reg, const float& dt)
+void EventSystem::update(entt::registry& entityReg, const float& dt)
 {
     LOG_TRACE(Logger::get()) << "Entering EventSystem::update()";
 
-    const auto& statusModView = reg.view<StatusModEvent>();
+    const auto& statusModView = m_piplineReg.view<StatusModEvent>();
     for (const auto& eventID : statusModView)
     {
-        const entt::entity receiverID = reg.get<StatusModEvent>(eventID).receiverID;
+        const entt::entity receiverID = m_piplineReg.get<StatusModEvent>(eventID).receiverID;
 
-        if (reg.valid(receiverID) && reg.all_of<EntityStatus>(receiverID))
+        if (entityReg.valid(receiverID) && entityReg.all_of<EntityStatus>(receiverID))
         {
-            const EffectType& effectType = reg.get<StatusModEvent>(eventID).effectType;
-            StatusModEvent& statusModEvent = reg.get<StatusModEvent>(eventID);
-            EntityStatus& receiverStatus = reg.get<EntityStatus>(statusModEvent.receiverID);
+            const EffectType& effectType = m_piplineReg.get<StatusModEvent>(eventID).effectType;
+            StatusModEvent& statusModEvent = m_piplineReg.get<StatusModEvent>(eventID);
+            EntityStatus& receiverStatus = entityReg.get<EntityStatus>(statusModEvent.receiverID);
 
             LOG_TRACE(Logger::get()) << "Processing Event ID [" << static_cast<unsigned int>(eventID) << "]";
 
@@ -31,7 +32,7 @@ void EventSystem::update(entt::registry& reg, const float& dt)
                 // Event completed processesing
                 LOG_INFO(Logger::get()) << "Completed processing of Event ID [" << static_cast<unsigned int>(eventID) << "]";
 
-                reg.destroy(eventID);
+                m_piplineReg.destroy(eventID);
             }
         }
         else
@@ -41,7 +42,7 @@ void EventSystem::update(entt::registry& reg, const float& dt)
                 << "Failed processing of Event ID [" << static_cast<unsigned int>(eventID)
                 << "]. Entity [" << static_cast<unsigned int>(receiverID) << "] no longer valid";
 
-            reg.destroy(eventID);
+            m_piplineReg.destroy(eventID);
         }
     }
 

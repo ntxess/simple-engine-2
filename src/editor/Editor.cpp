@@ -92,8 +92,7 @@ void Editor::init()
     m_selectedSceneData = m_editorSceneMap.begin()->second.get();
     m_gameView.setTexture(m_selectedSceneData->getRenderTexture().getTexture());
 
-    // Track and Register Components for properties panel
-    setupComponentTrackers(m_selectedSceneData->getRegistry());
+    // Register Component visitors for properties panel
     setupComponentVisitors(&m_componentVisitor);
 }
 
@@ -189,19 +188,6 @@ entt::registry& Editor::getRegistry()
         return m_selectedSceneData->getRegistry();
     else
 		throw std::runtime_error("No selected scene data available to get registry from.");
-}
-
-void Editor::setupComponentTrackers(entt::registry& reg)
-{
-    // Update this whenever we add a new renderable component
-    trackComponentType<Sprite>(reg);
-    trackComponentType<UpdateEntityPolling>(reg);
-    trackComponentType<UpdateEntityEvent>(reg);
-    trackComponentType<EntityStatus>(reg);
-	trackComponentType<EffectsList>(reg);
-    trackComponentType<MovementPattern>(reg);
-    trackComponentType<PlayerInput>(reg);
-    trackComponentType<TeamTag>(reg);
 }
 
 void Editor::setupComponentVisitors(IComponentVisitor* visitor)
@@ -340,9 +326,6 @@ void Editor::renderDebugPanel(const ImVec2& pos, const ImVec2& size)
             {
                 m_selectedSceneKey = sceneName;
                 m_selectedSceneData = m_editorSceneMap.at(sceneName).get();
-
-                // Re-register all the tracker so that the properties panel update real-time
-                setupComponentTrackers(m_selectedSceneData->getRegistry());
             }
         }
     }
@@ -483,57 +466,53 @@ void Editor::renderPropertiesPanel(const ImVec2& pos, const ImVec2& size)
     ImGui::SetNextWindowSize(size, ImGuiCond_Once);
     ImGui::Begin("Properties Panel", nullptr, ImGuiWindowFlags_AlwaysVerticalScrollbar);
 
+    std::vector<entt::entity> entitiesToErase;
     const auto& view = m_selectedSceneData->getRegistry().view<entt::entity>();
     for (const auto& entityID : view)
     {
-        if (m_selectedSceneData->entities.find(entityID) == m_selectedSceneData->entities.end())
-			continue;
+        if (m_selectedSceneData->entities.find(entityID) == m_selectedSceneData->entities.end()) continue;
 
-        auto& [isEntityPropClosed , entityProp] = m_selectedSceneData->entities.at(entityID);
+        auto& [isEntityPanelOpen, entityProp] = m_selectedSceneData->entities.at(entityID);
 
-        if (ImGui::CollapsingHeader(entityProp.name.c_str(), isEntityPropClosed))
+        if (ImGui::CollapsingHeader(entityProp.name.c_str(), &isEntityPanelOpen))
         {
             ImGui::BeginDisabled(m_startButtonEnabled);
             ImGui::BeginChild(("##EntityColm" + entityProp.name).c_str(), { ImGui::GetWindowWidth() - 26.f, 0.f }, ImGuiChildFlags_AutoResizeY);
 
-            bool hasClosedSomething = false;
-            for (auto& [isCompClosed, propCompType] : entityProp.components)
+            for (size_t i = 0; i < entityProp.components.size(); ++i)
             {
-                if (ImGui::CollapsingHeader((propCompType.name() + std::string("##") + entityProp.name).c_str(), &isCompClosed, ImGuiTreeNodeFlags_DefaultOpen))
+                if (ImGui::CollapsingHeader((entityProp.components[i].second.name() + std::string("##") + entityProp.name).c_str(), &entityProp.components[i].first, ImGuiTreeNodeFlags_DefaultOpen))
                 {
-                    m_selectedSceneData->renderFunc.at(propCompType)(m_selectedSceneData->getRegistry(), entityID);
+                    if (m_selectedSceneData->renderFunc.find(entityProp.components[i].second) == m_selectedSceneData->renderFunc.end()) continue;
+
+                    m_selectedSceneData->renderFunc.at(entityProp.components[i].second)(m_selectedSceneData->getRegistry(), entityID);
                 }
 
-				// Delay the removal of the component until after the loop to avoid invalidating the iterator
-                hasClosedSomething |= isCompClosed;
-            }
-
-            if (hasClosedSomething)
-            {
-                // Erase all closed components from the properties panel
-                const auto& it = std::find_if(
-                    entityProp.components.begin(), 
-                    entityProp.components.end(), 
-                    [](const std::pair<bool, std::type_index>& comp) { 
-                        return comp.first == false; 
-				});
-
-                if (it != entityProp.components.end())
+                if (!entityProp.components[i].first)
                 {
-                    std::type_index typeIndex = it->second;
-
+                    std::type_index typeIndex = entityProp.components[i].second;
                     if (typeIndex == typeid(Sprite))
                     {
                         m_selectedSceneData->get()->accept(&m_sceneModifierVisitor, entityID);
                     }
-                    entityProp.components.erase(it);
+                    entityProp.components.erase(entityProp.components.begin() + i);
                     LOG_DEBUG(Logger::get()) << "Removed component [" << typeIndex.name() << "] from entity [" << static_cast<unsigned int>(entityID) << "]";
+                    --i;
 				}
             }
 
             ImGui::EndChild();
             ImGui::EndDisabled();
         }
+
+		if (!isEntityPanelOpen)
+            entitiesToErase.push_back(entityID);
+    }
+
+    for (const auto& entityID : entitiesToErase)
+    {
+	    m_selectedSceneData->getRegistry().destroy(entityID);
+	    m_selectedSceneData->entities.erase(entityID);
     }
 
     ImGui::End();

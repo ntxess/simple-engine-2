@@ -19,10 +19,10 @@ private:
 
 public:
     EventSystem() = delete;
-    EventSystem(std::chrono::milliseconds watchdogTime);
+    EventSystem(entt::registry& piplineReg, std::chrono::milliseconds watchdogTime);
 
     constexpr std::string_view name() const;
-    void update(entt::registry& reg, const float& dt = 0.f);
+    void update(entt::registry& entityReg, const float& dt = 0.f);
 
     EventStatus apply(const EffectType effectType, StatusModEvent& statusModEvent, EntityStatus& receiverStatus) const;
     EventStatus instantEvent(StatusModEvent& statusModEvent, EntityStatus& receiverStatus) const;
@@ -30,5 +30,6 @@ public:
     EventStatus tempTimedEvent(StatusModEvent& statusModEvent, EntityStatus& receiverStatus) const;
 
 private:
+	entt::registry& m_piplineReg;
     const std::chrono::milliseconds m_eventWatchdogTime;
 };

@@ -15,18 +15,20 @@ class CollisionSystem : public ISystem
 {
 public:
     CollisionSystem() = delete;
-    CollisionSystem(entt::registry& reg, const sf::Vector2f& center, const sf::Vector2u& size);
+    CollisionSystem(entt::registry& piplineReg, const sf::Vector2f& center, const sf::Vector2u& size);
 
     constexpr std::string_view name() const;
-    void update(entt::registry& reg, const float& dt = 0.f);
-    void remove(entt::registry& reg, const entt::entity entityID);
+    void update(entt::registry& entityReg, const float& dt = 0.f);
+    void remove(entt::registry& entityReg, const entt::entity entityID);
     void clear();
     void draw(sf::RenderTexture& rt);
 
 private:
-    void quadTreeUpdate(entt::registry& reg);
-    void collisionUpdate(entt::registry& reg);
+    void quadTreeUpdate(entt::registry& entityReg);
+    void collisionUpdate(entt::registry& entityReg);
+	void collisionUpdateImpl(entt::registry& entityReg, const entt::entity sourceID);
 
 private:
+	entt::registry& m_piplineReg;
     std::unique_ptr<QuadTree> m_quadTree;
 };

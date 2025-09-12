@@ -3,15 +3,13 @@
 EditorSceneAdapter::EditorSceneAdapter(std::unique_ptr<IScene> scn, unsigned int width, unsigned int height, const sf::ContextSettings& settings)
     : m_scene(std::move(scn))
 {
-    m_scene->init();
-    m_renderTextureID = m_scene->getRegistry().create();
-    m_scene->getRegistry().emplace<SceneViewRenderer>(m_renderTextureID, width, height, settings);
+    auto& reg = m_scene->getRegistry();
+    setupComponentTrackers(reg);
 
-    // Sync the already generated entities to the map of ComponentPropData at start to prevent invalid index
-    for (const auto& entityID : m_scene->getRegistry().view<entt::entity>())
-    {
-        createCompPropEntry(entityID);
-    }
+    m_scene->init();
+
+    m_renderTextureID = reg.create();
+    reg.emplace<SceneViewRenderer>(m_renderTextureID, width, height, settings);
 }
 
 void EditorSceneAdapter::processInput()
@@ -53,12 +51,17 @@ entt::entity EditorSceneAdapter::createEntity()
 {
     entt::entity entityID = m_scene->getRegistry().create();
     LOG_DEBUG(Logger::get()) << "Entity [" << static_cast<unsigned int>(entityID) << "] created";
-    createCompPropEntry(entityID);
     return entityID;
 }
 
-void EditorSceneAdapter::createCompPropEntry(const entt::entity entityID)
+void EditorSceneAdapter::setupComponentTrackers(entt::registry& reg)
 {
-    LOG_INFO(Logger::get()) << "Syncing entity [" << static_cast<unsigned int>(entityID) << "] with ComponentPropData map";
-    entities.emplace(entityID, std::pair{ true, ComponentPropData{entityID} });
+    // Update this whenever we add a new renderable component
+    trackComponentType<Sprite>(reg);
+    trackComponentType<UpdateEntityPolling>(reg);
+    trackComponentType<UpdateEntityEvent>(reg);
+    trackComponentType<EntityStatus>(reg);
+    trackComponentType<EffectsList>(reg);
+    trackComponentType<MovementPattern>(reg);
+    trackComponentType<TeamTag>(reg);
 }
