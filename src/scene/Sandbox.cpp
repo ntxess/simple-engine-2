@@ -54,9 +54,9 @@ void Sandbox::init()
         });
     m_reg.get<EffectsList>(m_player).effectsList.push_back({ EffectType::TEMPTIMED, Effects{"HP", -10.f, std::chrono::milliseconds(5000)} });
 
-    m_system.addSystem<CollisionSystem>(m_collisionEventReg, sf::Vector2f{ 0.f, 0.f }, m_appContext->window.getSize());
-    m_system.addSystem<EventSystem>(m_collisionEventReg, std::chrono::milliseconds(36000));
-    m_system.addSystem<WayPointSystem>("Speed");
+    m_system.addSystem<CollisionSystem>(true, m_collisionEventReg, sf::Vector2f{ 0.f, 0.f }, m_appContext->window.getSize());
+    m_system.addSystem<EventSystem>(true, m_collisionEventReg, std::chrono::milliseconds(36000));
+    m_system.addSystem<WayPointSystem>(true, "Speed");
 }
 
 void Sandbox::processEvent(const sf::Event& event)

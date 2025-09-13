@@ -40,8 +40,8 @@ private:
 
 private:
     ApplicationContext* m_appContext;
-    entt::registry m_reg;
-    entt::registry m_collisionEventReg;
     entt::entity m_player;
     SystemManager m_system;
+    entt::registry m_reg;
+    entt::registry m_collisionEventReg;
 };

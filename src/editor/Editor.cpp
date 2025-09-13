@@ -355,6 +355,8 @@ void Editor::renderPerformancePanel(const ImVec2& pos, const ImVec2& size)
     ImGui::SetNextWindowSize(size, ImGuiCond_Once);
     ImGui::Begin("Performance Panel", nullptr, 0);
 
+    m_selectedSceneData->get()->accept(&m_sceneSystemVisitor, entt::null);
+
     ImGui::End();
 }
 
@@ -950,6 +952,7 @@ void Editor::generateEntities(size_t numOfEntities)
         m_selectedSceneData->getRegistry().get<EntityStatus>(mob).values["Speed"] = 0.5f;
         m_selectedSceneData->getRegistry().emplace<TeamTag>(mob, Team::ENEMY);
         m_selectedSceneData->getRegistry().emplace<MovementPattern>(mob, std::move(root), true);
+        m_selectedSceneData->getRegistry().emplace<UpdateEntityEvent>(mob);
 
         updateWayPointCanvas(mob, m_selectedSceneData->entities.at(mob).second);
     }

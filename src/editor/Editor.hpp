@@ -3,6 +3,7 @@
 #include "EditorComponentVisitor.hpp"
 #include "EditorSceneAdapter.hpp"
 #include "EditorSceneModifierVisitor.hpp"
+#include "EditorSceneSystemVisitor.hpp"
 #include "../core/ApplicationContext.hpp"
 #include "../core/Components.hpp"
 #include "../core/Systems.hpp"
@@ -118,6 +119,7 @@ private:
 
     EditorComponentVisitor m_componentVisitor;
     EditorSceneModifierVisitor m_sceneModifierVisitor;
+    EditorSceneSystemVisitor m_sceneSystemVisitor;
 };
 
 template<typename... Args>

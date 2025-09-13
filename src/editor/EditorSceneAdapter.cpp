@@ -32,6 +32,11 @@ void EditorSceneAdapter::update()
     m_scene->update();
 }
 
+void EditorSceneAdapter::accept(ISceneVisitor* visitor, entt::entity entityID)
+{
+    m_scene->accept(visitor, entityID);
+}
+
 entt::registry& EditorSceneAdapter::getRegistry() const
 {
     return m_scene->getRegistry();

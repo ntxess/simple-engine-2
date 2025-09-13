@@ -6,7 +6,7 @@
 #include "imgui.h"
 #include "imgui-SFML.h"
 
-class EditorSceneModifierVisitor : public ISceneVisitor
+class EditorSceneSystemVisitor : public ISceneVisitor
 {
 public:
     void visit(Sandbox* sandbox, entt::entity entityID) override;

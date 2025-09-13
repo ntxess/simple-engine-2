@@ -196,6 +196,8 @@
     </PreLinkEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="src\editor\EditorSceneSystemVisitor.cpp" />
+    <ClCompile Include="src\core\util\SystemProfiler.cpp" />
     <ClCompile Include="src\core\util\EventBus.cpp" />
     <ClCompile Include="src\editor\EditorSceneAdapter.cpp" />
     <ClCompile Include="src\core\interface\IDataStoreSerializer.cpp" />
@@ -245,6 +247,8 @@
     <ClCompile Include="src\core\util\TaskScheduler.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="src\editor\EditorSceneSystemVisitor.hpp" />
+    <ClInclude Include="src\core\util\SystemProfiler.hpp" />
     <ClInclude Include="src\core\util\EventBus.hpp" />
     <ClInclude Include="src\core\util\BoundedQueue.hpp" />
     <ClInclude Include="src\editor\EditorSceneAdapter.hpp" />

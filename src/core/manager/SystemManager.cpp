@@ -2,25 +2,27 @@
 
 void SystemManager::update(entt::registry& reg, const float& dt)
 {
-    for (auto& [id, system] : m_systems)
+    for (const auto& [id, system] : m_systems)
     {
-        auto start = std::chrono::high_resolution_clock::now();
-        system->update(reg, dt);
-        auto stop = std::chrono::high_resolution_clock::now();
-
-        auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(stop - start).count();
-
-        if (system->name() == "CollisionSystem")
+        if (m_systemProfilers.find(id) != m_systemProfilers.end())
         {
-            LOG_TRACE(Logger::get()) << "CollisionSystem: " << duration << "ns";
+            m_systemProfilers.at(id)->timedUpdate(system.get(), reg, dt);
         }
-        else if (system->name() == "EventSystem")
+        else
         {
-            LOG_TRACE(Logger::get()) << "EventSystem: " << duration << "ns";
-        }
-        else if (system->name() == "WayPointSystem")
-        {
-            LOG_TRACE(Logger::get()) << "WayPointSystem: " << duration << "ns";
+            system->update(reg, dt);
         }
     }
+}
+
+std::unordered_map<std::string, std::deque<long long>> SystemManager::getSystemTimingHistory() const
+{
+    std::unordered_map<std::string, std::deque<long long>> historyMap;
+
+    for (const auto& [sysType, profiler] : m_systemProfilers)
+    {
+        const auto& name = m_systems.at(sysType)->name();
+        historyMap.emplace(name, profiler->getTimingHistory());
+    }
+    return historyMap;
 }

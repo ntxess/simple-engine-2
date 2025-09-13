@@ -49,6 +49,8 @@ public:
     void processEvent(const sf::Event& event);
     void render();
     void update();
+    void accept(ISceneVisitor* visitor, entt::entity entityID);
+
     entt::registry& getRegistry() const;
     sf::RenderTexture& getRenderTexture() const;
     IScene* get() const;
