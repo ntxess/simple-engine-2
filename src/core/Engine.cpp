@@ -9,14 +9,15 @@ Engine::Engine(const std::string& relativeConfigPath, std::unique_ptr<IScene> in
 {
     LOG_INFO(Logger::get()) << "Initializing system. Reading main configuration file...";
 
-    if (m_appContext->configDataSerializer.load(relativeConfigPath, m_appContext->configData))
+    auto configData = m_appContext->configDataSerializer.load(relativeConfigPath);
+    if (configData)
     {
+        m_appContext->configData = std::move(*configData);
         configureWindow(std::move(initialScene));
     }
     else
     {
         LOG_ERROR(Logger::get()) << "Failed to read main config file. Engine failed to start.";
-        return;
     }
 
     LOG_INFO(Logger::get()) << "System initialize. Starting main thread...";

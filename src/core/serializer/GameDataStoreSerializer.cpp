@@ -8,17 +8,17 @@ GameDataStoreSerializer::GameDataStoreSerializer(std::filesystem::path path)
     : IDataStoreSerializer(path)
 {}
 
-bool GameDataStoreSerializer::load(std::string_view filename, DataStore& dataStore)
+std::expected<DataStore, bool> GameDataStoreSerializer::load(std::string_view filename)
 {
-    return false;
+    return std::expected<DataStore, bool>();
 }
 
-bool GameDataStoreSerializer::save(std::string_view filename, const DataStore& dataStore)
+std::expected<DataStore, bool> GameDataStoreSerializer::save(std::string_view filename)
 {
-    return false;
+    return std::expected<DataStore, bool>();
 }
 
-bool GameDataStoreSerializer::update(std::string_view filename, const DataStore& dataStore)
+std::expected<DataStore, bool> GameDataStoreSerializer::update(std::string_view filename)
 {
-    return false;
+    return std::expected<DataStore, bool>();
 }

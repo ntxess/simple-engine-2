@@ -32,10 +32,9 @@ Editor::~Editor()
 
 void Editor::init()
 {
-    DataStore fontConfigPath;
-    m_appContext->configDataSerializer.load("config/font.json", fontConfigPath);
+    auto fontConfigPath = m_appContext->configDataSerializer.load("config/font.json");
     auto cwd = std::filesystem::current_path().string();
-    if (!m_defaultFont.loadFromFile(cwd + fontConfigPath.get<std::string>("default_font").value()))
+    if (!m_defaultFont.loadFromFile(cwd + fontConfigPath->get<std::string>("default_font").value()))
     {
         LOG_FATAL(Logger::get()) << "Failed to load default font.";
     }

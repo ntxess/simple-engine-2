@@ -146,7 +146,7 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <LanguageStandard>stdcpp20</LanguageStandard>
+      <LanguageStandard>stdcpp23</LanguageStandard>
       <LanguageStandard_C>stdc17</LanguageStandard_C>
       <AdditionalIncludeDirectories>$(SolutionDir)dep\EnTT\include\;$(SolutionDir)dep\Lua\include\;$(SolutionDir)dep\RapidJson\include\;$(SolutionDir)dep\SFML\include\;$(SolutionDir)dep\SFML-imgui\include\;$(SolutionDir)dep\Thor\include\;$(SolutionDir)dep\Boost_1_87_0\include\;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>

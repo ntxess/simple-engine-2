@@ -7,6 +7,7 @@
 #include "rapidjson/istreamwrapper.h"
 #include "rapidjson/prettywriter.h"
 #include <any>
+#include <expected>
 #include <fstream>
 #include <filesystem>
 #include <optional>
@@ -19,9 +20,9 @@ public:
     JsonDataStoreSerializer(std::filesystem::path path);
     ~JsonDataStoreSerializer() override = default;
 
-    bool load(std::string_view filename, DataStore& dataStore) override;
-    bool save(std::string_view filename, const DataStore& dataStore) override;
-    bool update(std::string_view filename, const DataStore& dataStore) override;
+    std::expected<DataStore, bool> load(std::string_view filename) override;
+    std::expected<DataStore, bool> save(std::string_view filename) override;
+    std::expected<DataStore, bool> update(std::string_view filename) override;
 
 private:
     void read(std::string_view key, rapidjson::Value& val, DataStore& dataStore);

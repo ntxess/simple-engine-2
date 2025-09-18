@@ -17,9 +17,8 @@ Sandbox::~Sandbox()
 
 void Sandbox::init()
 {
-    DataStore texturePath;
-    m_appContext->configDataSerializer.load("config/texture.json", texturePath);     // Load config file
-    m_appContext->textureManager.load(texturePath, thor::Resources::Reuse); // Load the texture from loaded paths
+    auto texturePath = m_appContext->configDataSerializer.load("config/texture.json");     // Load config file
+    m_appContext->textureManager.load(*texturePath, thor::Resources::Reuse); // Load the texture from loaded paths
 
     // Create the main player object
     m_player = m_reg.create();

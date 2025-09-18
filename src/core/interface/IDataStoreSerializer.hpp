@@ -3,6 +3,7 @@
 #include "../util/DataStore.hpp"
 #include "../util/Logger.hpp"
 #include <any>
+#include <expected>
 #include <fstream>
 #include <filesystem>
 #include <string>
@@ -16,9 +17,10 @@ public:
     IDataStoreSerializer(std::filesystem::path path);
     virtual ~IDataStoreSerializer() = default;
 
-    virtual bool load(std::string_view filename, DataStore& dataStore) = 0;
-    virtual bool save(std::string_view filename, const DataStore& dataStore) = 0;
-    virtual bool update(std::string_view filename, const DataStore& dataStore) = 0;
+    virtual std::expected<DataStore, bool> load(std::string_view filename) = 0;
+    virtual std::expected<DataStore, bool> save(std::string_view filename) = 0;
+    virtual std::expected<DataStore, bool> update(std::string_view filename) = 0;
+
     virtual std::filesystem::path resolvePath(std::string path);
 
 protected:

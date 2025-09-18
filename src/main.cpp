@@ -13,14 +13,13 @@ int main()
 	// Temporarily create and read in configuraton file to setup file logger. 
 	{
 		JsonDataStoreSerializer configDataSerializer;
-		DataStore configData;
-
-		if (configDataSerializer.load("config/config.json", configData))
+		auto configData = configDataSerializer.load("config/config.json");
+		if (configData)
 		{
 			LOG_INFO(Logger::get()) << "Successfully read config file.";
-			Logger::getInstance().toggleLogging(configData.get<bool>("debug-mode").value_or(false));
-			Logger::getInstance().setFilterSeverity(configData.get<std::string>("debug-log-filter-severity").value_or("warning"));
-			auto logPath = configData.get<std::string>("debug-log-folder").value_or("log/");
+			Logger::getInstance().toggleLogging(configData->get<bool>("debug-mode").value_or(false));
+			Logger::getInstance().setFilterSeverity(configData->get<std::string>("debug-log-filter-severity").value_or("warning"));
+			auto logPath = configData->get<std::string>("debug-log-folder").value_or("log/");
 			LOG_INFO(Logger::get()) << "Now logging to file. Log file located at: " << logPath.c_str();
 			Logger::getInstance().removeAllSinks();
 			Logger::getInstance().setupFileLog(logPath.c_str());
