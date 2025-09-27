@@ -362,5 +362,7 @@ MigrationBackup/
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
 *.sav
-/dep/Boost_1_87_0
-/imgui.ini
+imgui.ini
+.vscode/
+config/
+build/
