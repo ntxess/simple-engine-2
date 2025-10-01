@@ -1,18 +1,45 @@
 #include "Sprite.hpp"
 
-Sprite::Sprite(sf::Texture& texture, bool repeat)
+Sprite::Sprite(const sf::Texture& texture)
+    : sf::Sprite{texture}
 {
-    texture.setRepeated(repeat);
-    sprite.setTexture(texture);
-    sprite.setOrigin(sprite.getLocalBounds().width * 0.5f, sprite.getLocalBounds().height * 0.5f);
+    setOrigin({ getLocalBounds().size.x / 2.f, getLocalBounds().size.y / 2.f });
 }
 
-Sprite::Sprite(sf::Texture& texture, int width, int height, bool repeat)
+Sprite::Sprite(const sf::Texture& texture, int width, int height)
+    : sf::Sprite{texture, sf::Rect<int>{{0, 0}, {width, height}}}
 {
-    texture.setRepeated(repeat);
-    sprite.setTexture(texture);
-    sprite.setTextureRect(sf::IntRect(0, 0, width, height));
-    sprite.setOrigin(sprite.getLocalBounds().width / 2.f, sprite.getLocalBounds().height / 2.f);
+    setOrigin({ getLocalBounds().size.x / 2.f, getLocalBounds().size.y / 2.f });
+}
+
+Sprite::Sprite(const sf::Texture& texture, const allocator_type& alloc)
+    : Sprite{texture} 
+{}
+
+Sprite::Sprite(const sf::Texture& texture, int width, int height, const allocator_type& alloc)
+    : Sprite{texture, width, height} 
+{}
+
+Sprite::Sprite(std::allocator_arg_t, const allocator_type& alloc, const sf::Texture& texture)
+    : Sprite{texture}
+{}
+
+Sprite::Sprite(std::allocator_arg_t, const allocator_type& alloc, const sf::Texture& texture, int width, int height)
+    : Sprite{texture, width, height} 
+{}
+
+Sprite::Sprite(const Sprite& other, const allocator_type& alloc)
+    : sf::Sprite{other}
+    , IComponent{other}
+{
+    setOrigin({ getLocalBounds().size.x / 2.f, getLocalBounds().size.y / 2.f });
+}
+
+Sprite::Sprite(Sprite&& other, const allocator_type& alloc) noexcept
+    : sf::Sprite{std::move(other)}
+    , IComponent{std::move(other)}
+{
+    setOrigin({ getLocalBounds().size.x / 2.f, getLocalBounds().size.y / 2.f });
 }
 
 void Sprite::accept(IComponentVisitor* visitor, entt::entity entityID)

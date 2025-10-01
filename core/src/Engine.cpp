@@ -4,19 +4,20 @@
  * @brief [Public] Normal constuctor.
 */
 Engine::Engine(const std::string& relativeConfigPath, std::unique_ptr<IScene> initialScene)
-    : m_appContext(std::make_shared<ApplicationContext>())
-    , m_windowActive(true)
+    : m_appContext{std::make_shared<ApplicationContext>()}
+    , m_windowActive{true}
 {
     LOG_INFO(Logger::get()) << "Initializing system. Reading main configuration file...";
 
-    if (m_appContext->configDataSerializer.load(relativeConfigPath, m_appContext->configData))
+    auto configData = m_appContext->configDataSerializer.load(relativeConfigPath);
+    if (configData)
     {
+        m_appContext->configData = std::move(*configData);
         configureWindow(std::move(initialScene));
     }
     else
     {
         LOG_ERROR(Logger::get()) << "Failed to read main config file. Engine failed to start.";
-        return;
     }
 
     LOG_INFO(Logger::get()) << "System initialize. Starting main thread...";
@@ -32,12 +33,11 @@ void Engine::run()
 
     startThreads();
 
-    sf::Event event;
-    while (m_windowActive && m_appContext->window.waitEvent(event))
+    while (m_windowActive)
     {
-        switch (event.type)
+        const std::optional<sf::Event> event = m_appContext->window.waitEvent();
+        if (event->is<sf::Event::Closed>())
         {
-        case sf::Event::Closed:
             LOG_INFO(Logger::get()) << "Triggered Event::Closed";
             m_windowActive = false;
             m_physicThread.join();
@@ -45,41 +45,38 @@ void Engine::run()
             m_audioThread.join();
             m_resourceThread.join();
             m_appContext->window.close();
-            break;
-
-        case sf::Event::Resized:
+        }
+        else if (const auto* resized = event->getIf<sf::Event::Resized>())
         {
             LOG_INFO(Logger::get()) << "Triggered Event::Resized";
-            float newWidth = static_cast<float>(event.size.width);
+            float newWidth = static_cast<float>(resized->size.x);
             float newHeight = newWidth / m_appContext->aspectRatio;
-            if (newHeight > event.size.height)
+            if (newHeight > resized->size.y)
             {
-                newHeight = static_cast<float>(event.size.height);
+                newHeight = static_cast<float>(resized->size.y);
                 newWidth = newHeight * m_appContext->aspectRatio;
             }
-
+    
             m_appContext->window.setSize(sf::Vector2u(
                 static_cast<unsigned int>(newWidth),
                 static_cast<unsigned int>(newHeight))
             );
-
-            m_appContext->viewport.setSize(newWidth, newHeight);
-            break;
+    
+            m_appContext->viewport.setSize({newWidth, newHeight});
         }
-
-        case sf::Event::LostFocus:
-            // Pause
+        else if (event->is<sf::Event::FocusLost>())
+        {
             LOG_INFO(Logger::get()) << "Triggered Event::LostFocus";
-            break;
-
-        case sf::Event::GainedFocus:
-            // Resume
+            m_appContext->sceneManager.getActiveScene()->pause();
+        }
+        else if (event->is<sf::Event::FocusGained>())
+        {
             LOG_INFO(Logger::get()) << "Triggered Event::GainedFocus";
-            break;
-
-        default:
-            m_appContext->sceneManager.getActiveScene()->processEvent(event);
-            break;
+            m_appContext->sceneManager.getActiveScene()->resume();
+        }
+        else
+        {
+            m_appContext->sceneManager.getActiveScene()->processEvent(event.value());
         }
     }
 
@@ -104,7 +101,7 @@ void Engine::configureWindow(std::unique_ptr<IScene> initialScene)
     sf::ContextSettings settings;
     settings.depthBits = 24;
     settings.stencilBits = 8;
-    settings.antialiasingLevel = 0;
+    settings.antiAliasingLevel = 0;
     settings.majorVersion = 4;
     settings.minorVersion = 3;
 
@@ -113,8 +110,11 @@ void Engine::configureWindow(std::unique_ptr<IScene> initialScene)
     unsigned int height = m_appContext->configData.get<int>("height").value_or(1080);
     m_appContext->aspectRatio = static_cast<float>(width) / static_cast<float>(height);
     m_appContext->deltaTime = static_cast<float>(1000.f / m_appContext->configData.get<double>("frame-rate").value_or(60.f));
-    m_appContext->window.create(sf::VideoMode(width, height), name, sf::Style::Default, settings);
-    m_appContext->window.setActive(false);
+    m_appContext->window.create(sf::VideoMode({width, height}), name, sf::Style::Default, sf::State::Fullscreen, settings);    
+    
+    if (!m_appContext->window.setActive(false))
+        LOG_FATAL(Logger::get()) << "Failed to set Main thread to inactive";
+    
     m_appContext->window.setFramerateLimit(static_cast<unsigned int>(m_appContext->configData.get<double>("frame-rate").value_or(60.f)));
     m_appContext->sceneManager.addScene(std::move(initialScene), true, m_appContext.get());
     m_appContext->sceneManager.processChange();
@@ -147,7 +147,7 @@ void Engine::physicThread()
 
         // While the delay between frames is larger than the expected delta time, 
         // run the update() call until we catch up before the next render() call.
-        // This has the benfit of maintaining a constant update tick but also catchup 
+        // This has the benefit of maintaining a constant update tick but also catchup 
         // to real-time if the engine ever hits a major lag point.
         while (m_windowActive && accumulator >= m_appContext->deltaTime)
         {
@@ -168,7 +168,8 @@ void Engine::renderThread()
 {
     LOG_INFO(Logger::get()) << "----- Render thread started -----";
 
-    m_appContext->window.setActive(true);
+    if (!m_appContext->window.setActive(true))
+        LOG_FATAL(Logger::get()) << "Failed to set Render thread to active";
 
     while (m_windowActive)
     {

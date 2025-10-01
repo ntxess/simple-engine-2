@@ -5,6 +5,7 @@
 #include "util/WayPoint.hpp"
 #include "entt/entity/entity.hpp"
 #include "entt/entity/registry.hpp"
+#include <SFML/System/Angle.hpp>
 #include <cmath>
 #include <numbers>
 #include <string_view>

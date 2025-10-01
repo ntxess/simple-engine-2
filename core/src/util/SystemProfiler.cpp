@@ -1,7 +1,7 @@
 #include "SystemProfiler.hpp"
 
 SystemProfiler::SystemProfiler(size_t historyLen)
-	: m_historyLen(historyLen)
+	: m_historyLen{historyLen}
 {}
 
 void SystemProfiler::timedUpdate(ISystem* system, entt::registry& reg, const float& dt)

@@ -1,8 +1,8 @@
 #include "Logger.hpp"
 
 Logger::Logger()
-    : m_enableLogging(false)
-    , m_severityLevel("trace")
+    : m_enableLogging{false}
+    , m_severityLevel{"trace"}
 {}
 
 Logger& Logger::getInstance()

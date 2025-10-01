@@ -1,15 +1,15 @@
 #include "QuadTree.hpp"
 
 QuadTree::QuadTree(const sf::FloatRect& rect, const int depth)
-    : m_boundary(rect)
-    , m_depth(depth)
-    , m_divided(false)
+    : m_boundary{rect}
+    , m_depth{depth}
+    , m_divided{false}
 {}
 
 bool QuadTree::insert(entt::registry& reg, const entt::entity entityID)
 {
     // Ignore objects that do not belong in this quad tree
-    if (!m_boundary.contains(reg.get<Sprite>(entityID).sprite.getPosition()))
+    if (!m_boundary.contains(reg.get<Sprite>(entityID).getPosition()))
         return false;
 
     // If there is space in this quad tree and if doesn't have subdivisions, add the object here
@@ -44,15 +44,20 @@ bool QuadTree::insert(entt::registry& reg, const entt::entity entityID)
 
 void QuadTree::subdivide()
 {
-    float left = m_boundary.left;
-    float top = m_boundary.top;
-    float width = m_boundary.width;
-    float height = m_boundary.height;
+    const float left = m_boundary.position.x;
+    const float top = m_boundary.position.y;
+    const float width = m_boundary.size.x;
+    const float height = m_boundary.size.y;
 
-    m_northWest = std::make_unique<QuadTree>(sf::FloatRect(left, top, (width / 2.f), (height / 2.f)), m_depth + 1);
-    m_northEast = std::make_unique<QuadTree>(sf::FloatRect((left + (width / 2.f)), top, (width / 2.f), (height / 2.f)), m_depth + 1);
-    m_southEast = std::make_unique<QuadTree>(sf::FloatRect((left + (width / 2.f)), (top + (height / 2.f)), (width / 2.f), (height / 2.f)), m_depth + 1);
-    m_southWest = std::make_unique<QuadTree>(sf::FloatRect(left, (top + (height / 2.f)), (width / 2.f), (height / 2.f)), m_depth + 1);
+    sf::Rect<float> nwRect({left, top}, {(width / 2.f), (height / 2.f)});
+    sf::Rect<float> neRect({(left + (width / 2.f)), top}, {(width / 2.f), (height / 2.f)});
+    sf::Rect<float> seRect({(left + (width / 2.f)), (top + (height / 2.f))}, {(width / 2.f), (height / 2.f)});
+    sf::Rect<float> swRect({left, (top + (height / 2.f))}, {(width / 2.f), (height / 2.f)});
+
+    m_northWest = std::make_unique<QuadTree>(nwRect, m_depth + 1);
+    m_northEast = std::make_unique<QuadTree>(neRect, m_depth + 1);
+    m_southEast = std::make_unique<QuadTree>(seRect, m_depth + 1);
+    m_southWest = std::make_unique<QuadTree>(swRect, m_depth + 1);
 
     m_divided = true;
 }
@@ -61,12 +66,12 @@ std::vector<entt::entity> QuadTree::queryRange(entt::registry& reg, const sf::Fl
 {
     std::vector<entt::entity> entityFound;
 
-    if (!m_boundary.intersects(range))
+    if (!m_boundary.findIntersection(range))
         return entityFound;
 
     for (auto entity : m_nodes)
     {
-        if (reg.valid(entity) && reg.all_of<Sprite>(entity) && range.intersects(reg.get<Sprite>(entity).getGlobalBounds()))
+        if (reg.valid(entity) && reg.all_of<Sprite>(entity) && range.findIntersection(reg.get<Sprite>(entity).getGlobalBounds()))
             entityFound.push_back(entity);
     }
 
@@ -133,8 +138,8 @@ void QuadTree::clear()
 void QuadTree::draw(sf::RenderTexture& rt)
 {
     sf::RectangleShape border;
-    border.setPosition(m_boundary.left, m_boundary.top);
-    border.setSize(sf::Vector2f(m_boundary.width, m_boundary.height));
+    border.setPosition({m_boundary.position.x, m_boundary.position.y});
+    border.setSize({m_boundary.size.x, m_boundary.size.y});
     border.setOutlineThickness(1.0f);
     border.setFillColor(sf::Color::Transparent);
     border.setOutlineColor(sf::Color(0, 150, 100));

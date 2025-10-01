@@ -1,17 +1,17 @@
 #include "WayPoint.hpp"
 
 WayPoint::WayPoint()
-	: coordinate(sf::Vector2f(0.f, 0.f))
-	, distanceToNext(0.f)
-	, distanceTotal(0.f)
-	, nextWP(nullptr)
+	: coordinate{sf::Vector2f(0.f, 0.f)}
+	, distanceToNext{0.f}
+	, distanceTotal{0.f}
+	, nextWP{nullptr}
 {}
 
 WayPoint::WayPoint(sf::Vector2f coordinate)
-	: coordinate(coordinate)
-	, distanceToNext(0.f)
-	, distanceTotal(0.f)
-	, nextWP(nullptr)
+	: coordinate{coordinate}
+	, distanceToNext{0.f}
+	, distanceTotal{0.f}
+	, nextWP{nullptr}
 {}
 
 WayPoint* WayPoint::next() const

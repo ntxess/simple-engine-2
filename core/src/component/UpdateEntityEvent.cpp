@@ -1,11 +1,13 @@
 #include "UpdateEntityEvent.hpp"
 
 UpdateEntityEvent::UpdateEntityEvent()
-    : timeStart(std::chrono::steady_clock::now()), maxDuration(0)
+    : timeStart{std::chrono::steady_clock::now()}
+    , maxDuration{0}
 {}
 
 UpdateEntityEvent::UpdateEntityEvent(std::chrono::milliseconds duration)
-    : timeStart(std::chrono::steady_clock::now()), maxDuration(duration)
+    : timeStart{std::chrono::steady_clock::now()}
+    , maxDuration{duration}
 {}
 
 void UpdateEntityEvent::accept(IComponentVisitor* visitor, entt::entity entityID)

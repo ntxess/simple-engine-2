@@ -4,8 +4,6 @@
 #include <string>
 #include <vector>
 
-constexpr size_t MAX_SIZE = 500;
-
 class LogStream
 {
 public:
@@ -37,6 +35,8 @@ private:
     LogType parseLineType(const std::string& line);
 
 private:
+    static constexpr size_t MAX_SIZE = 500;
+    
     std::ifstream m_file;
     std::vector<LineInfo> m_lines;
     std::streampos m_lastReadPos;

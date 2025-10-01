@@ -17,13 +17,42 @@ Sandbox::~Sandbox()
 
 void Sandbox::init()
 {
-    DataStore texturePath;
-    m_appContext->configDataSerializer.load("config/texture.json", texturePath);     // Load config file
-    m_appContext->textureManager.load(texturePath, thor::Resources::Reuse); // Load the texture from loaded paths
+    if (!m_appContext)
+    {
+        throw std::runtime_error("Application context not set for Sanbox scene.");
+    }
+
+    // Load the config file for texture paths and load them into the resource manager
+    auto texturePaths = m_appContext->configDataSerializer.load("config/texture.json");
+    if (texturePaths)
+    {
+        for (const auto& [key, val] : texturePaths->lockedView())
+        {
+            try
+            {
+                auto path = std::filesystem::current_path() / std::any_cast<std::string>(val);
+                auto _ = m_appContext->textureManager.load(key, path.c_str(), ResourceManager<sf::Texture, MutexSync>::ManagementStrategy::Reuse);
+            }
+            catch (const std::bad_any_cast& e)
+            {
+                LOG_ERROR(Logger::get()) << "Invalid texture path for key: " << key << " - " << e.what();
+            }
+        }
+    }
+    else
+    {
+        LOG_ERROR(Logger::get()) << "Failed to load texture configuration file.";
+    }
 
     // Create the main player object
     m_player = m_reg.create();
-    m_reg.emplace<Sprite>(m_player, m_appContext->textureManager["player"]);
+    const auto& texture = m_appContext->textureManager.get("player");
+    if (!texture)
+    {
+        LOG_ERROR(Logger::get()) << "Failed to get texture for generated entity!";
+        return;
+    }
+    m_reg.emplace<Sprite>(m_player, texture.value());
     m_reg.emplace<TeamTag>(m_player, Team::FRIENDLY);
     m_reg.emplace<PlayerInput>(m_player);
     m_reg.emplace<EffectsList>(m_player);
@@ -32,16 +61,16 @@ void Sandbox::init()
     m_reg.get<EntityStatus>(m_player).values["HP"] = 100.f;
     m_reg.get<PlayerInput>(m_player).input =
     {
-        { sf::Keyboard::W, new Movement(m_player, { 0, -1 }) },
-        { sf::Keyboard::A, new Movement(m_player, { -1, 0 }) },
-        { sf::Keyboard::S, new Movement(m_player, { 0,  1 }) },
-        { sf::Keyboard::D, new Movement(m_player, { 1,  0 }) }
+        { sf::Keyboard::Scancode::W, new Movement(m_player, { 0, -1 }) },
+        { sf::Keyboard::Scancode::A, new Movement(m_player, { -1, 0 }) },
+        { sf::Keyboard::Scancode::S, new Movement(m_player, { 0,  1 }) },
+        { sf::Keyboard::Scancode::D, new Movement(m_player, { 1,  0 }) }
     };
 
     float width = static_cast<float>(m_appContext->configData.get<int>("width").value());
     float height = static_cast<float>(m_appContext->configData.get<int>("height").value());
 
-    m_reg.get<Sprite>(m_player).setPosition(0, 0);
+    m_reg.get<Sprite>(m_player).setPosition({200, 200});
 
     // Create event effect for collecting coins
     m_reg.get<EffectsList>(m_player).effectsList.push_back({ EffectType::INSTANT, Effects{"HP", -10.f} });
@@ -61,9 +90,9 @@ void Sandbox::init()
 
 void Sandbox::processEvent(const sf::Event& event)
 {
-    if (event.type == sf::Event::KeyPressed)
+    if (const auto* keyPressed = event.getIf<sf::Event::KeyPressed>())
     {
-        if (event.key.code == sf::Keyboard::Escape)
+        if (keyPressed->scancode == sf::Keyboard::Scancode::Escape)
             m_appContext->sceneManager.addScene(std::make_unique<MainMenu>(m_appContext));
 
         //auto& controller = m_reg.get<PlayerInput>(m_player);
@@ -117,10 +146,10 @@ void Sandbox::render()
         {
             if (m_reg.valid(entity))
             {
-                auto& sceneRenderTexture = m_reg.get<SceneViewRenderer>(sceneTextureID).rd;
-                auto& spriteEntity = view.get<Sprite>(entity).sprite;
+                auto& sceneRenderTexture = m_reg.get<SceneViewRenderer>(sceneTextureID);
+                auto& spriteEntity = view.get<Sprite>(entity);
                 checkBoundary(sceneRenderTexture.getSize(), spriteEntity);
-                sceneRenderTexture.draw(view.get<Sprite>(entity).sprite);
+                sceneRenderTexture.draw(view.get<Sprite>(entity));
             }
         }
     }
@@ -174,12 +203,12 @@ void Sandbox::checkBoundary(const sf::Vector2u& boundary, sf::Sprite& obj)
     if (position.x < 0)
         obj.setPosition(sf::Vector2f(0.f, position.y));
 
-    if (position.x + (rect.width) > boundary.x)
-        obj.setPosition(sf::Vector2f(boundary.x - (rect.width), position.y));
+    if (position.x + (rect.size.x) > boundary.x)
+        obj.setPosition(sf::Vector2f(boundary.x - (rect.size.x), position.y));
 
     if (position.y < 0)
         obj.setPosition(sf::Vector2f(position.x, 0.f));
 
-    if (position.y + rect.height > boundary.y)
-        obj.setPosition(sf::Vector2f(position.x, boundary.y - (rect.height)));
+    if (position.y + rect.size.y > boundary.y)
+        obj.setPosition(sf::Vector2f(position.x, boundary.y - (rect.size.y)));
 }

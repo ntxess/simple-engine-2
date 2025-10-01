@@ -1,17 +1,17 @@
 #include "TaskScheduler.hpp"
 
 TaskScheduler::TaskScheduler(size_t numThreads)
-    : m_numThreads(numThreads)
-    , m_immTaskQueue(100)
-    , m_stopped(false)
+    : m_numThreads{numThreads}
+    , m_immTaskQueue{100}
+    , m_stopped{false}
 {
     init();
 }
 
 TaskScheduler::TaskScheduler(size_t numThreads, size_t immTaskCapacity)
-    : m_numThreads(numThreads)
-    , m_immTaskQueue(immTaskCapacity)
-    , m_stopped(false)
+    : m_numThreads{numThreads}
+    , m_immTaskQueue{immTaskCapacity}
+    , m_stopped{false}
 {
     init();
 }

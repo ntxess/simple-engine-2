@@ -8,6 +8,7 @@
 #include "Components.hpp"
 #include "Systems.hpp"
 #include "interface/IScene.hpp"
+#include "util/Font.hpp"
 #include "util/Logger.hpp"
 #include "util/LogStream.hpp"
 #include "scene/Scenes.hpp"
@@ -16,7 +17,6 @@
 #include "imgui-SFML.h"
 #include "entt/entity/entity.hpp"
 #include "entt/entity/registry.hpp"
-#include <SFML/Graphics/Font.hpp>
 #include <SFML/Graphics/Text.hpp>
 #include <functional>
 #include <memory>
@@ -49,7 +49,7 @@ public:
     entt::registry& getRegistry() override;
 
 private:
-    void setupComponentVisitors(IComponentVisitor* visitor);
+    void setupComponentVisitors(IComponentVisitor *visitor);
     void setupDockPanel(const ImVec2& panPos, const ImVec2& panSize, const char* panID, const ImGuiID& dockID) const;
     void renderDebugPanel(const ImVec2& pos, const ImVec2& size);
     void renderPerformancePanel(const ImVec2& pos, const ImVec2& size);
@@ -74,24 +74,26 @@ private:
 
     void generateEntities(size_t numOfEntities);
 
-    template<typename... Args>
+    template <typename... Args>
     entt::entity findEntityID();
 
-    template<typename T>
+    template <typename T>
     void registerComponentVisitor(IComponentVisitor* visitor, std::function<void(const entt::entity&)> callback = std::function<void(const entt::entity&)>{})
     {
-        m_selectedSceneData->renderFunc[std::type_index(typeid(T))] = [visitor, callback](entt::registry& reg, const entt::entity entityID) {
-            auto& component = reg.get<T>(entityID);
+        m_selectedSceneData->renderFunc[std::type_index(typeid(T))] = [visitor, callback](entt::registry& reg, const entt::entity entityID)
+        {
+            auto &component = reg.get<T>(entityID);
             component.accept(visitor, entityID);
-            if (callback) callback(entityID);
+            if (callback)
+                callback(entityID);
         };
     }
 
 private:
-    ApplicationContext* m_appContext;
+    ApplicationContext *m_appContext;
 
     LogStream m_logStream;
-    sf::Font m_defaultFont;
+    Font m_defaultFont;
     ImGuiWindowFlags m_panelFlags;
 
     ImGuiID m_dockspaceId1;
@@ -114,20 +116,20 @@ private:
     // Current loaded scene data
     std::unordered_map<std::string, std::unique_ptr<EditorSceneAdapter>> m_editorSceneMap;
     std::string m_selectedSceneKey;
-    EditorSceneAdapter* m_selectedSceneData;
-    sf::Sprite m_gameView;
+    EditorSceneAdapter *m_selectedSceneData;
+    std::unique_ptr<sf::Sprite> m_gameView;
 
     EditorComponentVisitor m_componentVisitor;
     EditorSceneModifierVisitor m_sceneModifierVisitor;
     EditorSceneSystemVisitor m_sceneSystemVisitor;
 };
 
-template<typename... Args>
+template <typename... Args>
 inline entt::entity Editor::findEntityID()
 {
     // Hacky way of getting entity ID from a unique component
-    const auto& view = m_selectedSceneData->getRegistry().view<Args...>();
-    for (const auto& entityID : view)
+    const auto &view = m_selectedSceneData->getRegistry().view<Args...>();
+    for (const auto &entityID : view)
     {
         return entityID;
     }

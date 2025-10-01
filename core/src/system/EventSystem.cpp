@@ -1,8 +1,8 @@
 #include "EventSystem.hpp"
 
 EventSystem::EventSystem(entt::registry& piplineReg, std::chrono::milliseconds watchdogTime)
-    : m_piplineReg(piplineReg)
-    , m_eventWatchdogTime(watchdogTime)
+    : m_piplineReg{piplineReg}
+    , m_eventWatchdogTime{watchdogTime}
 {}
 
 constexpr std::string_view EventSystem::name() const

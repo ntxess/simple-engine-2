@@ -1,18 +1,18 @@
 #include "Entity.hpp"
 
 Entity::Entity(std::reference_wrapper<entt::registry> reg)
-    : m_reg(reg)
+    : m_reg{reg}
 {
     m_entityId = m_reg.get().create();
 }
 
 Entity::Entity(std::reference_wrapper<entt::registry> reg, const entt::entity entityID)
-    : m_reg(reg)
-    , m_entityId(entityID)
+    : m_reg{reg}
+    , m_entityId{entityID}
 {}
 
 Entity::Entity(const Entity& other)
-    : m_reg(other.m_reg)
+    : m_reg{other.m_reg}
 {
     m_entityId = m_reg.get().create();
 

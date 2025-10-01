@@ -1,7 +1,7 @@
 #include "WayPointSystem.hpp"
 
 WayPointSystem::WayPointSystem(std::string bindingStatID)
-    : bindingStatID(bindingStatID)
+    : bindingStatID{bindingStatID}
 {}
 
 constexpr std::string_view WayPointSystem::name() const
@@ -45,9 +45,9 @@ void WayPointSystem::update(entt::registry& reg, const float& dt)
         velocity.x = unitDist.x * speed * dt;
         velocity.y = unitDist.y * speed * dt;
 
-        float theta = (std::atan2(velocity.y, velocity.x)) * (180.f / float(std::numbers::pi));
-        sp.sprite.setRotation(theta + 90);
-        sp.sprite.move(velocity);
+        float heading = (std::atan2(velocity.y, velocity.x) * (180.f / float(std::numbers::pi))) + 90.f;
+        sp.setRotation(sf::degrees(heading));
+        sp.move(velocity);
         reg.emplace_or_replace<UpdateEntityEvent>(entityID);
     }
 }

@@ -1,128 +1,116 @@
 #pragma once
 
-#include "util/DataStore.hpp"
-#include "util/Logger.hpp"
 #include "util/AnyToString.hpp"
-#include <Thor/Resources.hpp>
+#include "util/Logger.hpp"
+#include "util/SyncPolicy.hpp"
+#include "util/TransparentStringHash.hpp"
 #include <any>
+#include <expected>
 #include <filesystem>
 #include <string>
 #include <unordered_map>
 
-template<typename T>
+// Maintained Thor's resource manager identity to keep existing code unchaged
+template<typename T, typename SyncPolicy>
 class ResourceManager
 {
 public:
-    ResourceManager() = default;
-    ResourceManager(const DataStore& dataStore, thor::Resources::KnownIdStrategy known = thor::Resources::Reuse);
-    T& operator[](const std::string& id);
-    const T& operator[](const std::string& id) const;
+    enum class ManagementStrategy
+    {
+        AssumeNew,
+        Reuse,
+        Reload
+    };
 
-    const T& get(const std::string& id) const;
-    bool load(const DataStore& dataStore, thor::Resources::KnownIdStrategy known = thor::Resources::Reuse);
-    bool load(const std::string& id, const std::string& filepath, thor::Resources::KnownIdStrategy known = thor::Resources::Reuse);
-    bool unload();
-    bool unload(const std::string& id);
+public:
+    using key_type = std::string;
+    using mapped_type = T;
+    using container_type = std::unordered_map<key_type, mapped_type, TransparentStringHash, TransparentStringEqual>;
+    using iterator = container_type::iterator;
+    using const_iterator = container_type::const_iterator;
+    
+    ResourceManager() = default;
+    ~ResourceManager() = default;
+    ResourceManager(const ResourceManager&) = delete;
+    ResourceManager& operator=(const ResourceManager&) = delete;
+
+    std::expected<mapped_type, bool> get(std::string_view key) const;
+    bool load(std::string_view key, std::string_view filepath, ResourceManager::ManagementStrategy known = ResourceManager::ManagementStrategy::Reuse);
+    void unload(std::string_view key);
+    void unloadAll();
 
 private:
-    thor::ResourceHolder<T, std::string> m_holder;
+    mutable SyncPolicy m_sync{};
+    container_type m_holder;
 };
 
-template<typename T>
-inline ResourceManager<T>::ResourceManager(const DataStore& dataStore, thor::Resources::KnownIdStrategy known)
+template <typename T, typename SyncPolicy>
+inline std::expected<T, bool> ResourceManager<T, SyncPolicy>::get(std::string_view key) const
 {
-    load(dataStore, known);
+    std::unique_lock<SyncPolicy> lock(m_sync);
+    auto it = m_holder.find(key);
+    if (it != m_holder.end())
+        return it->second;
+    return std::unexpected(false);
 }
 
-template<typename T>
-inline T& ResourceManager<T>::operator[](const std::string& id)
+template <typename T, typename SyncPolicy>
+inline bool ResourceManager<T, SyncPolicy>::load(std::string_view key, std::string_view filepath, ResourceManager::ManagementStrategy known)
 {
-    return m_holder[id];
-}
-
-template<typename T>
-inline const T& ResourceManager<T>::operator[](const std::string& id) const
-{
-    return m_holder[id];
-}
-
-template<typename T>
-inline const T& ResourceManager<T>::get(const std::string& id) const
-{
-    return m_holder[id];
-}
-
-template<typename T>
-inline bool ResourceManager<T>::load(const DataStore& dataStore, thor::Resources::KnownIdStrategy known)
-{
-    const std::string cwd = std::filesystem::current_path().string();
-    for (const auto& [id, path] : dataStore)
+    auto path = std::filesystem::current_path() / filepath;
+    T resource;
+    if (!resource.loadFromFile(path))
     {
-        try
+        LOG_ERROR(Logger::get()) << "Failed to load resource: " << path;
+        return false;
+    }
+
+    std::unique_lock<SyncPolicy> lock(m_sync);
+    if (known == ResourceManager::ManagementStrategy::AssumeNew)
+    {
+        // If the resouce already exists somewhere 
+        // do not store and return failed to load (false).
+        if (m_holder.find(key) != m_holder.end())
         {
-            m_holder.acquire
-            (
-                id,
-                thor::Resources::fromFile<T>(cwd + getValue(path)),
-                known
-            );
-        }
-        catch (const thor::ResourceLoadingException& e)
-        {
-            LOG_ERROR(Logger::get()) << "Failed to aquire resource at: " << cwd + getValue(path) << ". Error: " << e.what();
+            LOG_ERROR(Logger::get()) << "Resource with key already exists: " << key;
             return false;
         }
+        m_holder[std::string(key)] = resource;
+        return true;
     }
-    return true;
+    else if (known == ResourceManager::ManagementStrategy::Reuse)
+    {
+        // If resource is found, reuse the resource 
+        // and return true for consistency.
+        if (m_holder.find(key) == m_holder.end())
+        {
+            m_holder[std::string(key)] = resource;
+        }
+        return true;
+    }
+    else if (known == ResourceManager::ManagementStrategy::Reload)
+    {
+        // Always load new resource.
+        // Resource does not need to be manually cleanup.
+        m_holder[std::string(key)] = resource;
+        return true;
+    }
+    return false;
 }
 
-template<typename T>
-inline bool ResourceManager<T>::load(const std::string& id, const std::string& filepath, thor::Resources::KnownIdStrategy known)
+template <typename T, typename SyncPolicy>
+inline void ResourceManager<T, SyncPolicy>::unload(std::string_view key)
 {
-    const std::string cwd = std::filesystem::current_path().string();
-    try
+    std::unique_lock<SyncPolicy> lock(m_sync);
+    if (m_holder.find(key) != m_holder.end())
     {
-        m_holder.acquire
-        (
-            id,
-            thor::Resources::fromFile<T>(cwd + filepath),
-            known
-        );
+        m_holder.erase(key);
     }
-    catch (const thor::ResourceLoadingException& e)
-    {
-        LOG_ERROR(Logger::get()) << "Failed to aquire resource at: " << cwd + filepath << ". Error: " << e.what();
-        return false;
-    }
-    return true;
 }
 
-template<typename T>
-inline bool ResourceManager<T>::unload()
+template <typename T, typename SyncPolicy>
+inline void ResourceManager<T, SyncPolicy>::unloadAll()
 {
-    try
-    {
-        m_holder = thor::ResourceHolder<T, std::string>();
-    }
-    catch (thor::ResourceLoadingException& e)
-    {
-        LOG_ERROR(Logger::get()) << "Failed to release all resource. Error:" << e.what();
-        return false;
-    }
-    return true;
-}
-
-template<typename T>
-inline bool ResourceManager<T>::unload(const std::string& id)
-{
-    try
-    {
-        m_holder.release(id);
-    }
-    catch (thor::ResourceLoadingException& e)
-    {
-        LOG_ERROR(Logger::get()) << "Failed to release resource id: " << id << ". Error:" << e.what();
-        return false;
-    }
-    return true;
+    std::unique_lock<SyncPolicy> lock(m_sync);
+    m_holder.clear();
 }

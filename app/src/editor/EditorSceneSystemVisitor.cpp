@@ -58,12 +58,12 @@ void EditorSceneSystemVisitor::visit(Sandbox* sandbox, entt::entity entityID)
             };
 
             // Max/min labels on right side of the plot
-            draw_list->AddText(ImVec2(graphPos.x + plotWidth + 2, graphPos.y),
+            draw_list->AddText({ graphPos.x + plotWidth + 2, graphPos.y },
                 IM_COL32(255, 255, 255, 255),
                 formatValue(scale_max).c_str() // max
             ); 
 
-            draw_list->AddText(ImVec2(graphPos.x + plotWidth + 2, graphPos.y + plotHeight - 12),
+            draw_list->AddText({ graphPos.x + plotWidth + 2, graphPos.y + plotHeight - 12 },
                 IM_COL32(255, 255, 255, 255),
                 "0.000" // min
             );
@@ -77,34 +77,34 @@ void EditorSceneSystemVisitor::visit(Sandbox* sandbox, entt::entity entityID)
                 ImGui::Text("Curr: %.3f ms", current);
                 ImGui::EndTooltip();
 
-                draw_list->AddLine(ImVec2(graphPos.x, mapValueY(avg)),
+                draw_list->AddLine({ graphPos.x, mapValueY(avg) },
                     ImVec2(graphPos.x + plotWidth, mapValueY(avg)),
                     IM_COL32(255, 255, 0, 255), 1.0f);
-                draw_list->AddLine(ImVec2(graphPos.x, mapValueY(peak)),
+                draw_list->AddLine({ graphPos.x, mapValueY(peak) },
                     ImVec2(graphPos.x + plotWidth, mapValueY(peak)),
                     IM_COL32(255, 0, 0, 255), 1.0f);
-                draw_list->AddLine(ImVec2(graphPos.x, mapValueY(current)),
+                draw_list->AddLine({ graphPos.x, mapValueY(current) },
                     ImVec2(graphPos.x + plotWidth, mapValueY(current)),
                     IM_COL32(0, 255, 0, 255), 1.0f);
             }
 
             // Reserve vertical space for label box
-            ImGui::Dummy(ImVec2(0, 55.0f)); // Enough size for stacked labels
+            ImGui::Dummy({ 0, 55.0f }); // Enough size for stacked labels
 
             // Draw stacked labels inside the box
             float labelX = graphPos.x + 5.0f;
             float labelY = graphPos.y + plotHeight + 5.0f;
             float labelSpacing = 15.0f;
 
-            draw_list->AddText(ImVec2(labelX, labelY),
+            draw_list->AddText({ labelX, labelY },
                 IM_COL32(255, 255, 0, 255),
                 ("Avg:  " + std::to_string(avg) + " ms").c_str());
             labelY += labelSpacing;
-            draw_list->AddText(ImVec2(labelX, labelY),
+            draw_list->AddText({ labelX, labelY },
                 IM_COL32(255, 0, 0, 255),
                 ("Peak: " + std::to_string(peak) + " ms").c_str());
             labelY += labelSpacing;
-            draw_list->AddText(ImVec2(labelX, labelY),
+            draw_list->AddText({ labelX, labelY },
                 IM_COL32(0, 255, 0, 255),
                 ("Curr: " + std::to_string(current) + " ms").c_str());
 

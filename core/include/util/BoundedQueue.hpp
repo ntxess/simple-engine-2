@@ -9,8 +9,8 @@ class BoundedQueue
 {
 public:
     explicit BoundedQueue(size_t capacity)
-        : m_capacity(capacity)
-        , m_buffer(capacity)
+        : m_capacity{capacity}
+        , m_buffer{capacity}
     {
         if (m_capacity == 0)
             throw std::invalid_argument("Capacity must be > 0");

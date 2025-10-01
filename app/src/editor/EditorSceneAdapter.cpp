@@ -44,7 +44,7 @@ entt::registry& EditorSceneAdapter::getRegistry() const
 
 sf::RenderTexture& EditorSceneAdapter::getRenderTexture() const
 {
-    return m_scene->getRegistry().get<SceneViewRenderer>(m_renderTextureID).rd;
+    return m_scene->getRegistry().get<SceneViewRenderer>(m_renderTextureID);
 }
 
 IScene* EditorSceneAdapter::get() const
@@ -62,11 +62,11 @@ entt::entity EditorSceneAdapter::createEntity()
 void EditorSceneAdapter::setupComponentTrackers(entt::registry& reg)
 {
     // Update this whenever we add a new renderable component
-    // trackComponentType<Sprite>(reg);
-    // trackComponentType<UpdateEntityPolling>(reg);
-    // trackComponentType<UpdateEntityEvent>(reg);
-    // trackComponentType<EntityStatus>(reg);
-    // trackComponentType<EffectsList>(reg);
-    // trackComponentType<MovementPattern>(reg);
-    // trackComponentType<TeamTag>(reg);
+    trackComponentType<Sprite>(reg);
+    trackComponentType<UpdateEntityPolling>(reg);
+    trackComponentType<UpdateEntityEvent>(reg);
+    trackComponentType<EntityStatus>(reg);
+    trackComponentType<EffectsList>(reg);
+    trackComponentType<MovementPattern>(reg);
+    trackComponentType<TeamTag>(reg);
 }

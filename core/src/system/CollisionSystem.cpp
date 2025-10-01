@@ -1,8 +1,8 @@
 #include "CollisionSystem.hpp"
 
 CollisionSystem::CollisionSystem(entt::registry& piplineReg, const sf::Vector2f& center, const sf::Vector2u& size)
-	: m_piplineReg(piplineReg)
-    , m_quadTree(std::make_unique<QuadTree>(sf::FloatRect(center.x, center.y, static_cast<float>(size.x), static_cast<float>(size.y))))
+	: m_piplineReg{piplineReg}
+    , m_quadTree{std::make_unique<QuadTree>(sf::Rect<float>{{center.x, center.y}, {static_cast<float>(size.x), static_cast<float>(size.y)}})}
 {
     //const auto& view = reg.view<Sprite>();
     //for (const auto& entityID : view)

@@ -1,9 +1,8 @@
 #include "LogStream.hpp"
 
 LogStream::LogStream()
-    : m_lastReadPos(0)
-{
-}
+    : m_lastReadPos{0}
+{}
 
 void LogStream::open(const std::string& path)
 {

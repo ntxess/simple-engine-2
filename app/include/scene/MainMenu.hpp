@@ -15,7 +15,8 @@ class MainMenu final : public IScene
 public:
     MainMenu();
     MainMenu(ApplicationContext* sysData);
-
+    ~MainMenu();
+    
     void init() override final;
     void processEvent(const sf::Event& event) override final;
     void processInput() override final;

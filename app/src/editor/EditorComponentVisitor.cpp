@@ -135,7 +135,7 @@ void EditorComponentVisitor::visit(EntityStatus* entityStatus, entt::entity enti
     std::string discardedStat = "";
     for (auto& [name, val] : entityStatus->values)
     {
-        ImGui::Text(name.c_str());
+        ImGui::Text("%s", name.c_str());
         ImGui::SameLine(divider1Pos);
         ImGui::SetNextItemWidth(ImGui::GetWindowWidth() / 6.f);
         ImGui::InputFloat(("##StatValInput" + name + ID).c_str(), &val);
@@ -201,13 +201,13 @@ void EditorComponentVisitor::visit(MovementPattern* movementPattern, entt::entit
         std::string wpNumText = std::to_string(waypointNum);
         if (current->distanceTotal < movementPattern->distance && current->nextWP && movementPattern->distance < current->nextWP->distanceTotal)
         {
-            ImGui::TextColored(ImVec4(0.f, 1.f, 0.f, 1.f), (wpNumText + "  Run ").c_str());
+            ImGui::TextColored({ 0.f, 1.f, 0.f, 1.f }, "%s", (wpNumText + "  Run ").c_str());
             ImGui::SameLine(ImGui::GetWindowWidth() / 8.f);
-            ImGui::TextColored(ImVec4(0.f, 1.f, 0.f, 1.f), std::to_string(movementPattern->distance - current->distanceTotal).c_str());
+            ImGui::TextColored({ 0.f, 1.f, 0.f, 1.f }, "%s", std::to_string(movementPattern->distance - current->distanceTotal).c_str());
         }
         else
         {
-            ImGui::Text(wpNumText.c_str());
+            ImGui::Text("%s", wpNumText.c_str());
         }
 
         ImGui::SameLine(ImGui::GetWindowWidth() / 3.f);
@@ -252,15 +252,15 @@ void EditorComponentVisitor::visit(Sprite* sprite, entt::entity entityID)
 
     float xOrigin = sprite->getOrigin().x;
     float yOrigin = sprite->getOrigin().y;
-    int xTextureWidth = sprite->getTextureRect().width;
-    int yTextureHeight = sprite->getTextureRect().height;
-    bool isRepeated = sprite->getTexture()->isRepeated();
+    int xTextureWidth = sprite->getTextureRect().size.x;
+    int yTextureHeight = sprite->getTextureRect().size.y;
+    bool isRepeated = sprite->getTexture().isRepeated();
     int rHexVal = sprite->getColor().r;
     int gHexVal = sprite->getColor().g;
     int bHexVal = sprite->getColor().b;
 
     ImGui::Text("Texture");
-    ImGui::ImageButton(("##EntityButton" + ID).c_str(), *sprite->getTexture(), { 48.f, 48.f }, sf::Color::Transparent, sf::Color::White);
+    ImGui::ImageButton(("##EntityButton" + ID).c_str(), sprite->getTexture(), { 48.f, 48.f }, sf::Color::Transparent, sf::Color::White);
     //ImGui::SameLine();
     //if (ImGui::Checkbox(("Repeat##SetRepeat" + ID).c_str(), &isRepeated))
     //{
@@ -290,10 +290,10 @@ void EditorComponentVisitor::visit(Sprite* sprite, entt::entity entityID)
     auto bHexValInput = ImGui::InputInt(("B##SpColorHexInput" + ID).c_str(), &bHexVal);
 
     if (xOriginInput || yOriginInput)
-        sprite->setOrigin(xOrigin, yOrigin);
+        sprite->setOrigin({ xOrigin, yOrigin });
 
     if (textureWidthInput || textureHeightInput)
-        sprite->setTextureRect(sf::IntRect(0, 0, xTextureWidth, yTextureHeight));
+        sprite->setTextureRect({{ 0, 0 }, { xTextureWidth, yTextureHeight }});
 
     if (rHexValInput || gHexValInput || bHexValInput)
         sprite->setColor(sf::Color(rHexVal, gHexVal, bHexVal));
@@ -303,9 +303,9 @@ void EditorComponentVisitor::visit(Sprite* sprite, entt::entity entityID)
 
     float xPos = sprite->getPosition().x;
     float yPos = sprite->getPosition().y;
-    float rotationDegree = sprite->getRotation();
     float xScale = sprite->getScale().x;
     float yScale = sprite->getScale().y;
+    static float rotationDegree = sprite->getRotation().asDegrees();
 
     ImGui::Text("Position");
     ImGui::SameLine(divider1Pos);
@@ -326,13 +326,13 @@ void EditorComponentVisitor::visit(Sprite* sprite, entt::entity entityID)
     auto yScaleInput = ImGui::InputFloat(("Y##TfScaleInput" + ID).c_str(), &yScale);
 
     if (xPosInput || yPosInput)
-        sprite->setPosition(xPos, yPos);
+        sprite->setPosition({ xPos, yPos });
 
     if (degRotationInput || degRotationSlider)
-        sprite->setRotation(rotationDegree);
+        sprite->setRotation(sf::degrees(rotationDegree));
 
     if (xScaleInput || yScaleInput)
-        sprite->setScale(xScale, yScale);
+        sprite->setScale({ xScale, yScale });
 
     ImGui::PopItemWidth();
 

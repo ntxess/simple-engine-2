@@ -1,13 +1,13 @@
 #include "EventBus.hpp"
 
 EventBus::EventBus(size_t numThreads)
-    : m_taskScheduler(numThreads)
-    , m_nextId(0)
+    : m_taskScheduler{numThreads}
+    , m_nextId{0}
 {}
 
 EventBus::EventBus(size_t numThreads, size_t taskQueueCapacity)
-    : m_taskScheduler(numThreads, taskQueueCapacity)
-    , m_nextId(0)
+    : m_taskScheduler{numThreads, taskQueueCapacity}
+    , m_nextId{0}
 {}
 
 EventBus::~EventBus()

@@ -1,11 +1,39 @@
 # Simple Engine 2
 Fork of the original simple game engine with new additions and structural changes
 
-# Dockerfile
-docker build -t simple-engine-2
+# Running in Docker
+## Prerequisite:
+xhost is required for docker to gain access to X11.
 
-The docker container has dependencies installed in '/' and 'simple-engine-2/external'
-Make sure you are in the root directory of the project before running this:
+On Arch:
+```bash
+    sudo pacman -Syu xorg-xhost
+```
 
-docker run -it -v $(pwd)/app:/simple-engine-2/app -v $(pwd)/core:/simple-engine-2/core -v $(pwd)/assets:/simple-engine-2/assets -v $(pwd)/config:/simple-engine-2/config -v $(pwd)/CMakeLists.txt:/simple-engine-2/CMakeLists.txt simple-engine-2 bash
+On Ubuntu/Debian:
+```bash
+    sudo apt update
+    sudo apt install x11-xserver-utils
+```
 
+## Build Docker image:
+
+docker build -t simple-engine-2 .
+
+## Grant docker access to X11:
+xhost +local:docker 
+
+## Run Docker container:
+The docker container has external dependencies installed in ```simple-engine-2/external```
+
+Make sure you are in the root directory of the ```simple-engine-2``` before running this:
+
+```bash 
+docker run -it -e DISPLAY=$DISPLAY -v /tmp/.X11-unix:/tmp/.X11-unix -v $(pwd)/app:/simple-engine-2/app -v $(pwd)/core:/simple-engine-2/core -v $(pwd)/assets:/simple-engine-2/assets -v $(pwd)/config:/simple-engine-2/config -v $(pwd)/log:/simple-engine-2/log -v $(pwd)/CMakeLists.txt:/simple-engine-2/CMakeLists.txt simple-engine-2 bash
+```
+
+## After finishing with docker:
+Reminder to revoke Docker's access to X11 with:
+```bash
+xhost -local:docker
+```

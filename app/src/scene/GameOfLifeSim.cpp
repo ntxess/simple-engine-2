@@ -144,7 +144,7 @@ void GameOfLifeSim::render()
     const auto& scrView = m_reg.view<SceneViewRenderer>();
     for (const auto& sceneTextureID : scrView)
     {
-        auto& sceneRenderTexture = m_reg.get<SceneViewRenderer>(sceneTextureID).rd;
+        auto& sceneRenderTexture = m_reg.get<SceneViewRenderer>(sceneTextureID);
         int readIndex = m_currentReadBuffer.load(std::memory_order_acquire);
         const Grid& readGrid = m_grids[readIndex];
 
@@ -155,9 +155,9 @@ void GameOfLifeSim::render()
                 if (readGrid[index(x, y)] == 1)
                 {
                     sf::RectangleShape rectangle;
-                    rectangle.setSize(sf::Vector2f(1, 1));
-                    rectangle.setFillColor(sf::Color(50, 168, 82));
-                    rectangle.setPosition(static_cast<float>(x), static_cast<float>(y));
+                    rectangle.setSize({ 1, 1 });
+                    rectangle.setFillColor({ 50, 168, 82 });
+                    rectangle.setPosition({ static_cast<float>(x), static_cast<float>(y) });
                     sceneRenderTexture.draw(rectangle);
                 }
             }

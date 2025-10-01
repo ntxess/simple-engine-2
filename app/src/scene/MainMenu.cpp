@@ -10,14 +10,51 @@ MainMenu::MainMenu(ApplicationContext* sysData)
     , m_wallpaper(entt::null)
 {}
 
+MainMenu::~MainMenu()
+{
+    m_reg.clear();
+}
+
 void MainMenu::init()
 {
-    DataStore texturePath;
-    m_appContext->configDataSerializer.load("config/texture.json", texturePath);     // Load config file
-    m_appContext->textureManager.load(texturePath, thor::Resources::Reuse); // Load the texture from loaded paths
+    if (!m_appContext)
+    {
+        throw std::runtime_error("Application context not set for MainMenu scene.");
+    }
+    
+    // Load the config file for texture paths and load them into the resource manager
+    auto texturePaths = m_appContext->configDataSerializer.load("config/texture.json");
+    if (texturePaths)
+    {
+        for (const auto& [key, val] : texturePaths->lockedView())
+        {
+            try
+            {
+                auto path = std::filesystem::current_path() / std::any_cast<std::string>(val);
+                if (!m_appContext->textureManager.load(key, path.c_str(), ResourceManager<sf::Texture, MutexSync>::ManagementStrategy::Reuse))
+                {
+                    LOG_ERROR(Logger::get()) << "Failed to load texture: " << path;
+                }
+            }
+            catch (const std::bad_any_cast& e)
+            {
+                LOG_ERROR(Logger::get()) << "Invalid texture path for key: " << key << " - " << e.what();
+            }
+        }
+    }
+    else
+    {
+        LOG_ERROR(Logger::get()) << "Failed to load texture configuration file.";
+    }
 
     m_wallpaper = m_reg.create();
-    m_reg.emplace<Sprite>(m_wallpaper, m_appContext->textureManager["bg"]);
+    const auto& texture = m_appContext->textureManager.get("bg");
+    if (!texture)
+    {
+        LOG_ERROR(Logger::get()) << "Failed to get texture for generated entity!";
+        return;
+    }
+    m_reg.emplace<Sprite>(m_wallpaper, texture.value());
 }
 
 void MainMenu::processEvent(const sf::Event& event)
@@ -34,11 +71,11 @@ void MainMenu::render()
     const auto& scrView = m_reg.view<SceneViewRenderer>();
     for (const auto& sceneTextureID : scrView)
     {
-        auto& sceneRenderTexture = m_reg.get<SceneViewRenderer>(sceneTextureID).rd;
+        auto& sceneRenderTexture = m_reg.get<SceneViewRenderer>(sceneTextureID);
 
         if (m_reg.all_of<Sprite>(m_wallpaper))
         {
-            auto& spriteEntity = m_reg.get<Sprite>(m_wallpaper).sprite;
+            auto& spriteEntity = m_reg.get<Sprite>(m_wallpaper);
             sceneRenderTexture.draw(spriteEntity);
         }
     }

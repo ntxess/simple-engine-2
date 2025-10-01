@@ -1,22 +1,22 @@
 #include "Editor.hpp"
 
 Editor::Editor()
-    : m_appContext(nullptr)
-    , m_panelFlags(0)
-    , m_dockspaceId1(0)
-    , m_dockspaceId2(0)
-    , m_dockspaceId3(0)
-    , m_dockspaceId4(0)
-    , m_dockspaceId5(0)
-    , m_enableEntityID(false)
-    , m_enableEntityCollider(false)
-    , m_enableEntityHeading(false)
-    , m_enableEntityPosition(false)
-    , m_enableQuadTreeVisualizer(false)
-    , m_enableLogViewer(false)
-    , m_startButtonEnabled(false)
-    , m_forwardFrameEnabled(false)
-    , m_selectedSceneData(nullptr)
+    : m_appContext{nullptr}
+    , m_panelFlags{0}
+    , m_dockspaceId1{0}
+    , m_dockspaceId2{0}
+    , m_dockspaceId3{0}
+    , m_dockspaceId4{0}
+    , m_dockspaceId5{0}
+    , m_enableEntityID{false}
+    , m_enableEntityCollider{false}
+    , m_enableEntityHeading{false}
+    , m_enableEntityPosition{false}
+    , m_enableQuadTreeVisualizer{false}
+    , m_enableLogViewer{false}
+    , m_startButtonEnabled{false}
+    , m_forwardFrameEnabled{false}
+    , m_selectedSceneData{nullptr}
 {}
 
 Editor::Editor(ApplicationContext* sysData)
@@ -27,15 +27,14 @@ Editor::Editor(ApplicationContext* sysData)
 
 Editor::~Editor()
 {
-    ImGui::SFML::Shutdown();
+    // ImGui::SFML::Shutdown();
 }
 
 void Editor::init()
 {
-    DataStore fontConfigPath;
-    m_appContext->configDataSerializer.load("config/font.json", fontConfigPath);
-    auto cwd = std::filesystem::current_path().string();
-    if (!m_defaultFont.loadFromFile(cwd + fontConfigPath.get<std::string>("default_font").value()))
+    auto fontConfigPath = m_appContext->configDataSerializer.load("config/font.json")->get<std::string>("default_font").value();
+    auto path = std::filesystem::current_path() / fontConfigPath;
+    if (!m_defaultFont.loadFromFile(path))
     {
         LOG_FATAL(Logger::get()) << "Failed to load default font.";
     }
@@ -43,7 +42,7 @@ void Editor::init()
     sf::ContextSettings settings;
     settings.depthBits = 24;
     settings.stencilBits = 8;
-    settings.antialiasingLevel = 0;
+    settings.antiAliasingLevel = 0;
     settings.majorVersion = 4;
     settings.minorVersion = 3;
 
@@ -55,7 +54,11 @@ void Editor::init()
         ImGuiWindowFlags_NoNavFocus;
 
     // Enable and setup dockspaces
-    ImGui::SFML::Init(m_appContext->window);
+    if (!ImGui::SFML::Init(m_appContext->window))
+    {
+        LOG_FATAL(Logger::get()) << "Failed to initialize ImGui-SFML.";
+    }
+    
     auto& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
     io.ConfigWindowsMoveFromTitleBarOnly = true;
@@ -73,29 +76,28 @@ void Editor::init()
         settings
     );
 
-    m_editorSceneMap["MainMenu"] = std::make_unique<EditorSceneAdapter>(
-        std::make_unique<MainMenu>(m_appContext),
-        width,
-        height,
-        settings
-    );
+    // m_editorSceneMap["MainMenu"] = std::make_unique<EditorSceneAdapter>(
+    //     std::make_unique<MainMenu>(m_appContext),
+    //     width,
+    //     height,
+    //     settings
+    // );
 
-    m_editorSceneMap["GameOfLifeSim"] = std::make_unique<EditorSceneAdapter>(
-        std::make_unique<GameOfLifeSim>(m_appContext),
-        width,
-        height,
-        settings
-    );
+    // m_editorSceneMap["GameOfLifeSim"] = std::make_unique<EditorSceneAdapter>(
+    //     std::make_unique<GameOfLifeSim>(m_appContext),
+    //     width,
+    //     height,
+    //     settings
+    // );
 
     // Load in first scene of map
     m_selectedSceneKey = m_editorSceneMap.begin()->first;
     m_selectedSceneData = m_editorSceneMap.begin()->second.get();
-    m_gameView.setTexture(m_selectedSceneData->getRenderTexture().getTexture());
+    m_gameView = std::make_unique<sf::Sprite>(m_selectedSceneData->getRenderTexture().getTexture());
 
     // Register Component visitors for properties panel
     setupComponentVisitors(&m_componentVisitor);
 }
-
 
 void Editor::processEvent(const sf::Event& event)
 {
@@ -157,7 +159,7 @@ void Editor::render()
     renderAssetsExplorerPanel({ fifthWidth, scalingHeight }, { scalingWidth, height - scalingHeight });
     renderPropertiesPanel({ scalingFifthWidth, 0.f }, { width - scalingFifthWidth, height });
 
-    ImGui::ShowDemoWindow();
+    // ImGui::ShowDemoWindow();
 
     ImGui::SFML::Render(m_appContext->window);
 }
@@ -224,21 +226,23 @@ void Editor::renderDebugPanel(const ImVec2& pos, const ImVec2& size)
     const float buttonWidth = totalWidth / 3.f;
     const float buttonHeight = 20.f;
 
-    if (ImGui::Button("Play", ImVec2(buttonWidth, buttonHeight)))
+    if (ImGui::Button("Play", { buttonWidth, buttonHeight }))
     {
         m_startButtonEnabled = true;
         m_forwardFrameEnabled = false;
     }
+
     ImGui::SameLine();
 
-    if (ImGui::Button("Pause", ImVec2(buttonWidth, buttonHeight)))
+    if (ImGui::Button("Pause", { buttonWidth, buttonHeight }))
     {
         m_startButtonEnabled = false;
         m_forwardFrameEnabled = false;
     }
+
     ImGui::SameLine();
 
-    if (ImGui::Button("Forward", ImVec2(buttonWidth, buttonHeight)))
+    if (ImGui::Button("Forward", { buttonWidth, buttonHeight }))
     {
         m_startButtonEnabled = false;
         m_forwardFrameEnabled = true;
@@ -267,7 +271,7 @@ void Editor::renderDebugPanel(const ImVec2& pos, const ImVec2& size)
 
             ImGui::SliderInt("Entity Amount", &selectedEntityAmount, 0, 1000);
 
-            if (ImGui::Button("Replace Entity", ImVec2(buttonWidth, buttonHeight)))
+            if (ImGui::Button("Replace Entity", { buttonWidth, buttonHeight }))
             {
                 auto view = m_selectedSceneData->getRegistry().view<TeamTag>();
                 for (const auto& entityID : view)
@@ -287,7 +291,7 @@ void Editor::renderDebugPanel(const ImVec2& pos, const ImVec2& size)
 
             ImGui::SameLine();
 
-            if (ImGui::Button("Generate Entity", ImVec2(buttonWidth, buttonHeight)))
+            if (ImGui::Button("Generate Entity", { buttonWidth, buttonHeight }))
             {
                 generateEntities(selectedEntityAmount);
                 prevEntityAmount += selectedEntityAmount;
@@ -295,7 +299,7 @@ void Editor::renderDebugPanel(const ImVec2& pos, const ImVec2& size)
 
             ImGui::SameLine();
 
-            if (ImGui::Button("Remove Entity", ImVec2(buttonWidth, buttonHeight)))
+            if (ImGui::Button("Remove Entity", { buttonWidth, buttonHeight }))
             {
                 // Destroy all of the old generated entities
                 auto view = m_selectedSceneData->getRegistry().view<TeamTag>();
@@ -379,7 +383,7 @@ void Editor::renderLogViewPanel(const ImVec2& pos, const ImVec2& size)
 
     if (m_enableLogViewer)
     {
-        ImGui::BeginChild("##Log", ImVec2(0, 0), 0, ImGuiWindowFlags_HorizontalScrollbar);
+        ImGui::BeginChild("##Log", { 0, 0 }, 0, ImGuiWindowFlags_HorizontalScrollbar);
 
         m_logStream.update();
 
@@ -388,13 +392,13 @@ void Editor::renderLogViewPanel(const ImVec2& pos, const ImVec2& size)
             ImVec4 color;
             switch (log.type)
             {
-            case LogStream::LogType::None:    color = ImVec4(1.0f, 1.0f, 1.0f, 1.0f); break; // White
-            case LogStream::LogType::Trace:   color = ImVec4(1.0f, 1.0f, 1.0f, 1.0f); break; // White
-            case LogStream::LogType::Debug:   color = ImVec4(0.5f, 0.5f, 1.0f, 1.0f); break; // Light blue
-            case LogStream::LogType::Info:    color = ImVec4(0.5f, 0.5f, 1.0f, 1.0f); break; // Light blue
-            case LogStream::LogType::Warning: color = ImVec4(1.0f, 1.0f, 0.0f, 1.0f); break; // Yellow
-            case LogStream::LogType::Error:   color = ImVec4(1.0f, 0.0f, 0.0f, 1.0f); break; // Red
-            case LogStream::LogType::Fatal:   color = ImVec4(1.0f, 0.0f, 0.0f, 1.0f); break; // Red
+            case LogStream::LogType::None:    color = { 1.0f, 1.0f, 1.0f, 1.0f }; break; // White
+            case LogStream::LogType::Trace:   color = { 1.0f, 1.0f, 1.0f, 1.0f }; break; // White
+            case LogStream::LogType::Debug:   color = { 0.5f, 0.5f, 1.0f, 1.0f }; break; // Light blue
+            case LogStream::LogType::Info:    color = { 0.5f, 0.5f, 1.0f, 1.0f }; break; // Light blue
+            case LogStream::LogType::Warning: color = { 1.0f, 1.0f, 0.0f, 1.0f }; break; // Yellow
+            case LogStream::LogType::Error:   color = { 1.0f, 0.0f, 0.0f, 1.0f }; break; // Red
+            case LogStream::LogType::Fatal:   color = { 1.0f, 0.0f, 0.0f, 1.0f }; break; // Red
             }
 
             ImGui::TextColored(color, "%s", log.text.c_str());
@@ -434,19 +438,19 @@ void Editor::renderSceneViewPanel(const ImVec2& pos, const ImVec2& size)
     ImVec2 viewPos = getCenteredTLPos(region, m_appContext->aspectRatio);
 
     // Draw the scene texture with correct scaling
-    m_gameView.setTexture(renderTexture.getTexture(), true);
-    m_gameView.setScale(
-        drawSize.x / m_gameView.getTexture()->getSize().x,
-        drawSize.y / m_gameView.getTexture()->getSize().y
-    );
+    m_gameView->setTexture(renderTexture.getTexture(), true);
+    m_gameView->setScale({
+        drawSize.x / m_gameView->getTexture().getSize().x,
+        drawSize.y / m_gameView->getTexture().getSize().y
+    });
 
     // Render the selected scene as an image inside ImGui window
     ImGui::SetCursorScreenPos(viewPos);
-    ImGui::Image(m_gameView);
+    ImGui::Image(*m_gameView);
 
     // Update the memeber variables for the WayPoint Canvas to stay consistant with scene view size and scale
-    m_sceneDrawScale.x = drawSize.x / m_gameView.getTexture()->getSize().x;
-    m_sceneDrawScale.y = drawSize.y / m_gameView.getTexture()->getSize().y;
+    m_sceneDrawScale.x = drawSize.x / m_gameView->getTexture().getSize().x;
+    m_sceneDrawScale.y = drawSize.y / m_gameView->getTexture().getSize().y;
 
     ImGui::End();
 }
@@ -526,24 +530,24 @@ void Editor::displayEntityVisualizers()
     const auto& view = m_selectedSceneData->getRegistry().view<Sprite>();
     for (const auto& entityID : view)
     {
-        auto& spriteEntity = view.get<Sprite>(entityID).sprite;
+        auto& spriteEntity = view.get<Sprite>(entityID);
 
         if (m_enableEntityID)
         {
             sf::String ID(std::to_string(static_cast<int>(entityID)));
-            sf::Text IDText(ID, m_defaultFont, 20);
-            IDText.setPosition(
+            sf::Text IDText(m_defaultFont, ID, 20);
+            IDText.setPosition({
                 spriteEntity.getPosition().x + spriteEntity.getGlobalBounds().size.x,
                 spriteEntity.getPosition().y + spriteEntity.getGlobalBounds().size.y
-            );
+            });
             sceneRenderTexture.draw(IDText);
         }
 
         if (m_enableEntityCollider)
         {
             const auto& globalBounds = spriteEntity.getGlobalBounds();
-            sf::RectangleShape border({ globalBounds.width, globalBounds.height });
-            border.setOrigin(globalBounds.width / 2.f, globalBounds.height / 2.f);
+            sf::RectangleShape border({ globalBounds.position.x, globalBounds.position.y });
+            border.setOrigin({ globalBounds.position.x / 2.f, globalBounds.position.y / 2.f });
             border.setPosition(spriteEntity.getPosition());
             border.setRotation(spriteEntity.getRotation());
             border.setFillColor(sf::Color::Transparent);
@@ -553,7 +557,7 @@ void Editor::displayEntityVisualizers()
             static entt::entity player = findEntityID<PlayerInput>();
             if (player != entt::null &&
                 player != entityID &&
-                m_selectedSceneData->getRegistry().get<Sprite>(player).getGlobalBounds().intersects(spriteEntity.getGlobalBounds()))
+                m_selectedSceneData->getRegistry().get<Sprite>(player).getGlobalBounds().findIntersection(spriteEntity.getGlobalBounds()))
             {
                 border.setOutlineColor(sf::Color::Red);
                 LOG_TRACE(Logger::get())
@@ -571,10 +575,10 @@ void Editor::displayEntityVisualizers()
 
         if (m_enableEntityHeading)
         {
-            sf::RectangleShape northHeading(sf::Vector2f(50, 2));
-            sf::RectangleShape eastHeading(sf::Vector2f(50, 2));
+            sf::RectangleShape northHeading({ 50, 2 });
+            sf::RectangleShape eastHeading({ 50, 2 });
             northHeading.setPosition(spriteEntity.getPosition());
-            northHeading.setRotation(spriteEntity.getRotation() - 90);
+            northHeading.setRotation(spriteEntity.getRotation() - sf::degrees(90));
             eastHeading.setPosition(spriteEntity.getPosition());
             eastHeading.setRotation(spriteEntity.getRotation());
             sceneRenderTexture.draw(northHeading);
@@ -590,12 +594,11 @@ void Editor::displayEntityVisualizers()
                 << spriteEntity.getPosition().y;
 
             sf::String ID(oss.str());
-
-            sf::Text IDText(ID, m_defaultFont, 20);
-            IDText.setPosition(
+            sf::Text IDText(m_defaultFont, ID, 20);
+            IDText.setPosition({
                 spriteEntity.getPosition().x + spriteEntity.getGlobalBounds().size.x,
                 spriteEntity.getPosition().y
-            );
+            });
             sceneRenderTexture.draw(IDText);
         }
     }
@@ -665,7 +668,7 @@ void Editor::drawWayPointCanvas(const entt::entity& entityID, ComponentPropData&
     ImGui::PopStyleVar();
 
     // Center the image in the window content area
-    ImVec2 gameViewSize = { static_cast<float>(m_gameView.getTexture()->getSize().x), static_cast<float>(m_gameView.getTexture()->getSize().y) };
+    ImVec2 gameViewSize = { static_cast<float>(m_gameView->getTexture().getSize().x), static_cast<float>(m_gameView->getTexture().getSize().y) };
     ImVec2 canvasSize = { gameViewSize.x * m_sceneDrawScale.x, gameViewSize.y * m_sceneDrawScale.y };
     ImVec2 canvasPosTL = getCenteredTLPos(ImGui::GetContentRegionAvail(), m_appContext->aspectRatio);
     ImVec2 canvasPosBR = { canvasPosTL.x + canvasSize.x, canvasPosTL.y + canvasSize.y };
@@ -676,7 +679,7 @@ void Editor::drawWayPointCanvas(const entt::entity& entityID, ComponentPropData&
 
     // Draw the render scene as the background, pan and zoom alongside canvas
     ImGui::SetCursorScreenPos({ canvasPosTL.x + cmpntData.scrolling.x, canvasPosTL.y + cmpntData.scrolling.y });
-    ImGui::Image(m_gameView, { canvasSize.x * cmpntData.zoom, canvasSize.y * cmpntData.zoom });
+    ImGui::Image(*m_gameView, { canvasSize.x * cmpntData.zoom, canvasSize.y * cmpntData.zoom });
 
     // Draw the canvas
     drawWayPointContextMenu(entityID, cmpntData);
@@ -739,11 +742,11 @@ void Editor::drawWayPoints(const ImVec2& tlBound, const ImVec2& brBound, const I
         ImGui::SetCursorScreenPos(labelPos);
 
         // Draw the coordinate label
-        ImVec4 color = ImVec4(1.f, 1.f, 1.f, 1.f); // Default white
+        ImVec4 color = { 1.f, 1.f, 1.f, 1.f }; // Default white
         if (i == 0)                                // First waypoint will always be green
-            color = ImVec4(0.f, 1.f, 0.f, 1.f);
+            color = { 0.f, 1.f, 0.f, 1.f };
         else if (i == cmpntData.points.Size - 1)   // Last waypoint will alaywas be red
-            color = ImVec4(1.f, 0.f, 0.f, 1.f);
+            color = { 1.f, 0.f, 0.f, 1.f };
 
         ImGui::TextColored(color, "(%.2f, %.2f)", cmpntData.points[i].x, cmpntData.points[i].y);
     }
@@ -827,7 +830,7 @@ void Editor::updateWayPointComponent(const entt::entity& entityID, ComponentProp
             WayPoint* current = movement.movePattern.get();
             movement.currentPath = movement.movePattern.get();
             movement.distance = 0.f;
-            sprite.setPosition(current->coordinate.x, current->coordinate.y);
+            sprite.setPosition({ current->coordinate.x, current->coordinate.y });
 
             // Find last and second to last waypoint
             WayPoint* prev = nullptr;
@@ -945,8 +948,14 @@ void Editor::generateEntities(size_t numOfEntities)
 
         // Entity create and store into the scene's ENTT::entity registry
         entt::entity mob = m_selectedSceneData->createEntity();
-        m_selectedSceneData->getRegistry().emplace<Sprite>(mob, m_appContext->textureManager["player"]);
-        m_selectedSceneData->getRegistry().get<Sprite>(mob).setPosition(root->coordinate.x, root->coordinate.y);
+        const auto& texture = m_appContext->textureManager.get("player");
+        if (!texture)
+        {
+            LOG_ERROR(Logger::get()) << "Failed to get texture for generated entity!";
+            return;
+        }
+        m_selectedSceneData->getRegistry().emplace<Sprite>(mob, texture.value());
+        m_selectedSceneData->getRegistry().get<Sprite>(mob).setPosition({ root->coordinate.x, root->coordinate.y });
         m_selectedSceneData->getRegistry().emplace<EntityStatus>(mob);
         m_selectedSceneData->getRegistry().get<EntityStatus>(mob).values["HP"] = 100.f;
         m_selectedSceneData->getRegistry().get<EntityStatus>(mob).values["Speed"] = 0.5f;

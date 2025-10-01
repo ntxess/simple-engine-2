@@ -1,5 +1,5 @@
 {
-  "player": "/assets/player/player.png",
-  "bg": "/assets/bg_city/city 1/1.png",
-  "coin": "/assets/coin/coin.png"
+  "player": "assets/player/player.png",
+  "bg": "assets/bg_city/city 1/1.png",
+  "coin": "assets/coin/coin.png"
 }

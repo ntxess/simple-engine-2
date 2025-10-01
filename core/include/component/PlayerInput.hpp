@@ -15,5 +15,5 @@ public:
 
     void processInput(entt::registry& reg);
 
-    std::unordered_map<sf::Keyboard::Key, ICommand*> input;
+    std::unordered_map<sf::Keyboard::Scancode, ICommand*> input;
 };

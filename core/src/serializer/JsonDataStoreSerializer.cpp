@@ -8,7 +8,7 @@ JsonDataStoreSerializer::JsonDataStoreSerializer(std::filesystem::path path)
     : DataStoreSerializerBase(path)
 {}
 
-bool JsonDataStoreSerializer::load(std::string_view filename, DataStore& dataStore)
+std::expected<DataStore<>, bool> JsonDataStoreSerializer::load(std::string_view filename)
 {
     const auto path = resolvePath(filename.data());
     std::ifstream ifs(path, std::fstream::app);
@@ -16,13 +16,13 @@ bool JsonDataStoreSerializer::load(std::string_view filename, DataStore& dataSto
     if (!ifs.good())
     {
         LOG_ERROR(Logger::get()) << "File cannot be read: " << path.c_str();
-        return false;
+        return std::unexpected(false);
     }
 
     if (std::filesystem::is_empty(path))
     {
         LOG_ERROR(Logger::get()) << "File cannot be found: " << path.c_str();
-        return false;
+        return std::unexpected(false);
     }
 
     rapidjson::IStreamWrapper isw(ifs);
@@ -30,12 +30,13 @@ bool JsonDataStoreSerializer::load(std::string_view filename, DataStore& dataSto
     doc.ParseStream(isw);
 
     std::string key;
+    DataStore<> dataStore;
     read(key, doc, dataStore);
 
-    return true;
+    return dataStore;
 }
 
-bool JsonDataStoreSerializer::save(std::string_view filename, const DataStore& dataStore)
+std::expected<DataStore<>, bool> JsonDataStoreSerializer::save(std::string_view filename)
 {
     const auto path = resolvePath(filename.data());
     std::ifstream ifs(path, std::fstream::app);
@@ -43,10 +44,11 @@ bool JsonDataStoreSerializer::save(std::string_view filename, const DataStore& d
     if (!ifs.good())
     {
         LOG_ERROR(Logger::get()) << "File cannot be read: " << path.c_str();
-        return false;
+        return std::unexpected(false);
     }
 
     rapidjson::Document doc;
+    DataStore<> dataStore;
     doc.SetObject();
     write(doc, dataStore);
 
@@ -59,15 +61,15 @@ bool JsonDataStoreSerializer::save(std::string_view filename, const DataStore& d
     if (!ofs.good())
     {
         LOG_ERROR(Logger::get()) << "File cannot be written: " << path.c_str();
-        return false;
+        return std::unexpected(false);
     }
 
     ofs << json;
 
-    return true;
+    return dataStore;
 }
 
-bool JsonDataStoreSerializer::update(std::string_view filename, const DataStore& dataStore)
+std::expected<DataStore<>, bool> JsonDataStoreSerializer::update(std::string_view filename)
 {
     const auto path = resolvePath(filename.data());
     std::ifstream ifs(path, std::fstream::app);
@@ -75,7 +77,7 @@ bool JsonDataStoreSerializer::update(std::string_view filename, const DataStore&
     if (!ifs.good())
     {
         LOG_ERROR(Logger::get()) << "File cannot be read: " << path.c_str();
-        return false;
+        return std::unexpected(false);
     }
 
     // Read in the json file
@@ -84,6 +86,7 @@ bool JsonDataStoreSerializer::update(std::string_view filename, const DataStore&
     doc.ParseStream(isw);
 
     // Update the json document with the new data
+    DataStore dataStore;
     if (doc.IsObject())
     {
         findAndReplace(doc, doc, dataStore);
@@ -91,7 +94,7 @@ bool JsonDataStoreSerializer::update(std::string_view filename, const DataStore&
     else
     {
         LOG_ERROR(Logger::get()) << "Invalid JSON format in file: " << path.c_str();
-        return false;
+        return std::unexpected(false);
     }
 
     // Setup the document to write
@@ -104,15 +107,15 @@ bool JsonDataStoreSerializer::update(std::string_view filename, const DataStore&
     if (!ofs.good())
     {
         LOG_ERROR(Logger::get()) << "File cannot be written: " << path.c_str();
-        return false;
+        return std::unexpected(false);
     }
 
     ofs << json;
 
-    return true;
+    return dataStore;
 }
 
-void JsonDataStoreSerializer::read(std::string_view key, rapidjson::Value& val, DataStore& dataStore)
+void JsonDataStoreSerializer::read(std::string_view key, rapidjson::Value& val, DataStore<>& dataStore)
 {
     if (val.IsObject())
     {
@@ -166,7 +169,7 @@ void JsonDataStoreSerializer::read(std::string_view key, rapidjson::Value& val, 
     }
 }
 
-void JsonDataStoreSerializer::write(rapidjson::Document& doc, const DataStore& dataStore)
+void JsonDataStoreSerializer::write(rapidjson::Document& doc, const DataStore<>& dataStore)
 {
     for (const auto& [key, data] : dataStore)
     {
@@ -182,7 +185,7 @@ void JsonDataStoreSerializer::write(rapidjson::Document& doc, const DataStore& d
     }
 }
 
-void JsonDataStoreSerializer::findAndReplace(rapidjson::Document& doc, rapidjson::Value& val, const DataStore& dataStore)
+void JsonDataStoreSerializer::findAndReplace(rapidjson::Document& doc, rapidjson::Value& val, const DataStore<>& dataStore)
 {
     if (val.IsObject())
     {
@@ -230,11 +233,13 @@ std::optional<std::any> JsonDataStoreSerializer::valueToAny(const rapidjson::Val
     }
 
     case rapidjson::kNumberType:
+    {
         if (val.IsInt())
             return val.GetInt();
         else if (val.IsDouble())
             return val.GetDouble();
         else return std::string();
+    }
 
     case rapidjson::kTrueType:
         [[fallthrough]];
@@ -244,8 +249,16 @@ std::optional<std::any> JsonDataStoreSerializer::valueToAny(const rapidjson::Val
 
     case rapidjson::kArrayType:
         return val.GetArray();
+    
+    case rapidjson::kObjectType:
+        return std::nullopt;
+        
+    case rapidjson::kNullType:
+        return std::nullopt;
+    
+    default:
+        return std::nullopt;
     }
-    return std::nullopt;
 }
 
 std::optional<rapidjson::Value> JsonDataStoreSerializer::createJsonValue(rapidjson::Document& doc, const std::any& data)

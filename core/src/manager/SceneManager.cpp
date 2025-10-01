@@ -4,7 +4,9 @@
  * @brief [Public] Default constructor.
 */
 SceneManager::SceneManager()
-    : m_removeFlag(false), m_addFlag(false), m_replaceFlag(false)
+    : m_removeFlag{false}
+    , m_addFlag{false}
+    , m_replaceFlag{false}
 {}
 
 /**

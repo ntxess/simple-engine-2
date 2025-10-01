@@ -1,11 +1,13 @@
 #include "UpdateEntityPolling.hpp"
 
 UpdateEntityPolling::UpdateEntityPolling()
-    : timeStart(std::chrono::steady_clock::now()), maxDuration(0)
+    : timeStart{std::chrono::steady_clock::now()}
+    , maxDuration{0}
 {}
 
 UpdateEntityPolling::UpdateEntityPolling(std::chrono::milliseconds duration, bool readyOnStart)
-    : timeStart(std::chrono::steady_clock::now()), maxDuration(duration)
+    : timeStart{std::chrono::steady_clock::now()}
+    , maxDuration{duration}
 {}
 
 void UpdateEntityPolling::accept(IComponentVisitor* visitor, entt::entity entityID)

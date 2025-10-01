@@ -6,109 +6,44 @@
 #include <SFML/Graphics/Sprite.hpp>
 #include <SFML/Graphics/Texture.hpp>
 
-class Sprite : public IComponent
+class Sprite : public IComponent, public sf::Sprite
 {
 public:
+    using sf::Sprite::setTexture;
+    using sf::Sprite::setTextureRect;
+    using sf::Sprite::setColor;
+    using sf::Sprite::getTexture;
+    using sf::Sprite::getTextureRect;
+    using sf::Sprite::getLocalBounds;
+    using sf::Sprite::getGlobalBounds;
+    using sf::Sprite::setPosition;
+    using sf::Sprite::setRotation;
+    using sf::Sprite::setScale;
+    using sf::Sprite::setOrigin;
+    using sf::Sprite::getPosition;
+    using sf::Sprite::getRotation;
+    using sf::Sprite::getScale;
+    using sf::Sprite::getOrigin;
+    using sf::Sprite::move;
+    using sf::Sprite::rotate;
+    using sf::Sprite::scale;
+    using sf::Sprite::getTransform;
+    using sf::Sprite::getInverseTransform;
+    using allocator_type = std::allocator<Sprite>;
+
     Sprite() = delete;
-    Sprite(sf::Texture& texture, bool repeat = false);
-    Sprite(sf::Texture& texture, int width, int height, bool repeat = false);
+    Sprite(const sf::Texture& texture);
+    Sprite(const sf::Texture& texture, int width, int height);
+
+    // Allocator-aware forms - required by EnTT
+    Sprite(const sf::Texture& texture, const allocator_type& alloc);
+    Sprite(const sf::Texture& texture, int width, int height, const allocator_type& alloc);
+    Sprite(std::allocator_arg_t, const allocator_type& alloc, const sf::Texture& texture);
+    Sprite(std::allocator_arg_t, const allocator_type& alloc, const sf::Texture& texture, int width, int height);
+
+    // Copy/Move with allocator
+    Sprite(const Sprite& other, const allocator_type& alloc);
+    Sprite(Sprite&& other, const allocator_type& alloc) noexcept;
 
     void accept(IComponentVisitor* visitor, entt::entity entityID) override;
-
-    inline const sf::Vector2f& getOrigin() const
-    {
-        return sprite.getOrigin();
-    }
-
-    inline const sf::Vector2f& getPosition() const
-    {
-        return sprite.getPosition();
-    }
-
-    inline float getRotation() const
-    {
-        return sprite.getRotation();
-    }
-
-    inline const sf::Vector2f& getScale() const
-    {
-        return sprite.getScale();
-    }
-
-    inline void move(float offsetX, float offsetY)
-    {
-        sprite.move(offsetX, offsetY);
-    }
-
-    inline void rotate(float angle)
-    {
-        sprite.rotate(angle);
-    }
-
-    inline void scale(float factorX, float factorY)
-    {
-        sprite.scale(factorX, factorY);
-    }
-
-    inline void setOrigin(float x, float y)
-    {
-        sprite.setOrigin(x, y);
-    }
-
-    inline void setPosition(float x, float y)
-    {
-        sprite.setPosition(x, y);
-    }
-
-    inline void setRotation(float angle)
-    {
-        sprite.setRotation(angle);
-    }
-
-    inline void setScale(float factorX, float factorY)
-    {
-        sprite.setScale(factorX, factorY);
-    }
-
-    inline void setTexture(const sf::Texture& texture, bool resetRect = false)
-    {
-        sprite.setTexture(texture, resetRect);
-    }
-
-    inline void setTextureRect(const sf::IntRect& rectangle)
-    {
-        sprite.setTextureRect(rectangle);
-    }
-
-    inline sf::FloatRect getGlobalBounds() const
-    {
-        return sprite.getGlobalBounds();
-    }
-
-    inline sf::FloatRect getLocalBounds() const
-    {
-        return sprite.getLocalBounds();
-    }
-
-    inline void setColor(const sf::Color& color)
-    {
-        sprite.setColor(color);
-    }
-
-    inline const sf::Texture* getTexture() const
-    {
-        return sprite.getTexture();
-    }
-
-    inline const sf::IntRect& getTextureRect() const
-    {
-        return sprite.getTextureRect();
-    }
-
-    inline const sf::Color& getColor() const
-    {
-        return sprite.getColor();
-    }
-
-    sf::Sprite sprite;
 };

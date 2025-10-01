@@ -1,11 +1,11 @@
 #include "TeamTag.hpp"
 
 TeamTag::TeamTag()
-    : tag(Team::UNAFFILIATED)
+    : tag{Team::UNAFFILIATED}
 {}
 
 TeamTag::TeamTag(Team tag)
-    : tag(tag)
+    : tag{tag}
 {}
 
 void TeamTag::accept(IComponentVisitor* visitor, entt::entity entityID)
