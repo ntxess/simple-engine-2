@@ -63,8 +63,8 @@ private:
         LOG_INFO(Logger::get()) << "Tracking [" << typeid(T).name() << "] component";
 
         // The lambda signature must match: void(entt::registry&, entt::entity)
-        reg.on_construct<T>().connect<&EditorSceneAdapter::onComponentConstruct<T>>(*this);
-        reg.on_destroy<T>().connect<&EditorSceneAdapter::onComponentDestroy<T>>(*this);
+        reg.on_construct<T>().template connect<&EditorSceneAdapter::onComponentConstruct<T>>(*this);
+        reg.on_destroy<T>().template connect<&EditorSceneAdapter::onComponentDestroy<T>>(*this);
     }
 
     template<typename T>
