@@ -89,19 +89,19 @@ void Editor::init()
         settings
     );
 
-    // m_editorSceneMap["MainMenu"] = std::make_unique<EditorSceneAdapter>(
-    //     std::make_unique<MainMenu>(m_appContext),
-    //     width,
-    //     height,
-    //     settings
-    // );
+    m_editorSceneMap["MainMenu"] = std::make_unique<EditorSceneAdapter>(
+        std::make_unique<MainMenu>(m_appContext),
+        width,
+        height,
+        settings
+    );
 
-    // m_editorSceneMap["GameOfLifeSim"] = std::make_unique<EditorSceneAdapter>(
-    //     std::make_unique<GameOfLifeSim>(m_appContext),
-    //     width,
-    //     height,
-    //     settings
-    // );
+    m_editorSceneMap["GameOfLifeSim"] = std::make_unique<EditorSceneAdapter>(
+        std::make_unique<GameOfLifeSim>(m_appContext),
+        width,
+        height,
+        settings
+    );
 
     // Load in first scene of map
     m_selectedSceneKey = m_editorSceneMap.begin()->first;
