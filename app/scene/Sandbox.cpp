@@ -56,7 +56,7 @@ void Sandbox::init()
         LOG_ERROR(Logger::get()) << "Failed to get texture for generated entity!";
         return;
     }
-    m_reg.emplace<Sprite>(m_player, texture.value());
+    m_reg.emplace<Sprite>(m_player, texture.value().get());
     m_reg.emplace<TeamTag>(m_player, Team::FRIENDLY);
     m_reg.emplace<PlayerInput>(m_player);
     m_reg.emplace<EffectsList>(m_player);

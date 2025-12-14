@@ -55,7 +55,7 @@ void MainMenu::init()
         LOG_ERROR(Logger::get()) << "Failed to get texture for generated entity!";
         return;
     }
-    m_reg.emplace<Sprite>(m_wallpaper, texture.value());
+    m_reg.emplace<Sprite>(m_wallpaper, texture.value().get());
 }
 
 void MainMenu::processEvent(const sf::Event& event)

@@ -971,7 +971,7 @@ void Editor::generateEntities(size_t numOfEntities)
             LOG_ERROR(Logger::get()) << "Failed to get texture for generated entity!";
             return;
         }
-        m_selectedSceneData->getRegistry().emplace<Sprite>(mob, texture.value());
+        m_selectedSceneData->getRegistry().emplace<Sprite>(mob, texture.value().get());
         m_selectedSceneData->getRegistry().get<Sprite>(mob).setPosition({ root->coordinate.x, root->coordinate.y });
         m_selectedSceneData->getRegistry().emplace<EntityStatus>(mob);
         m_selectedSceneData->getRegistry().get<EntityStatus>(mob).values["HP"] = 100.f;

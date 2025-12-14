@@ -3,6 +3,7 @@
 #include <any>
 #include <expected>
 #include <filesystem>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -37,7 +38,7 @@ public:
     ResourceManager(const ResourceManager&) = delete;
     ResourceManager& operator=(const ResourceManager&) = delete;
 
-    std::expected<mapped_type, bool> get(std::string_view key) const;
+    std::expected<std::reference_wrapper<const mapped_type>, bool> get(std::string_view key) const;
     bool load(std::string_view key, std::string_view filepath, ResourceManager::ManagementStrategy known = ResourceManager::ManagementStrategy::Reuse);
     void unload(std::string_view key);
     void unloadAll();
@@ -48,12 +49,12 @@ private:
 };
 
 template <typename T, typename SyncPolicy>
-inline std::expected<T, bool> ResourceManager<T, SyncPolicy>::get(std::string_view key) const
+inline std::expected<std::reference_wrapper<const T>, bool> ResourceManager<T, SyncPolicy>::get(std::string_view key) const
 {
     std::unique_lock<SyncPolicy> lock(m_sync);
     auto it = m_holder.find(key);
     if (it != m_holder.end())
-        return it->second;
+        return std::cref(it->second);
     return std::unexpected(false);
 }
 
@@ -78,7 +79,7 @@ inline bool ResourceManager<T, SyncPolicy>::load(std::string_view key, std::stri
             LOG_ERROR(Logger::get()) << "Resource with key already exists: " << key;
             return false;
         }
-        m_holder[std::string(key)] = resource;
+        m_holder[std::string(key)] = std::move(resource);
         return true;
     }
     else if (known == ResourceManager::ManagementStrategy::Reuse)
@@ -87,7 +88,7 @@ inline bool ResourceManager<T, SyncPolicy>::load(std::string_view key, std::stri
         // and return true for consistency.
         if (m_holder.find(key) == m_holder.end())
         {
-            m_holder[std::string(key)] = resource;
+            m_holder[std::string(key)] = std::move(resource);
         }
         return true;
     }
@@ -95,7 +96,7 @@ inline bool ResourceManager<T, SyncPolicy>::load(std::string_view key, std::stri
     {
         // Always load new resource.
         // Resource does not need to be manually cleanup.
-        m_holder[std::string(key)] = resource;
+        m_holder[std::string(key)] = std::move(resource);
         return true;
     }
     return false;
