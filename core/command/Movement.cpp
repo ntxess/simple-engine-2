@@ -1,4 +1,5 @@
 #include "command/Movement.hpp"
+#include "component/UpdateEntityEvent.hpp"
 
 Movement::Movement(const entt::entity entityID, sf::Vector2f direction)
     : entityId{entityID}

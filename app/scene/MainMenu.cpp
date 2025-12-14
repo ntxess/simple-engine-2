@@ -30,7 +30,7 @@ void MainMenu::init()
         {
             try
             {
-                auto path = std::filesystem::current_path() / std::any_cast<std::string>(val);
+                auto path = std::filesystem::current_path().append(std::any_cast<std::string>(val));
                 const auto pathStr = path.generic_string();
                 if (!m_appContext->textureManager.load(key, pathStr, ResourceManager<sf::Texture, MutexSync>::ManagementStrategy::Reuse))
                 {
