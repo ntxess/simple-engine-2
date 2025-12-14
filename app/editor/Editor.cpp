@@ -440,6 +440,8 @@ void Editor::renderSceneViewPanel(const ImVec2& pos, const ImVec2& size)
 
     // Clear the previous buffer then call to the actual scenes render function
     renderTexture.clear();
+
+    // Draw the scene texture onto the render texture as out pseudo-game view
     m_selectedSceneData->render();
 
     displayEntityVisualizers();
@@ -450,20 +452,16 @@ void Editor::renderSceneViewPanel(const ImVec2& pos, const ImVec2& size)
     ImVec2 drawSize = scaleSize(region, m_appContext->aspectRatio);
     ImVec2 viewPos = getCenteredTLPos(region, m_appContext->aspectRatio);
 
-    // Draw the scene texture with correct scaling
-    m_gameView->setTexture(renderTexture.getTexture(), true);
-    m_gameView->setScale({
-        drawSize.x / m_gameView->getTexture().getSize().x,
-        drawSize.y / m_gameView->getTexture().getSize().y
-    });
-
     // Render the selected scene as an image inside ImGui window
     ImGui::SetCursorScreenPos(viewPos);
-    ImGui::Image(*m_gameView);
+
+    // IMPORTANT: Draw the render texture directly, because ImGui-SFML flips RenderTexture UVs
+    // (RenderTextures are stored upside-down internally).
+    ImGui::Image(renderTexture, { drawSize.x, drawSize.y });
 
     // Update the memeber variables for the WayPoint Canvas to stay consistant with scene view size and scale
-    m_sceneDrawScale.x = drawSize.x / m_gameView->getTexture().getSize().x;
-    m_sceneDrawScale.y = drawSize.y / m_gameView->getTexture().getSize().y;
+    m_sceneDrawScale.x = drawSize.x / static_cast<float>(renderTexture.getSize().x);
+    m_sceneDrawScale.y = drawSize.y / static_cast<float>(renderTexture.getSize().y);
 
     ImGui::End();
 }
@@ -696,7 +694,8 @@ void Editor::drawWayPointCanvas(const entt::entity& entityID, ComponentPropData&
 
     // Draw the render scene as the background, pan and zoom alongside canvas
     ImGui::SetCursorScreenPos({ canvasPosTL.x + cmpntData.scrolling.x, canvasPosTL.y + cmpntData.scrolling.y });
-    ImGui::Image(*m_gameView, { canvasSize.x * cmpntData.zoom, canvasSize.y * cmpntData.zoom });
+    // IMPORTANT: Draw the render texture directly, because ImGui-SFML flips RenderTexture UVs.
+    ImGui::Image(m_selectedSceneData->getRenderTexture(), { canvasSize.x * cmpntData.zoom, canvasSize.y * cmpntData.zoom });
 
     // Draw the canvas
     drawWayPointContextMenu(entityID, cmpntData);
