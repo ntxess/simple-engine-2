@@ -12,7 +12,7 @@ set(DEP_DIR "${CMAKE_SOURCE_DIR}/dep")
 
 target_include_directories(core_engine PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}            # core/ as include root
-    ${DEP_DIR}/entt-3.16.0/single_include  # EnTT
+    ${DEP_DIR}/entt-3.16.0/src             # EnTT
     ${DEP_DIR}/rapidjson-1.1.0/include     # RapidJSON
     ${DEP_DIR}/tomlplusplus-3.4.0/include  # toml++
 )

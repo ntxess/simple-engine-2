@@ -1,10 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 project(simple-engine-2 VERSION 1.0 LANGUAGES CXX)
 
-if(POLICY CMP0167)
-  # CMake 4 warns about FindBoost deprecation/removal; keep using FindBoost for now.
-  cmake_policy(SET CMP0167 OLD)
-endif()
 if(POLICY CMP0144)
   # Make find_package honor <PackageName>_ROOT variables (e.g. Boost_ROOT).
   cmake_policy(SET CMP0144 NEW)
@@ -36,8 +32,7 @@ set(IMGUI_SFML_BUILD_TESTING OFF CACHE BOOL "Build ImGui-SFML tests" FORCE)
 add_subdirectory("${DEP_DIR}/imgui-sfml-3.0" "${CMAKE_BINARY_DIR}/_deps/imgui-sfml")
 
 # Boost (expects a built/installed Boost with compiled libraries)
-set(Boost_NO_WARN_NEW_VERSIONS ON)
-set(Boost_USE_STATIC_LIBS OFF)
+set(Boost_USE_STATIC_LIBS ON)
 set(Boost_USE_MULTITHREADED ON)
 set(Boost_USE_STATIC_RUNTIME OFF)
 
@@ -47,7 +42,48 @@ set(Boost_ROOT "${DEP_DIR}/boost_1_90_0" CACHE PATH "Boost root directory" FORCE
 set(BOOST_INCLUDEDIR "${DEP_DIR}/boost_1_90_0" CACHE PATH "Boost include directory" FORCE)
 set(BOOST_LIBRARYDIR "${DEP_DIR}/boost_1_90_0/stage/lib" CACHE PATH "Boost library directory (after building Boost)" FORCE)
 
-find_package(Boost 1.90.0 REQUIRED COMPONENTS log log_setup filesystem system thread)
+set(Boost_DIR "${DEP_DIR}/boost_1_90_0/stage/lib/cmake/Boost-1.90.0" CACHE PATH "Boost CMake package directory" FORCE)
+
+# Some Boost builds (notably when Boost.System is header-only) don't generate a
+# boost_system CMake package, but other Boost packages still list it as a
+# dependency. Provide a small shim so `find_package(boost_system ...)` succeeds.
+if(NOT EXISTS "${DEP_DIR}/boost_1_90_0/stage/lib/cmake/boost_system-1.90.0/boost_system-config.cmake")
+  set(_BOOST_SYSTEM_SHIM_DIR "${CMAKE_BINARY_DIR}/_deps/boost_system-1.90.0")
+  file(MAKE_DIRECTORY "${_BOOST_SYSTEM_SHIM_DIR}")
+
+  file(WRITE "${_BOOST_SYSTEM_SHIM_DIR}/boost_system-config.cmake" [==[
+# Auto-generated shim for Boost.System (header-only)
+if(TARGET Boost::system)
+  set(boost_system_FOUND 1)
+  return()
+endif()
+
+add_library(Boost::system INTERFACE IMPORTED)
+set_target_properties(Boost::system PROPERTIES
+  INTERFACE_INCLUDE_DIRECTORIES "${Boost_ROOT}"
+)
+
+set(boost_system_VERSION "1.90.0")
+set(boost_system_FOUND 1)
+]==])
+
+  file(WRITE "${_BOOST_SYSTEM_SHIM_DIR}/boost_system-config-version.cmake" [==[
+set(PACKAGE_VERSION "1.90.0")
+
+if(PACKAGE_VERSION VERSION_LESS PACKAGE_FIND_VERSION)
+  set(PACKAGE_VERSION_COMPATIBLE FALSE)
+else()
+  set(PACKAGE_VERSION_COMPATIBLE TRUE)
+  if(PACKAGE_FIND_VERSION STREQUAL PACKAGE_VERSION)
+    set(PACKAGE_VERSION_EXACT TRUE)
+  endif()
+endif()
+]==])
+
+  set(boost_system_DIR "${_BOOST_SYSTEM_SHIM_DIR}" CACHE PATH "Shim boost_system package directory" FORCE)
+endif()
+
+find_package(Boost 1.90.0 CONFIG REQUIRED COMPONENTS log log_setup filesystem system thread)
 
 # Add subdirectories for core and app
 add_subdirectory(core)
