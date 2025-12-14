@@ -66,12 +66,14 @@ std::vector<entt::entity> QuadTree::queryRange(entt::registry& reg, const sf::Fl
 {
     std::vector<entt::entity> entityFound;
 
-    if (!m_boundary.findIntersection(range))
+    if (!m_boundary.findIntersection(range).has_value())
         return entityFound;
 
     for (auto entity : m_nodes)
     {
-        if (reg.valid(entity) && reg.all_of<Sprite>(entity) && range.findIntersection(reg.get<Sprite>(entity).getGlobalBounds()))
+        if (reg.valid(entity) &&
+            reg.all_of<Sprite>(entity) &&
+            range.findIntersection(reg.get<Sprite>(entity).getGlobalBounds()).has_value())
             entityFound.push_back(entity);
     }
 

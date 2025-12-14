@@ -305,7 +305,7 @@ void EditorComponentVisitor::visit(Sprite* sprite, entt::entity entityID)
     float yPos = sprite->getPosition().y;
     float xScale = sprite->getScale().x;
     float yScale = sprite->getScale().y;
-    static float rotationDegree = sprite->getRotation().asDegrees();
+    float rotationDegree = sprite->getRotation().asDegrees();
 
     ImGui::Text("Position");
     ImGui::SameLine(divider1Pos);

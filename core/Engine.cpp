@@ -22,6 +22,7 @@ Engine::Engine(const std::string& relativeConfigPath, std::unique_ptr<IScene> in
     auto configData = m_appContext->configDataSerializer.load(relativeConfigPath);
     if (configData)
     {
+        LOG_DEBUG(Logger::get()) << "Loaded configuration data successfully.";
         m_appContext->configData = std::move(*configData);
         configureWindow(std::move(initialScene));
     }
@@ -41,29 +42,48 @@ void Engine::run()
 {
     LOG_INFO(Logger::get()) << "----- Main thread started -----";
 
+    // Release the OpenGL context from the main thread before the render thread claims it.
+    // This also ensures any resources created during init (textures, ImGui font atlas, etc.)
+    // were created while the window context was active on this thread.
+    if (!m_appContext->window.setActive(false))
+    {
+        LOG_FATAL(Logger::get()) << "Failed to set Main thread to inactive";
+        return;
+    }
+
     startThreads();
 
     while (m_windowActive)
     {
-        const std::optional<sf::Event> event = m_appContext->window.waitEvent();
-        if (event->is<sf::Event::Closed>())
+        const std::optional<sf::Event> eventOpt = m_appContext->window.waitEvent();
+        if (!eventOpt)
+        {
+            LOG_INFO(Logger::get()) << "SF::Event::waitEvent() returned no event. Skipping event processing.";
+            continue;
+        }
+
+        const sf::Event& event = *eventOpt;
+        if (event.is<sf::Event::Closed>())
         {
             LOG_INFO(Logger::get()) << "Triggered Event::Closed";
             m_windowActive = false;
-            m_physicThread.join();
-            m_renderThread.join();
-            m_audioThread.join();
-            m_resourceThread.join();
+            if (m_physicThread.joinable()) m_physicThread.join();
+            if (m_renderThread.joinable()) m_renderThread.join();
+            if (m_audioThread.joinable()) m_audioThread.join();
+            if (m_resourceThread.joinable()) m_resourceThread.join();
             m_appContext->window.close();
         }
-        else if (const auto* resized = event->getIf<sf::Event::Resized>())
+        else if (const auto* resized = event.getIf<sf::Event::Resized>())
         {
             LOG_INFO(Logger::get()) << "Triggered Event::Resized";
-            float newWidth = static_cast<float>(resized->size.x);
+            const unsigned int resizedWidth = static_cast<unsigned int>(resized->size.x);
+            const unsigned int resizedHeight = static_cast<unsigned int>(resized->size.y);
+
+            float newWidth = static_cast<float>(resizedWidth);
             float newHeight = newWidth / m_appContext->aspectRatio;
-            if (newHeight > resized->size.y)
+            if (newHeight > static_cast<float>(resizedHeight))
             {
-                newHeight = static_cast<float>(resized->size.y);
+                newHeight = static_cast<float>(resizedHeight);
                 newWidth = newHeight * m_appContext->aspectRatio;
             }
     
@@ -74,19 +94,19 @@ void Engine::run()
     
             m_appContext->viewport.setSize({newWidth, newHeight});
         }
-        else if (event->is<sf::Event::FocusLost>())
+        else if (event.is<sf::Event::FocusLost>())
         {
             LOG_INFO(Logger::get()) << "Triggered Event::LostFocus";
             m_appContext->sceneManager.getActiveScene()->pause();
         }
-        else if (event->is<sf::Event::FocusGained>())
+        else if (event.is<sf::Event::FocusGained>())
         {
             LOG_INFO(Logger::get()) << "Triggered Event::GainedFocus";
             m_appContext->sceneManager.getActiveScene()->resume();
         }
         else
         {
-            m_appContext->sceneManager.getActiveScene()->processEvent(event.value());
+            m_appContext->sceneManager.getActiveScene()->processEvent(event);
         }
     }
 
@@ -118,13 +138,10 @@ void Engine::configureWindow(std::unique_ptr<IScene> initialScene)
     std::string name = m_appContext->configData.get<std::string>("name").value_or("Application");
     unsigned int width = m_appContext->configData.get<int>("width").value_or(1920);
     unsigned int height = m_appContext->configData.get<int>("height").value_or(1080);
+    bool fullscreenEnabled = m_appContext->configData.get<bool>("fullscreen").value_or(false);
     m_appContext->aspectRatio = static_cast<float>(width) / static_cast<float>(height);
     m_appContext->deltaTime = static_cast<float>(1000.f / m_appContext->configData.get<double>("frame-rate").value_or(60.f));
-    m_appContext->window.create(sf::VideoMode({width, height}), name, sf::Style::Default, sf::State::Fullscreen, settings);    
-    
-    if (!m_appContext->window.setActive(false))
-        LOG_FATAL(Logger::get()) << "Failed to set Main thread to inactive";
-    
+    m_appContext->window.create(sf::VideoMode({width, height}), name, sf::Style::Default, (fullscreenEnabled ? sf::State::Fullscreen : sf::State::Windowed), settings);    
     m_appContext->window.setFramerateLimit(static_cast<unsigned int>(m_appContext->configData.get<double>("frame-rate").value_or(60.f)));
     m_appContext->sceneManager.addScene(std::move(initialScene), true, m_appContext.get());
     m_appContext->sceneManager.processChange();
@@ -134,7 +151,7 @@ void Engine::configureWindow(std::unique_ptr<IScene> initialScene)
         << "\tWindow width: " << width << "\n"
         << "\tWindow height: " << height << "\n"
         << "\tDelta time: " << m_appContext->deltaTime;
-
+    
     LOG_DEBUG(Logger::get()) << "Configuration data: \n" << m_appContext->configData;
 }
 

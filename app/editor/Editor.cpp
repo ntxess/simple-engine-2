@@ -27,13 +27,26 @@ Editor::Editor(ApplicationContext* sysData)
 
 Editor::~Editor()
 {
-    // ImGui::SFML::Shutdown();
+    ImGui::SFML::Shutdown();
 }
 
 void Editor::init()
 {
-    auto fontConfigPath = m_appContext->configDataSerializer.load("config/font.json")->get<std::string>("default_font").value();
-    auto path = std::filesystem::current_path() / fontConfigPath;
+    const auto fontConfig = m_appContext->configDataSerializer.load("config/font.json");
+    if (!fontConfig)
+    {
+        LOG_FATAL(Logger::get()) << "Failed to load config/font.json";
+        return;
+    }
+
+    const auto fontConfigPathOpt = fontConfig->get<std::string>("default_font");
+    if (!fontConfigPathOpt)
+    {
+        LOG_FATAL(Logger::get()) << "Missing \"default_font\" in config/font.json";
+        return;
+    }
+
+    const auto path = std::filesystem::current_path() / *fontConfigPathOpt;
     if (!m_defaultFont.loadFromFile(path))
     {
         LOG_FATAL(Logger::get()) << "Failed to load default font.";
@@ -546,8 +559,8 @@ void Editor::displayEntityVisualizers()
         if (m_enableEntityCollider)
         {
             const auto& globalBounds = spriteEntity.getGlobalBounds();
-            sf::RectangleShape border({ globalBounds.position.x, globalBounds.position.y });
-            border.setOrigin({ globalBounds.position.x / 2.f, globalBounds.position.y / 2.f });
+            sf::RectangleShape border({ globalBounds.size.x, globalBounds.size.y });
+            border.setOrigin({ globalBounds.size.x / 2.f, globalBounds.size.y / 2.f });
             border.setPosition(spriteEntity.getPosition());
             border.setRotation(spriteEntity.getRotation());
             border.setFillColor(sf::Color::Transparent);
@@ -557,7 +570,11 @@ void Editor::displayEntityVisualizers()
             static entt::entity player = findEntityID<PlayerInput>();
             if (player != entt::null &&
                 player != entityID &&
-                m_selectedSceneData->getRegistry().get<Sprite>(player).getGlobalBounds().findIntersection(spriteEntity.getGlobalBounds()))
+                m_selectedSceneData->getRegistry()
+                    .get<Sprite>(player)
+                    .getGlobalBounds()
+                    .findIntersection(spriteEntity.getGlobalBounds())
+                    .has_value())
             {
                 border.setOutlineColor(sf::Color::Red);
                 LOG_TRACE(Logger::get())
