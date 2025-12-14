@@ -9,8 +9,7 @@ cmake --build "build/cmake/x64-Debug" --config Debug -j
 cmake -S . -B "build/cmake/x64-Release" -DCMAKE_BUILD_TYPE=Release
 cmake --build "build/cmake/x64-Release" --config Release -j
 
-[WIP] DOCKER METHOD DOES NOT CURRENTLY WORK
-# Running in Docker
+# Running in Docker [WIP]
 ## Prerequisite:
 xhost is required for docker to gain access to X11.
 
