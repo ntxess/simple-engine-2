@@ -2,13 +2,19 @@
 Fork of the original simple game engine with new additions and structural changes
 
 ## Build x64-Debug
+```bash
 cmake -S . -B "build/cmake/x64-Debug" -DCMAKE_BUILD_TYPE=Debug
+```
+```bash
 cmake --build "build/cmake/x64-Debug" --config Debug -j
-
+```
 ## Build x64-Release
+```bash
 cmake -S . -B "build/cmake/x64-Release" -DCMAKE_BUILD_TYPE=Release
+```
+```bash
 cmake --build "build/cmake/x64-Release" --config Release -j
-
+```
 # Running in Docker [WIP]
 ## Prerequisite:
 xhost is required for docker to gain access to X11.
