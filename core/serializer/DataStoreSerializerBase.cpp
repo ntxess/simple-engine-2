@@ -1,11 +1,11 @@
 #include "DataStoreSerializerBase.hpp"
 
 DataStoreSerializerBase::DataStoreSerializerBase()
-    : RELATIVE_PATH(std::filesystem::current_path())
+    : RELATIVE_PATH{std::filesystem::current_path()}
 {}
 
 DataStoreSerializerBase::DataStoreSerializerBase(std::filesystem::path path)
-    : RELATIVE_PATH(path)
+    : RELATIVE_PATH{path}
 {}
 
 std::filesystem::path DataStoreSerializerBase::resolvePath(std::string path)

@@ -1,11 +1,11 @@
 #include "GameDataStoreSerializer.hpp"
 
 GameDataStoreSerializer::GameDataStoreSerializer()
-    : DataStoreSerializerBase()
+    : DataStoreSerializerBase{}
 {}
 
 GameDataStoreSerializer::GameDataStoreSerializer(std::filesystem::path path)
-    : DataStoreSerializerBase(path)
+    : DataStoreSerializerBase{path}
 {}
 
 std::expected<DataStore<>, bool> GameDataStoreSerializer::load(std::string_view filename)

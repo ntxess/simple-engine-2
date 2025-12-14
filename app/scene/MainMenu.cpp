@@ -1,13 +1,13 @@
 #include "MainMenu.hpp"
 
 MainMenu::MainMenu()
-    : m_appContext(nullptr)
-    , m_wallpaper(entt::null)
+    : m_appContext{nullptr}
+    , m_wallpaper{entt::null}
 {}
 
 MainMenu::MainMenu(ApplicationContext* sysData)
-    : m_appContext(sysData)
-    , m_wallpaper(entt::null)
+    : m_appContext{sysData}
+    , m_wallpaper{entt::null}
 {}
 
 MainMenu::~MainMenu()

@@ -1,18 +1,18 @@
 #include "GameOfLifeSim.hpp"
 
 GameOfLifeSim::GameOfLifeSim()
-    : m_appContext(nullptr)
-    , m_width()
-    , m_height()
+    : m_appContext{nullptr}
+    , m_width{}
+    , m_height{}
 {
     m_grids[0].resize(1920 * 1080, 0);
     m_grids[1].resize(1920 * 1080, 0);
 }
 
 GameOfLifeSim::GameOfLifeSim(ApplicationContext* sysData)
-    : m_appContext(sysData)
-    , m_width(m_appContext->configData.get<int>("width").value_or(1920))
-    , m_height(m_appContext->configData.get<int>("height").value_or(1080))
+    : m_appContext{sysData}
+    , m_width{m_appContext->configData.get<int>("width").value_or(1920)}
+    , m_height{m_appContext->configData.get<int>("height").value_or(1080)}
 {
     m_grids[0].resize(m_width * m_height, 0);
     m_grids[1].resize(m_width * m_height, 0);

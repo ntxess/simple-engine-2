@@ -35,19 +35,19 @@ struct ComponentPropData
     float zoom;
 
     ComponentPropData()
-        : entityID(entt::null)
-        , name("Entity NULL")
-        , isWaypointEditorOpen(false)
-        , scrolling(0.f, 0.f)
-        , zoom(1.0f)
+        : entityID{entt::null}
+        , name{"Entity NULL"}
+        , isWaypointEditorOpen{false}
+        , scrolling{0.f, 0.f}
+        , zoom{1.0f}
     {}
 
     ComponentPropData(entt::entity entity)
-        : entityID(entity)
-        , name("Entity " + std::to_string(static_cast<unsigned int>(entity)))
-        , isWaypointEditorOpen(false)
-        , scrolling(0.f, 0.f)
-        , zoom(1.0f)
+        : entityID{entity}
+        , name{"Entity " + std::to_string(static_cast<unsigned int>(entity))}
+        , isWaypointEditorOpen{false}
+        , scrolling{0.f, 0.f}
+        , zoom{1.0f}
     {}
 };
 

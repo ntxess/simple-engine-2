@@ -1,11 +1,11 @@
 #include "JsonDataStoreSerializer.hpp"
 
 JsonDataStoreSerializer::JsonDataStoreSerializer()
-    : DataStoreSerializerBase()
+    : DataStoreSerializerBase{}
 {}
 
 JsonDataStoreSerializer::JsonDataStoreSerializer(std::filesystem::path path)
-    : DataStoreSerializerBase(path)
+    : DataStoreSerializerBase{path}
 {}
 
 std::expected<DataStore<>, bool> JsonDataStoreSerializer::load(std::string_view filename)
