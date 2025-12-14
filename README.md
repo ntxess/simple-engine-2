@@ -1,6 +1,15 @@
 # Simple Engine 2
 Fork of the original simple game engine with new additions and structural changes
 
+## Build x64-Debug
+cmake -S . -B "build/cmake/x64-Debug" -DCMAKE_BUILD_TYPE=Debug
+cmake --build "build/cmake/x64-Debug" --config Debug -j
+
+## Build x64-Release
+cmake -S . -B "build/cmake/x64-Release" -DCMAKE_BUILD_TYPE=Release
+cmake --build "build/cmake/x64-Release" --config Release -j
+
+[WIP] DOCKER METHOD DOES NOT CURRENTLY WORK
 # Running in Docker
 ## Prerequisite:
 xhost is required for docker to gain access to X11.
