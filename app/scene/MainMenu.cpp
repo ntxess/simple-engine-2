@@ -31,7 +31,8 @@ void MainMenu::init()
             try
             {
                 auto path = std::filesystem::current_path() / std::any_cast<std::string>(val);
-                if (!m_appContext->textureManager.load(key, path.c_str(), ResourceManager<sf::Texture, MutexSync>::ManagementStrategy::Reuse))
+                const auto pathStr = path.generic_string();
+                if (!m_appContext->textureManager.load(key, pathStr, ResourceManager<sf::Texture, MutexSync>::ManagementStrategy::Reuse))
                 {
                     LOG_ERROR(Logger::get()) << "Failed to load texture: " << path;
                 }

@@ -6,7 +6,7 @@
 #include <SFML/Window/ContextSettings.hpp>
 #include <SFML/Window/Event.hpp>
 #include <SFML/Window/VideoMode.hpp>
-#include <SFML/Window/WindowStyle.hpp>
+#include <SFML/Window/WindowEnums.hpp>
 
 #include "util/Logger.hpp"
 

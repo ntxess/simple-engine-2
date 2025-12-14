@@ -1,5 +1,7 @@
 #include "SystemProfiler.hpp"
 
+#include <chrono>
+
 SystemProfiler::SystemProfiler(size_t historyLen)
 	: m_historyLen{historyLen}
 {}
