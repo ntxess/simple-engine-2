@@ -21,6 +21,11 @@ std::string Logger::getFileName()
     return Logger::getInstance().m_fileName;
 }
 
+bool Logger::isEnabled()
+{
+    return Logger::getInstance().m_enableLogging;
+}
+
 void Logger::toggleLogging(bool option)
 {
     m_enableLogging = option;
@@ -28,6 +33,7 @@ void Logger::toggleLogging(bool option)
 
 void Logger::setupConsoleLog()
 {
+    m_enableLogging = true;
     boost::log::add_console_log
     (
         std::cout,
@@ -44,6 +50,7 @@ void Logger::setupConsoleLog()
 
 void Logger::setupFileLog(const std::string logPath)
 {
+    m_enableLogging = true;
     m_fileName = logPath + generateFilename();
     boost::log::add_file_log
     (
@@ -66,6 +73,7 @@ void Logger::setFilterSeverity(std::string_view severityLevel)
 
 void Logger::removeAllSinks()
 {
+    m_enableLogging = false;
     boost::log::core::get()->remove_all_sinks();
 }
 

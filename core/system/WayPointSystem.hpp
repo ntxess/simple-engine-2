@@ -22,5 +22,5 @@ public:
     void update(entt::registry& reg, const float& dt = 0.f) override final;
 
 private:
-    const std::string bindingStatID;
+    const std::string m_bindingStatID;
 };

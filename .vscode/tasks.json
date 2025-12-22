@@ -1,4 +1,40 @@
 {
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "IntelliSense: use compile_commands (x64-Debug)",
+      "type": "shell",
+      "command": "powershell",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}/scripts/update-compile-commands.ps1",
+        "-Config",
+        "x64-Debug"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "IntelliSense: use compile_commands (x64-Release)",
+      "type": "shell",
+      "command": "powershell",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}/scripts/update-compile-commands.ps1",
+        "-Config",
+        "x64-Release"
+      ],
+      "problemMatcher": []
+    }
+  ]
+}
+
+{
 	"version": "2.0.0",
 	"tasks": [
 		{

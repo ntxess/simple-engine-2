@@ -2,15 +2,17 @@
 
 void SystemManager::update(entt::registry& reg, const float& dt)
 {
-    for (const auto& [id, system] : m_systems)
+    // Execute systems in deterministic insertion order (important for correctness + profiling stability).
+    for (const auto& entry : m_sequentialSystems)
     {
-        if (m_systemProfilers.find(id) != m_systemProfilers.end())
+        const auto profilerIt = m_systemProfilers.find(entry.id);
+        if (profilerIt != m_systemProfilers.end())
         {
-            m_systemProfilers.at(id)->timedUpdate(system.get(), reg, dt);
+            profilerIt->second->timedUpdate(entry.system, reg, dt);
         }
         else
         {
-            system->update(reg, dt);
+            entry.system->update(reg, dt);
         }
     }
 }

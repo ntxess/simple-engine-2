@@ -22,7 +22,8 @@ void EventBus::dispatch(std::type_index type, std::shared_ptr<void> eventPtr)
         std::scoped_lock<std::mutex> lock(m_mtx);
         auto it = m_subscribers.find(type);
         if (it == m_subscribers.end()) return;
-        
+
+        handlers.reserve(it->second.size());
         for (const auto& [_, callback] : it->second)
             handlers.push_back(callback);
     }
@@ -30,7 +31,7 @@ void EventBus::dispatch(std::type_index type, std::shared_ptr<void> eventPtr)
 
     for (auto& callback : handlers)
     {
-        LOG_INFO(Logger::get()) << "Event [" << type.name() << "] triggered. Executing callback <" << typeid(callback).name() << ">";
+        // LOG_INFO(Logger::get()) << "Event [" << type.name() << "] triggered. Executing callback <" << typeid(callback).name() << ">";
         callback(eventPtr);
     }
 }

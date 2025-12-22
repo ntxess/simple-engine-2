@@ -31,20 +31,27 @@ public:
     std::unordered_map<std::string, std::deque<long long>> getSystemTimingHistory() const;
 
 private:
+    struct SystemEntry
+    {
+        std::type_index id;
+        ISystem* system;
+    };
+
     std::unordered_map<std::type_index, std::unique_ptr<SystemProfiler>> m_systemProfilers;
     std::unordered_map<std::type_index, std::unique_ptr<ISystem>> m_systems;
-    std::vector<ISystem*> m_sequentialSystems;
+    std::vector<SystemEntry> m_sequentialSystems;
 };
 
 template<typename T, typename... Args>
 void SystemManager::addSystem(bool enableProfiling, Args&&... args)
 {
     std::unique_ptr<ISystem> newSystem = std::make_unique<T>(std::forward<Args>(args)...);
-    m_sequentialSystems.push_back(newSystem.get());
-    m_systems.emplace(typeid(T), std::move(newSystem));
+    const std::type_index id = typeid(T);
+    m_sequentialSystems.push_back(SystemEntry{ id, newSystem.get() });
+    m_systems.emplace(id, std::move(newSystem));
 
     if (enableProfiling)
-        m_systemProfilers.emplace(typeid(T), std::make_unique<SystemProfiler>());
+        m_systemProfilers.emplace(id, std::make_unique<SystemProfiler>());
 }
 
 template<typename T>
@@ -60,14 +67,15 @@ void SystemManager::removeSystem()
 {
     if (m_systems.count(typeid(T)))
     {
-        std::string_view type = m_systems[typeid(T)]->name();
-
-        const auto it = std::find_if(m_sequentialSystems.begin(), m_sequentialSystems.end(), [type](ISystem* system) {
-            return system->name() == type;
+        const std::type_index id = typeid(T);
+        const auto it = std::find_if(m_sequentialSystems.begin(), m_sequentialSystems.end(), [id](const SystemEntry& entry) {
+            return entry.id == id;
         });
 
-        m_sequentialSystems.erase(it);
-        m_systems.erase(typeid(T));
-        m_systemProfilers.erase(typeid(T));
+        if (it != m_sequentialSystems.end())
+            m_sequentialSystems.erase(it);
+
+        m_systems.erase(id);
+        m_systemProfilers.erase(id);
     }
 }

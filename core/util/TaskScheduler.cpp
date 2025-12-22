@@ -133,7 +133,7 @@ void TaskScheduler::workerLoop()
         if (m_immTaskQueue.tryPop(task, std::chrono::milliseconds(50)))
         {
             task();
-            LOG_INFO(Logger::get()) << "TaskScheduler finished immediate task [" << typeid(task).name() << "]";
+            // LOG_INFO(Logger::get()) << "TaskScheduler finished immediate task [" << typeid(task).name() << "]";
 
             continue;
         }
@@ -158,7 +158,7 @@ void TaskScheduler::workerLoop()
 
                 // Run the task function
                 scheduledTask.func();
-                LOG_INFO(Logger::get()) << "TaskScheduler finished delayed task [" << typeid(topTask.func).name() << "]";
+                //LOG_INFO(Logger::get()) << "TaskScheduler finished delayed task [" << typeid(topTask.func).name() << "]";
 
 
                 if (scheduledTask.interval > std::chrono::milliseconds{ 0 } &&

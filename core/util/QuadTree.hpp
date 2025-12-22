@@ -23,6 +23,11 @@ public:
     void draw(sf::RenderTexture& rt);
     
 private:
+    bool hasAny() const;
+    bool insertIntoChildren(entt::registry& reg, const entt::entity entityID);
+    void subdivideAndRehome(entt::registry& reg);
+    void queryRangeImpl(entt::registry& reg, const sf::FloatRect& range, std::vector<entt::entity>& out);
+
     static constexpr size_t MAX_DEPTH = 4;
     static constexpr size_t QT_NODE_CAPACITY = 4;
     

@@ -126,7 +126,7 @@ void Sandbox::update()
     const auto& view = m_reg.view<EntityStatus>();
     for (const auto& entity : view)
     {
-        if (m_reg.get<EntityStatus>(entity).values["HP"] <= 0)
+        if (m_reg.get<EntityStatus>(entity).getOr("HP", 0.f) <= 0.f)
         {
             LOG_INFO(Logger::get()) << "Destroying entity [" << static_cast<unsigned int>(entity) << "]";
 
