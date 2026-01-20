@@ -15,6 +15,11 @@ cmake -S . -B "build/cmake/x64-Release" -DCMAKE_BUILD_TYPE=Release
 ```bash
 cmake --build "build/cmake/x64-Release" --config Release -j
 ```
+## Default
+```bash
+cmake --build . --config Release -j --clean-first
+```
+
 # Running in Docker [WIP]
 ## Prerequisite:
 xhost is required for docker to gain access to X11.

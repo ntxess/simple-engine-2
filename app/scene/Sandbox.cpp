@@ -23,7 +23,7 @@ void Sandbox::init()
     }
 
     // Load the config file for texture paths and load them into the resource manager
-    auto texturePaths = m_appContext->configDataSerializer.load("config/texture.json");
+    auto texturePaths = m_appContext->configDataSerializer.load("config/texture.toml");
     if (texturePaths)
     {
         for (const auto& [key, val] : texturePaths->lockedView())
@@ -71,8 +71,8 @@ void Sandbox::init()
         { sf::Keyboard::Scancode::D, new Movement(m_player, { 1,  0 }) }
     };
 
-    float width = static_cast<float>(m_appContext->configData.get<int>("width").value());
-    float height = static_cast<float>(m_appContext->configData.get<int>("height").value());
+    float width = static_cast<float>(m_appContext->configData.getCoerced<int>("width").value_or(1920));
+    float height = static_cast<float>(m_appContext->configData.getCoerced<int>("height").value_or(1080));
 
     m_reg.get<Sprite>(m_player).setPosition({200, 200});
 

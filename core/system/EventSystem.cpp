@@ -7,10 +7,6 @@ EventSystem::EventSystem(entt::registry& piplineReg, std::chrono::milliseconds w
     , m_eventWatchdogTime{watchdogTime}
 {}
 
-constexpr std::string_view EventSystem::name() const
-{
-    return "EventSystem";
-}
 
 void EventSystem::update(entt::registry& entityReg, const float& dt)
 {

@@ -135,14 +135,14 @@ void Engine::configureWindow(std::unique_ptr<IScene> initialScene)
     settings.majorVersion = 4;
     settings.minorVersion = 3;
 
-    std::string name = m_appContext->configData.get<std::string>("name").value_or("Application");
-    unsigned int width = m_appContext->configData.get<int>("width").value_or(1920);
-    unsigned int height = m_appContext->configData.get<int>("height").value_or(1080);
-    bool fullscreenEnabled = m_appContext->configData.get<bool>("fullscreen").value_or(false);
+    std::string name = m_appContext->configData.getCoerced<std::string>("name").value_or("Application");
+    unsigned int width = static_cast<unsigned int>(m_appContext->configData.getCoerced<int>("width").value_or(1920));
+    unsigned int height = static_cast<unsigned int>(m_appContext->configData.getCoerced<int>("height").value_or(1080));
+    bool fullscreenEnabled = m_appContext->configData.getCoerced<bool>("fullscreen").value_or(false);
     m_appContext->aspectRatio = static_cast<float>(width) / static_cast<float>(height);
-    m_appContext->deltaTime = static_cast<float>(1000.f / m_appContext->configData.get<double>("frame-rate").value_or(60.f));
+    m_appContext->deltaTime = static_cast<float>(1000.f / m_appContext->configData.getCoerced<double>("frame-rate").value_or(60.0));
     m_appContext->window.create(sf::VideoMode({width, height}), name, sf::Style::Default, (fullscreenEnabled ? sf::State::Fullscreen : sf::State::Windowed), settings);    
-    m_appContext->window.setFramerateLimit(static_cast<unsigned int>(m_appContext->configData.get<double>("frame-rate").value_or(60.f)));
+    m_appContext->window.setFramerateLimit(static_cast<unsigned int>(m_appContext->configData.getCoerced<double>("frame-rate").value_or(60.0)));
     m_appContext->sceneManager.addScene(std::move(initialScene), true, m_appContext.get());
     m_appContext->sceneManager.processChange();
 
@@ -178,9 +178,23 @@ void Engine::physicThread()
         // to real-time if the engine ever hits a major lag point.
         while (m_windowActive && accumulator >= m_appContext->deltaTime)
         {
+            SE_FRAME_BEGIN(m_appContext->perf, "PhysicsThread");
             std::unique_lock<std::mutex> guard(m_mutex);
-            m_appContext->sceneManager.getActiveScene()->update();
+            {
+                SE_PROFILE_SCOPE(m_appContext->perf, "Scene::update");
+                m_appContext->sceneManager.getActiveScene()->update();
+            }
+            {
+                // Basic per-tick counters (cheap and extremely useful).
+                auto& reg = m_appContext->sceneManager.getActiveScene()->getRegistry();
+                SE_COUNTER_SET(
+                    m_appContext->perf,
+                    "EntitiesAlive",
+                    static_cast<std::int64_t>(reg.storage<entt::entity>().size())
+                );
+            }
             guard.unlock();
+            SE_FRAME_END(m_appContext->perf);
             accumulator -= m_appContext->deltaTime;
         }
     }
@@ -200,13 +214,37 @@ void Engine::renderThread()
 
     while (m_windowActive)
     {
-        m_appContext->window.clear();
-        m_appContext->sceneManager.processChange();
-        std::unique_lock<std::mutex> guard(m_mutex);
-        m_appContext->sceneManager.getActiveScene()->processInput();
-        guard.unlock();
-        m_appContext->sceneManager.getActiveScene()->render();
-        m_appContext->window.display();
+        SE_FRAME_BEGIN(m_appContext->perf, "RenderThread");
+        {
+            SE_PROFILE_SCOPE(m_appContext->perf, "Frame");
+
+            {
+                SE_PROFILE_SCOPE(m_appContext->perf, "Window::clear");
+                m_appContext->window.clear();
+            }
+
+            {
+                SE_PROFILE_SCOPE(m_appContext->perf, "SceneManager::processChange");
+                m_appContext->sceneManager.processChange();
+            }
+
+            {
+                std::unique_lock<std::mutex> guard(m_mutex);
+                SE_PROFILE_SCOPE(m_appContext->perf, "Scene::processInput");
+                m_appContext->sceneManager.getActiveScene()->processInput();
+            }
+
+            {
+                SE_PROFILE_SCOPE(m_appContext->perf, "Scene::render");
+                m_appContext->sceneManager.getActiveScene()->render();
+            }
+
+            {
+                SE_PROFILE_SCOPE(m_appContext->perf, "Window::display");
+                m_appContext->window.display();
+            }
+        }
+        SE_FRAME_END(m_appContext->perf);
     }
 
     LOG_INFO(Logger::get()) << "----- Render thread ended -----";

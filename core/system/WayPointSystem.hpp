@@ -18,7 +18,7 @@ public:
     WayPointSystem() = delete;
     WayPointSystem(std::string bindingStatID);
 
-    constexpr std::string_view name() const override final;
+    constexpr std::string_view name() const override final { return "WayPointSystem"; }
     void update(entt::registry& reg, const float& dt = 0.f) override final;
 
 private:

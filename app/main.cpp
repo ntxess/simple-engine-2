@@ -2,7 +2,7 @@
 
 #include "Engine.hpp"
 #include "editor/Editor.hpp"
-#include "serializer/JsonDataStoreSerializer.hpp"
+#include "serializer/TomlDataStoreSerializer.hpp"
 #include "util/Logger.hpp"
 
 int main()
@@ -13,14 +13,14 @@ int main()
 
 	// Temporarily create and read in configuraton file to setup file logger. 
 	{
-		JsonDataStoreSerializer configDataSerializer;
-		auto configData = configDataSerializer.load("config/config.json");
+		TomlDataStoreSerializer configDataSerializer;
+		auto configData = configDataSerializer.load("config/config.toml");
 		if (configData)
 		{
 			LOG_INFO(Logger::get()) << "Successfully read config file.";
-			Logger::getInstance().toggleLogging(configData->get<bool>("debug-mode").value_or(false));
-			Logger::getInstance().setFilterSeverity(configData->get<std::string>("debug-log-filter-severity").value_or("warning"));
-			auto logPath = configData->get<std::string>("debug-log-folder").value_or("log/");
+			Logger::getInstance().toggleLogging(configData->getCoerced<bool>("debug-mode").value_or(false));
+			Logger::getInstance().setFilterSeverity(configData->getCoerced<std::string>("debug-log-filter-severity").value_or("warning"));
+			auto logPath = configData->getCoerced<std::string>("debug-log-folder").value_or("log/");
 			LOG_INFO(Logger::get()) << "Now logging to file. Log file located at: " << logPath.c_str();
 			Logger::getInstance().removeAllSinks();
 			Logger::getInstance().setupFileLog(logPath.c_str());
@@ -32,7 +32,7 @@ int main()
 		}
 	}
 
-	Engine engine("config/config.json", std::make_unique<Editor>());
+	Engine engine("config/config.toml", std::make_unique<Editor>());
 	engine.run();
 
 	return 0;

@@ -1,5 +1,7 @@
 #include "Editor.hpp"
 
+#include <cstdint>
+
 Editor::Editor()
     : m_appContext{nullptr}
     , m_panelFlags{0}
@@ -32,17 +34,17 @@ Editor::~Editor()
 
 void Editor::init()
 {
-    const auto fontConfig = m_appContext->configDataSerializer.load("config/font.json");
+    const auto fontConfig = m_appContext->configDataSerializer.load("config/font.toml");
     if (!fontConfig)
     {
-        LOG_FATAL(Logger::get()) << "Failed to load config/font.json";
+        LOG_FATAL(Logger::get()) << "Failed to load config/font.toml";
         return;
     }
 
     const auto fontConfigPathOpt = fontConfig->get<std::string>("default_font");
     if (!fontConfigPathOpt)
     {
-        LOG_FATAL(Logger::get()) << "Missing \"default_font\" in config/font.json";
+        LOG_FATAL(Logger::get()) << "Missing \"default_font\" in config/font.toml";
         return;
     }
 
@@ -79,8 +81,8 @@ void Editor::init()
                                          // which is needed for ratio-resizing of the scene view rendering panel
     
     // Initializing all the scenes for selection
-    int width = m_appContext->configData.get<int>("width").value();
-    int height = m_appContext->configData.get<int>("height").value();
+    int width = m_appContext->configData.getCoerced<int>("width").value_or(1920);
+    int height = m_appContext->configData.getCoerced<int>("height").value_or(1080);
 
     m_editorSceneMap["Sandbox"] = std::make_unique<EditorSceneAdapter>(
         std::make_unique<Sandbox>(m_appContext),
@@ -126,13 +128,38 @@ void Editor::processInput()
 void Editor::update()
 {
     if (m_startButtonEnabled || m_forwardFrameEnabled) {
-        m_selectedSceneData->update();
+        {
+            SE_PROFILE_SCOPE(m_appContext->perf, "Editor::SelectedScene::update");
+            m_selectedSceneData->update();
+        }
+
+        // High-signal counters for iteration: how big is the simulation right now?
+        {
+            auto& reg = m_selectedSceneData->getRegistry();
+
+            std::int64_t spriteCount = 0;
+            const auto view = reg.view<Sprite>();
+            for (const auto& _entity : view)
+            {
+                (void)_entity;
+                ++spriteCount;
+            }
+
+            SE_COUNTER_SET(
+                m_appContext->perf,
+                "SelectedScene.EntitiesAlive",
+                static_cast<std::int64_t>(reg.storage<entt::entity>().size())
+            );
+            SE_COUNTER_SET(m_appContext->perf, "SelectedScene.Sprites", spriteCount);
+        }
+
         m_forwardFrameEnabled = false;
     }
 }
 
 void Editor::render()
 {
+    SE_PROFILE_SCOPE(m_appContext->perf, "Editor::render");
     ImGui::SFML::Update(m_appContext->window, sf::seconds(m_appContext->deltaTime));
 
     // Setup dockspace IDs
@@ -165,12 +192,12 @@ void Editor::render()
     ImGui::PopStyleVar(3);
 
     // Render each panel
-    renderDebugPanel({ 0.f, 0.f }, { fifthWidth, halfHeight });
-    renderPerformancePanel({ 0.f, 0.f }, { fifthWidth, halfHeight });
-    renderLogViewPanel({ 0.f, halfHeight }, { fifthWidth, halfHeight });
-    renderSceneViewPanel({ fifthWidth, 0.f }, { width, height });
-    renderAssetsExplorerPanel({ fifthWidth, scalingHeight }, { scalingWidth, height - scalingHeight });
-    renderPropertiesPanel({ scalingFifthWidth, 0.f }, { width - scalingFifthWidth, height });
+    { SE_PROFILE_SCOPE(m_appContext->perf, "Panel::Debug"); renderDebugPanel({ 0.f, 0.f }, { fifthWidth, halfHeight }); }
+    { SE_PROFILE_SCOPE(m_appContext->perf, "Panel::Performance"); renderPerformancePanel({ 0.f, 0.f }, { fifthWidth, halfHeight }); }
+    { SE_PROFILE_SCOPE(m_appContext->perf, "Panel::LogView"); renderLogViewPanel({ 0.f, halfHeight }, { fifthWidth, halfHeight }); }
+    { SE_PROFILE_SCOPE(m_appContext->perf, "Panel::SceneView"); renderSceneViewPanel({ fifthWidth, 0.f }, { width, height }); }
+    { SE_PROFILE_SCOPE(m_appContext->perf, "Panel::AssetsExplorer"); renderAssetsExplorerPanel({ fifthWidth, scalingHeight }, { scalingWidth, height - scalingHeight }); }
+    { SE_PROFILE_SCOPE(m_appContext->perf, "Panel::Properties"); renderPropertiesPanel({ scalingFifthWidth, 0.f }, { width - scalingFifthWidth, height }); }
 
     // ImGui::ShowDemoWindow();
 
@@ -372,6 +399,26 @@ void Editor::renderPerformancePanel(const ImVec2& pos, const ImVec2& size)
     ImGui::SetNextWindowSize(size, ImGuiCond_Once);
     ImGui::Begin("Performance Panel", nullptr, 0);
 
+    // High-level engine timing (from Engine threads)
+    if (ImGui::CollapsingHeader("Frame Breakdown", ImGuiTreeNodeFlags_DefaultOpen))
+    {
+        const auto renderFrameMs = m_appContext->perf.getLastScopeMs("RenderThread", "Frame").value_or(0.0);
+        const auto renderSceneMs = m_appContext->perf.getLastScopeMs("RenderThread", "Scene::render").value_or(0.0);
+        const auto physicsSceneUpdateMs = m_appContext->perf.getLastScopeMs("PhysicsThread", "Scene::update").value_or(0.0);
+
+        ImGui::Text("RenderThread Frame: %.3f ms (Scene::render: %.3f ms)", renderFrameMs, renderSceneMs);
+        ImGui::Text("PhysicsThread Scene::update: %.3f ms", physicsSceneUpdateMs);
+    }
+
+    // Selected-scene counters (populated during update()).
+    if (ImGui::CollapsingHeader("Selected Scene Counters", ImGuiTreeNodeFlags_DefaultOpen))
+    {
+        const auto entitiesAlive = m_appContext->perf.getLastCounter("PhysicsThread", "SelectedScene.EntitiesAlive").value_or(0);
+        const auto sprites = m_appContext->perf.getLastCounter("PhysicsThread", "SelectedScene.Sprites").value_or(0);
+        ImGui::Text("EntitiesAlive: %lld", static_cast<long long>(entitiesAlive));
+        ImGui::Text("Sprites:       %lld", static_cast<long long>(sprites));
+    }
+
     m_selectedSceneData->get()->accept(&m_sceneSystemVisitor, entt::null);
 
     ImGui::End();
@@ -442,7 +489,10 @@ void Editor::renderSceneViewPanel(const ImVec2& pos, const ImVec2& size)
     renderTexture.clear();
 
     // Draw the scene texture onto the render texture as out pseudo-game view
-    m_selectedSceneData->render();
+    {
+        SE_PROFILE_SCOPE(m_appContext->perf, "Editor::SelectedScene::render");
+        m_selectedSceneData->render();
+    }
 
     displayEntityVisualizers();
     displayCollisionSystemVisualizer();
@@ -932,8 +982,8 @@ void Editor::processWayPointCanvasInput(const ImVec2& size, const ImVec2& origin
 
 void Editor::generateEntities(size_t numOfEntities)
 {
-    float width = static_cast<float>(m_appContext->configData.get<int>("width").value());
-    float height = static_cast<float>(m_appContext->configData.get<int>("height").value());
+    float width = static_cast<float>(m_appContext->configData.getCoerced<int>("width").value_or(1920));
+    float height = static_cast<float>(m_appContext->configData.getCoerced<int>("height").value_or(1080));
 
     // Generate a ton of sprite for testing in random places within the boundary of the window
     std::random_device dev;

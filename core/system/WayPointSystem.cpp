@@ -4,10 +4,6 @@ WayPointSystem::WayPointSystem(std::string bindingStatID)
     : m_bindingStatID{bindingStatID}
 {}
 
-constexpr std::string_view WayPointSystem::name() const
-{
-    return "WayPointSystem";
-}
 
 void WayPointSystem::update(entt::registry& reg, const float& dt)
 {

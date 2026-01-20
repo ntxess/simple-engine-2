@@ -18,7 +18,7 @@ public:
     CollisionSystem() = delete;
     CollisionSystem(entt::registry& piplineReg, const sf::Vector2f& center, const sf::Vector2u& size);
 
-    constexpr std::string_view name() const override final;
+    constexpr std::string_view name() const override final { return "CollisionSystem"; }
     void update(entt::registry& entityReg, const float& dt = 0.f) override final;
     void remove(entt::registry& entityReg, const entt::entity entityID);
     void clear();
