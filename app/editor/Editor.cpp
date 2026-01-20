@@ -81,8 +81,8 @@ void Editor::init()
                                          // which is needed for ratio-resizing of the scene view rendering panel
     
     // Initializing all the scenes for selection
-    int width = m_appContext->configData.getCoerced<int>("width").value_or(1920);
-    int height = m_appContext->configData.getCoerced<int>("height").value_or(1080);
+    int width = m_appContext->configData.getCoerced<int>("video-settings.resolution.width").value_or(1920);
+    int height = m_appContext->configData.getCoerced<int>("video-settings.resolution.height").value_or(1080);
 
     m_editorSceneMap["Sandbox"] = std::make_unique<EditorSceneAdapter>(
         std::make_unique<Sandbox>(m_appContext),
@@ -160,7 +160,8 @@ void Editor::update()
 void Editor::render()
 {
     SE_PROFILE_SCOPE(m_appContext->perf, "Editor::render");
-    ImGui::SFML::Update(m_appContext->window, sf::seconds(m_appContext->deltaTime));
+    // ImGui-SFML expects a duration in seconds; engine stores deltaTime in milliseconds.
+    ImGui::SFML::Update(m_appContext->window, sf::seconds(m_appContext->deltaTime / 1000.0f));
 
     // Setup dockspace IDs
     m_dockspaceId1 = ImGui::GetID("Dockspace1");
@@ -982,8 +983,8 @@ void Editor::processWayPointCanvasInput(const ImVec2& size, const ImVec2& origin
 
 void Editor::generateEntities(size_t numOfEntities)
 {
-    float width = static_cast<float>(m_appContext->configData.getCoerced<int>("width").value_or(1920));
-    float height = static_cast<float>(m_appContext->configData.getCoerced<int>("height").value_or(1080));
+    float width = static_cast<float>(m_appContext->configData.getCoerced<int>("video-settings.resolution.width").value_or(1920));
+    float height = static_cast<float>(m_appContext->configData.getCoerced<int>("video-settings.resolution.height").value_or(1080));
 
     // Generate a ton of sprite for testing in random places within the boundary of the window
     std::random_device dev;

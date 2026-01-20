@@ -3,7 +3,8 @@
         "name": "Rampage",
         "version": "0.1b",
         "debug-mode": true,
-        "debug-log-filter-severity": "debug"
+        "debug-log-filter-severity": "debug",
+        "job-threads": 0
     },
     "system-paths": {
         "config-folder": "config/",
@@ -16,6 +17,7 @@
             "width": 1920,
             "height": 1080
         },
+        "vsync": true,
         "frame-rate": 160.0,
         "fullscreen": false,
         "damage-number": true,

@@ -2,7 +2,7 @@
 
 #include <atomic>
 #include <memory>
-#include <mutex>
+#include <shared_mutex>
 #include <string>
 #include <thread>
 
@@ -25,11 +25,12 @@ private:
     void resourceThread();
 
 private:
-    std::shared_ptr<ApplicationContext> m_appContext;
+    // Single-owner engine-wide state/services. Scenes get a non-owning pointer to this.
+    ApplicationContext m_appContext;
     std::atomic<bool> m_windowActive;
     std::thread m_physicThread;
     std::thread m_renderThread;
     std::thread m_audioThread;
     std::thread m_resourceThread;
-    std::mutex m_mutex;
+    mutable std::shared_mutex m_sceneMutex;
 };

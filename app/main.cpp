@@ -18,9 +18,9 @@ int main()
 		if (configData)
 		{
 			LOG_INFO(Logger::get()) << "Successfully read config file.";
-			Logger::getInstance().toggleLogging(configData->getCoerced<bool>("debug-mode").value_or(false));
-			Logger::getInstance().setFilterSeverity(configData->getCoerced<std::string>("debug-log-filter-severity").value_or("warning"));
-			auto logPath = configData->getCoerced<std::string>("debug-log-folder").value_or("log/");
+			Logger::getInstance().toggleLogging(configData->getCoerced<bool>("system.debug-mode").value_or(false));
+			Logger::getInstance().setFilterSeverity(configData->getCoerced<std::string>("system.debug-log-filter-severity").value_or("warning"));
+			auto logPath = configData->getCoerced<std::string>("system-paths.debug-log-folder").value_or("log/");
 			LOG_INFO(Logger::get()) << "Now logging to file. Log file located at: " << logPath.c_str();
 			Logger::getInstance().removeAllSinks();
 			Logger::getInstance().setupFileLog(logPath.c_str());

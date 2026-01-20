@@ -7,14 +7,14 @@
 #include "util/DataStore.hpp"
 #include "util/EventBus.hpp"
 #include "util/PerformanceTracker.hpp"
+#include "util/TaskScheduler.hpp"
 #include <SFML/System/Clock.hpp>
 #include <SFML/Graphics/RenderWindow.hpp>
 #include <SFML/Graphics/View.hpp>
 #include <SFML/Graphics/Texture.hpp>
 #include <SFML/Audio/SoundBuffer.hpp>
-#include <any>
 #include <memory>
-#include <unordered_map>
+#include <cstddef>
 
 constexpr size_t numEventThread = 2;
 constexpr size_t numQueueCapacity = 200;
@@ -35,4 +35,6 @@ struct ApplicationContext
 	SceneManager sceneManager;
 	EventBus eventBus{numEventThread, numQueueCapacity};
 	PerformanceTracker perf{};
+	std::unique_ptr<TaskScheduler> jobScheduler;
+	std::size_t jobThreadCount = 0;
 };
