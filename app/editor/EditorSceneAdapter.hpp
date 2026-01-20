@@ -19,6 +19,7 @@
 #include "Components.hpp"
 #include "interface/IScene.hpp"
 #include "interface/ISceneVisitor.hpp"
+#include "util/SpriteCommandBuffer.hpp"
 #include "util/Logger.hpp"
 
 struct ComponentPropData
@@ -61,6 +62,13 @@ public:
     void processEvent(const sf::Event& event);
     void render();
     void update();
+
+    // Snapshot / command-buffer render for the Scene View panel.
+    // buildSceneViewCommands() must be called from the sim thread (safe to read registry).
+    // renderSceneViewFromCommands() must be called from the render thread (SFML draw calls).
+    void buildSceneViewCommands();
+    void renderSceneViewFromCommands(sf::RenderTexture& target) const;
+    bool shouldUseSceneViewCommands() const;
     void accept(ISceneVisitor* visitor, entt::entity entityID);
 
     entt::registry& getRegistry() const;
@@ -116,5 +124,7 @@ public:
 private:
     entt::entity m_renderTextureID;
     std::unique_ptr<IScene> m_scene;
+    bool m_enableSceneViewCommands;
+    TripleBufferedSpriteCommands m_sceneViewSpriteCmds;
 };
 
