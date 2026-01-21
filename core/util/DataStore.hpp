@@ -1,11 +1,15 @@
 #pragma once
 
 #include <any>
+#include <charconv>
+#include <cctype>
 #include <mutex>
 #include <ostream>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <system_error>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 
@@ -26,6 +30,20 @@ public:
 
     template<typename T>
     std::optional<T> get(std::string_view key) const;
+
+    /**
+     * Like get<T>(), but attempts basic coercions for common scalar types.
+     *
+     * Supported (best-effort) coercions:
+     * - int  <- double/float/bool/string
+     * - double <- int/float/bool/string
+     * - bool <- int/double/string
+     * - std::string <- int/double/bool
+     *
+     * Arrays/complex types are not coerced.
+     */
+    template<typename T>
+    std::optional<T> getCoerced(std::string_view key) const;
 
     template<typename T>
     void set(std::string_view key, T&& val);
@@ -79,6 +97,100 @@ inline std::optional<T> DataStore<SyncPolicy>::get(std::string_view key) const
             return std::nullopt;
         }
     }
+    return std::nullopt;
+}
+
+template<typename SyncPolicy>
+template<typename T>
+inline std::optional<T> DataStore<SyncPolicy>::getCoerced(std::string_view key) const
+{
+    std::unique_lock<SyncPolicy> lock(m_sync);
+    const auto it = m_data.find(key);
+    if (it == m_data.end())
+        return std::nullopt;
+
+    const std::any& a = it->second;
+
+    if (auto direct = std::any_cast<T>(&a))
+        return *direct;
+
+    auto parseBool = [](std::string_view sv) -> std::optional<bool>
+    {
+        auto isSpace = [](unsigned char c) { return std::isspace(c) != 0; };
+        while (!sv.empty() && isSpace(static_cast<unsigned char>(sv.front()))) sv.remove_prefix(1);
+        while (!sv.empty() && isSpace(static_cast<unsigned char>(sv.back()))) sv.remove_suffix(1);
+        if (sv.empty()) return std::nullopt;
+
+        auto lower = [](char c) -> char { return static_cast<char>(std::tolower(static_cast<unsigned char>(c))); };
+        std::string tmp;
+        tmp.reserve(sv.size());
+        for (char c : sv) tmp.push_back(lower(c));
+
+        if (tmp == "true" || tmp == "1" || tmp == "yes" || tmp == "on")  return true;
+        if (tmp == "false" || tmp == "0" || tmp == "no" || tmp == "off") return false;
+        return std::nullopt;
+    };
+
+    auto parseInt = [](std::string_view sv) -> std::optional<int>
+    {
+        int v = 0;
+        const auto* begin = sv.data();
+        const auto* end = sv.data() + sv.size();
+        auto [ptr, ec] = std::from_chars(begin, end, v);
+        if (ec == std::errc{} && ptr == end) return v;
+        return std::nullopt;
+    };
+
+    auto parseDouble = [](std::string_view sv) -> std::optional<double>
+    {
+        // from_chars for floating is C++17 but not universally implemented on MSVC/libstdc++.
+        // Keep it simple and use stod via a temporary string.
+        try
+        {
+            size_t idx = 0;
+            const std::string tmp(sv);
+            const double v = std::stod(tmp, &idx);
+            if (idx == tmp.size()) return v;
+            return std::nullopt;
+        }
+        catch (...)
+        {
+            return std::nullopt;
+        }
+    };
+
+    if constexpr (std::is_same_v<T, int>)
+    {
+        if (auto p = std::any_cast<double>(&a)) return static_cast<int>(*p);
+        if (auto p = std::any_cast<float>(&a))  return static_cast<int>(*p);
+        if (auto p = std::any_cast<bool>(&a))   return *p ? 1 : 0;
+        if (auto p = std::any_cast<std::string>(&a)) return parseInt(*p);
+        return std::nullopt;
+    }
+    else if constexpr (std::is_same_v<T, double>)
+    {
+        if (auto p = std::any_cast<int>(&a))    return static_cast<double>(*p);
+        if (auto p = std::any_cast<float>(&a))  return static_cast<double>(*p);
+        if (auto p = std::any_cast<bool>(&a))   return *p ? 1.0 : 0.0;
+        if (auto p = std::any_cast<std::string>(&a)) return parseDouble(*p);
+        return std::nullopt;
+    }
+    else if constexpr (std::is_same_v<T, bool>)
+    {
+        if (auto p = std::any_cast<int>(&a))    return (*p != 0);
+        if (auto p = std::any_cast<double>(&a)) return (*p != 0.0);
+        if (auto p = std::any_cast<std::string>(&a)) return parseBool(*p);
+        return std::nullopt;
+    }
+    else if constexpr (std::is_same_v<T, std::string>)
+    {
+        if (auto p = std::any_cast<int>(&a))    return std::to_string(*p);
+        if (auto p = std::any_cast<float>(&a))  return std::to_string(*p);
+        if (auto p = std::any_cast<double>(&a)) return std::to_string(*p);
+        if (auto p = std::any_cast<bool>(&a))   return (*p ? "true" : "false");
+        return std::nullopt;
+    }
+
     return std::nullopt;
 }
 

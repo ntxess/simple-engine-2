@@ -7,7 +7,7 @@
 #include <unordered_map>
 
 #include "util/WayPoint.hpp"
-#include <rapidjson/document.h>
+// #include <rapidjson/document.h>  // Disabled - rapidjson kept for legacy reasons only
 
 class WaypointManager
 {

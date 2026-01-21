@@ -13,10 +13,6 @@ CollisionSystem::CollisionSystem(entt::registry& piplineReg, const sf::Vector2f&
     //}
 }
 
-constexpr std::string_view CollisionSystem::name() const
-{
-    return "CollisionSystem";
-}
 
 void CollisionSystem::update(entt::registry& entityReg, const float& dt)
 {

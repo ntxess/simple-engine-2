@@ -181,7 +181,7 @@ void JsonDataStoreSerializer::write(rapidjson::Document& doc, const DataStore<>&
         }
 
         rapidjson::Value index(key.c_str(), static_cast<rapidjson::SizeType>(key.size()), doc.GetAllocator());
-        doc.AddMember(index, val.value(), doc.GetAllocator());
+        doc.AddMember(std::move(index), std::move(*val), doc.GetAllocator());
     }
 }
 
@@ -196,16 +196,14 @@ void JsonDataStoreSerializer::findAndReplace(rapidjson::Document& doc, rapidjson
             // If this key is in the updates map, replace it
             if (auto it = dataStore.find(keyStr); it != dataStore.end())
             {
-                itr->value = createJsonValue(doc, it->second).value_or(rapidjson::Value{});
-
-                // If the value is an object, we need to replace it
-                if (itr->value.IsObject())
+                auto newVal = createJsonValue(doc, it->second);
+                if (!newVal.has_value())
                 {
-                    itr->value = createJsonValue(doc, it->second).value_or(rapidjson::Value{});
+                    LOG_ERROR(Logger::get()) << "Failed to convert value to any type for key: " << keyStr;
                 }
                 else
                 {
-                    LOG_ERROR(Logger::get()) << "Failed to convert value to any type for key: " << keyStr;
+                    itr->value = std::move(*newVal);
                 }
             }
 
@@ -270,7 +268,8 @@ std::optional<rapidjson::Value> JsonDataStoreSerializer::createJsonValue(rapidjs
     }
     else if (data.type() == typeid(std::string))
     {
-        val.SetString(std::any_cast<std::string>(data).c_str(), doc.GetAllocator());
+        const auto& str = std::any_cast<const std::string&>(data);
+        val.SetString(str.c_str(), static_cast<rapidjson::SizeType>(str.size()), doc.GetAllocator());
     }
     else if (data.type() == typeid(bool))
     {
@@ -291,14 +290,25 @@ std::optional<rapidjson::Value> JsonDataStoreSerializer::createJsonValue(rapidjs
     else if (data.type() == typeid(std::vector<std::any>))
     {
         val.SetArray();
-        for (const auto& item : std::any_cast<std::vector<std::any>>(data))
+        const auto& vec = std::any_cast<const std::vector<std::any>&>(data);
+        for (const auto& item : vec)
         {
-            auto itemVal = createJsonValue(doc, item).value_or(rapidjson::Value{});
-            val.PushBack(itemVal, doc.GetAllocator());
+            auto itemVal = createJsonValue(doc, item);
+            if (!itemVal.has_value())
+            {
+                LOG_ERROR(Logger::get()) << "Failed to convert array item to JSON value";
+                continue;
+            }
+            val.PushBack(std::move(*itemVal), doc.GetAllocator());
         }
     }
+    else
+    {
+        return std::nullopt;
+    }
 
-    return val;
+    // rapidjson::Value is move-only; ensure we construct the optional via move.
+    return std::move(val);
 }
 
 void JsonDataStoreSerializer::vecParseHelper(std::string_view key, rapidjson::Value& val, std::vector<std::any>& vec)

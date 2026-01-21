@@ -11,8 +11,8 @@ GameOfLifeSim::GameOfLifeSim()
 
 GameOfLifeSim::GameOfLifeSim(ApplicationContext* sysData)
     : m_appContext{sysData}
-    , m_width{m_appContext->configData.get<int>("width").value_or(1920)}
-    , m_height{m_appContext->configData.get<int>("height").value_or(1080)}
+    , m_width{m_appContext->configData.getCoerced<int>("video-settings.resolution.width").value_or(1920)}
+    , m_height{m_appContext->configData.getCoerced<int>("video-settings.resolution.height").value_or(1080)}
 {
     m_grids[0].resize(m_width * m_height, 0);
     m_grids[1].resize(m_width * m_height, 0);
@@ -190,4 +190,9 @@ const Grid& GameOfLifeSim::getCurrentGrid() const
 {
     int readIndex = m_currentReadBuffer.load(std::memory_order_acquire);
     return m_grids[readIndex];
+}
+
+const Grid& GameOfLifeSim::currentGrid() const
+{
+    return getCurrentGrid();
 }

@@ -2,7 +2,9 @@
 
 #include <chrono>
 #include <optional>
+#include <thread>
 
+#include "Components.hpp"
 #include <SFML/Window/ContextSettings.hpp>
 #include <SFML/Window/Event.hpp>
 #include <SFML/Window/VideoMode.hpp>
@@ -14,16 +16,16 @@
  * @brief [Public] Normal constuctor.
 */
 Engine::Engine(const std::string& relativeConfigPath, std::unique_ptr<IScene> initialScene)
-    : m_appContext{std::make_shared<ApplicationContext>()}
+    : m_appContext{}
     , m_windowActive{true}
 {
     LOG_INFO(Logger::get()) << "Initializing system. Reading main configuration file...";
 
-    auto configData = m_appContext->configDataSerializer.load(relativeConfigPath);
+    auto configData = m_appContext.configDataSerializer.load(relativeConfigPath);
     if (configData)
     {
         LOG_DEBUG(Logger::get()) << "Loaded configuration data successfully.";
-        m_appContext->configData = std::move(*configData);
+        m_appContext.configData = std::move(*configData);
         configureWindow(std::move(initialScene));
     }
     else
@@ -45,7 +47,7 @@ void Engine::run()
     // Release the OpenGL context from the main thread before the render thread claims it.
     // This also ensures any resources created during init (textures, ImGui font atlas, etc.)
     // were created while the window context was active on this thread.
-    if (!m_appContext->window.setActive(false))
+    if (!m_appContext.window.setActive(false))
     {
         LOG_FATAL(Logger::get()) << "Failed to set Main thread to inactive";
         return;
@@ -55,7 +57,7 @@ void Engine::run()
 
     while (m_windowActive)
     {
-        const std::optional<sf::Event> eventOpt = m_appContext->window.waitEvent();
+        const std::optional<sf::Event> eventOpt = m_appContext.window.waitEvent();
         if (!eventOpt)
         {
             LOG_INFO(Logger::get()) << "SF::Event::waitEvent() returned no event. Skipping event processing.";
@@ -71,7 +73,7 @@ void Engine::run()
             if (m_renderThread.joinable()) m_renderThread.join();
             if (m_audioThread.joinable()) m_audioThread.join();
             if (m_resourceThread.joinable()) m_resourceThread.join();
-            m_appContext->window.close();
+            m_appContext.window.close();
         }
         else if (const auto* resized = event.getIf<sf::Event::Resized>())
         {
@@ -80,33 +82,36 @@ void Engine::run()
             const unsigned int resizedHeight = static_cast<unsigned int>(resized->size.y);
 
             float newWidth = static_cast<float>(resizedWidth);
-            float newHeight = newWidth / m_appContext->aspectRatio;
+            float newHeight = newWidth / m_appContext.aspectRatio;
             if (newHeight > static_cast<float>(resizedHeight))
             {
                 newHeight = static_cast<float>(resizedHeight);
-                newWidth = newHeight * m_appContext->aspectRatio;
+                newWidth = newHeight * m_appContext.aspectRatio;
             }
     
-            m_appContext->window.setSize(sf::Vector2u(
+            m_appContext.window.setSize(sf::Vector2u(
                 static_cast<unsigned int>(newWidth),
                 static_cast<unsigned int>(newHeight))
             );
     
-            m_appContext->viewport.setSize({newWidth, newHeight});
+            m_appContext.viewport.setSize({newWidth, newHeight});
         }
         else if (event.is<sf::Event::FocusLost>())
         {
             LOG_INFO(Logger::get()) << "Triggered Event::LostFocus";
-            m_appContext->sceneManager.getActiveScene()->pause();
+            std::unique_lock<std::shared_mutex> lock(m_sceneMutex);
+            m_appContext.sceneManager.getActiveScene()->pause();
         }
         else if (event.is<sf::Event::FocusGained>())
         {
             LOG_INFO(Logger::get()) << "Triggered Event::GainedFocus";
-            m_appContext->sceneManager.getActiveScene()->resume();
+            std::unique_lock<std::shared_mutex> lock(m_sceneMutex);
+            m_appContext.sceneManager.getActiveScene()->resume();
         }
         else
         {
-            m_appContext->sceneManager.getActiveScene()->processEvent(event);
+            std::unique_lock<std::shared_mutex> lock(m_sceneMutex);
+            m_appContext.sceneManager.getActiveScene()->processEvent(event);
         }
     }
 
@@ -135,24 +140,52 @@ void Engine::configureWindow(std::unique_ptr<IScene> initialScene)
     settings.majorVersion = 4;
     settings.minorVersion = 3;
 
-    std::string name = m_appContext->configData.get<std::string>("name").value_or("Application");
-    unsigned int width = m_appContext->configData.get<int>("width").value_or(1920);
-    unsigned int height = m_appContext->configData.get<int>("height").value_or(1080);
-    bool fullscreenEnabled = m_appContext->configData.get<bool>("fullscreen").value_or(false);
-    m_appContext->aspectRatio = static_cast<float>(width) / static_cast<float>(height);
-    m_appContext->deltaTime = static_cast<float>(1000.f / m_appContext->configData.get<double>("frame-rate").value_or(60.f));
-    m_appContext->window.create(sf::VideoMode({width, height}), name, sf::Style::Default, (fullscreenEnabled ? sf::State::Fullscreen : sf::State::Windowed), settings);    
-    m_appContext->window.setFramerateLimit(static_cast<unsigned int>(m_appContext->configData.get<double>("frame-rate").value_or(60.f)));
-    m_appContext->sceneManager.addScene(std::move(initialScene), true, m_appContext.get());
-    m_appContext->sceneManager.processChange();
+    std::string name = m_appContext.configData.getCoerced<std::string>("system.name").value_or("Application");
+    unsigned int width = static_cast<unsigned int>(m_appContext.configData.getCoerced<int>("video-settings.resolution.width").value_or(1920));
+    unsigned int height = static_cast<unsigned int>(m_appContext.configData.getCoerced<int>("video-settings.resolution.height").value_or(1080));
+    bool fullscreenEnabled = m_appContext.configData.getCoerced<bool>("video-settings.fullscreen").value_or(false);
+    m_appContext.aspectRatio = static_cast<float>(width) / static_cast<float>(height);
+    m_appContext.deltaTime = static_cast<float>(1000.f / m_appContext.configData.getCoerced<double>("video-settings.frame-rate").value_or(60.0));
+    m_appContext.window.create(sf::VideoMode({width, height}), name, sf::Style::Default, (fullscreenEnabled ? sf::State::Fullscreen : sf::State::Windowed), settings);    
+
+    const bool vsyncEnabled = m_appContext.configData.getCoerced<bool>("video-settings.vsync").value_or(false);
+    m_appContext.window.setVerticalSyncEnabled(vsyncEnabled);
+
+    if (vsyncEnabled)
+    {
+        // When vsync is enabled, let presentation block naturally instead of an artificial limit.
+        m_appContext.window.setFramerateLimit(0);
+    }
+    else
+    {
+        // If vsync is off, cap rendering rate (optional). Use config "frame-rate" for now.
+        m_appContext.window.setFramerateLimit(static_cast<unsigned int>(m_appContext.configData.getCoerced<double>("video-settings.frame-rate").value_or(60.0)));
+    }
+    m_appContext.sceneManager.addScene(std::move(initialScene), true, &m_appContext);
+    m_appContext.sceneManager.processChange();
+
+    // Job system (used by jobified simulation). If config is missing, choose a conservative default.
+    // 0 or missing => auto.
+    const int cfgJobThreads = m_appContext.configData.getCoerced<int>("system.job-threads").value_or(0);
+    const unsigned int hw = std::max(1u, std::thread::hardware_concurrency());
+    const size_t jobThreads =
+        (cfgJobThreads > 0)
+            ? static_cast<size_t>(cfgJobThreads)
+            : static_cast<size_t>(std::max(1u, hw > 2 ? (hw - 2) : 1u));
+
+    if (!m_appContext.jobScheduler)
+        m_appContext.jobScheduler = std::make_unique<TaskScheduler>(jobThreads);
+    m_appContext.jobThreadCount = jobThreads;
 
     LOG_DEBUG(Logger::get()) << "Application Context: \n"
         << "\tWindow name: " << name << "\n"
         << "\tWindow width: " << width << "\n"
         << "\tWindow height: " << height << "\n"
-        << "\tDelta time: " << m_appContext->deltaTime;
+        << "\tDelta time: " << m_appContext.deltaTime << "\n"
+        << "\tVSync: " << (vsyncEnabled ? "true" : "false") << "\n"
+        << "\tJob threads: " << jobThreads;
     
-    LOG_DEBUG(Logger::get()) << "Configuration data: \n" << m_appContext->configData;
+    LOG_DEBUG(Logger::get()) << "Configuration data: \n" << m_appContext.configData;
 }
 
 /**
@@ -176,12 +209,52 @@ void Engine::physicThread()
         // run the update() call until we catch up before the next render() call.
         // This has the benefit of maintaining a constant update tick but also catchup 
         // to real-time if the engine ever hits a major lag point.
-        while (m_windowActive && accumulator >= m_appContext->deltaTime)
+        while (m_windowActive && accumulator >= m_appContext.deltaTime)
         {
-            std::unique_lock<std::mutex> guard(m_mutex);
-            m_appContext->sceneManager.getActiveScene()->update();
+            SE_FRAME_BEGIN(m_appContext.perf, "PhysicsThread");
+            std::unique_lock<std::shared_mutex> guard(m_sceneMutex);
+            {
+                SE_COUNTER_SET(m_appContext.perf, "JobThreads", static_cast<std::int64_t>(m_appContext.jobThreadCount));
+                SE_PROFILE_SCOPE(m_appContext.perf, "SceneManager::processChange");
+                m_appContext.sceneManager.processChange();
+            }
+            {
+                SE_PROFILE_SCOPE(m_appContext.perf, "Scene::processInput");
+                m_appContext.sceneManager.getActiveScene()->processInput();
+            }
+            {
+                SE_PROFILE_SCOPE(m_appContext.perf, "Scene::update");
+                m_appContext.sceneManager.getActiveScene()->update();
+            }
+            {
+                // If the scene supports it, build a render-command snapshot for the render thread.
+                SE_PROFILE_SCOPE(m_appContext.perf, "Scene::buildRenderCommands2D");
+                IScene* scene = m_appContext.sceneManager.getActiveScene();
+                if (auto* emitter = dynamic_cast<IRenderCommands2DEmitter*>(scene))
+                {
+                    auto& out = m_renderCmds2D.beginWrite();
+                    out.clear();
+                    emitter->buildRenderCommands2D(out);
+                    m_renderCmds2D.publish();
+                    m_useRenderCmds2D.store(true, std::memory_order_release);
+                }
+                else
+                {
+                    m_useRenderCmds2D.store(false, std::memory_order_release);
+                }
+            }
+            {
+                // Basic per-tick counters (cheap and extremely useful).
+                auto& reg = m_appContext.sceneManager.getActiveScene()->getRegistry();
+                SE_COUNTER_SET(
+                    m_appContext.perf,
+                    "EntitiesAlive",
+                    static_cast<std::int64_t>(reg.storage<entt::entity>().size())
+                );
+            }
             guard.unlock();
-            accumulator -= m_appContext->deltaTime;
+            SE_FRAME_END(m_appContext.perf);
+            accumulator -= m_appContext.deltaTime;
         }
     }
 
@@ -195,18 +268,55 @@ void Engine::renderThread()
 {
     LOG_INFO(Logger::get()) << "----- Render thread started -----";
 
-    if (!m_appContext->window.setActive(true))
+    if (!m_appContext.window.setActive(true))
         LOG_FATAL(Logger::get()) << "Failed to set Render thread to active";
 
     while (m_windowActive)
     {
-        m_appContext->window.clear();
-        m_appContext->sceneManager.processChange();
-        std::unique_lock<std::mutex> guard(m_mutex);
-        m_appContext->sceneManager.getActiveScene()->processInput();
-        guard.unlock();
-        m_appContext->sceneManager.getActiveScene()->render();
-        m_appContext->window.display();
+        SE_FRAME_BEGIN(m_appContext.perf, "RenderThread");
+        {
+            SE_PROFILE_SCOPE(m_appContext.perf, "Frame");
+
+            {
+                SE_PROFILE_SCOPE(m_appContext.perf, "Window::clear");
+                m_appContext.window.clear();
+            }
+
+            {
+                // If the active scene implements IRenderCommands2DEmitter, use the batch renderer for 2D drawing.
+                // Otherwise, fall back to the legacy Scene::render() path.
+                std::shared_lock<std::shared_mutex> guard(m_sceneMutex);
+                IScene* scene = m_appContext.sceneManager.getActiveScene();
+
+                if (m_useRenderCmds2D.load(std::memory_order_acquire))
+                {
+                    {
+                        SE_PROFILE_SCOPE(m_appContext.perf, "Renderer2D::flush");
+                        const auto& cmds = m_renderCmds2D.acquireRead();
+                        m_batcher2D.begin();
+                        m_batcher2D.submit(cmds);
+                        m_batcher2D.flush(m_appContext.window);
+                    }
+
+                    if (auto* emitter = dynamic_cast<IRenderCommands2DEmitter*>(scene))
+                    {
+                        SE_PROFILE_SCOPE(m_appContext.perf, "Scene::renderOverlay");
+                        emitter->renderOverlay(m_appContext.window);
+                    }
+                }
+                else
+                {
+                    SE_PROFILE_SCOPE(m_appContext.perf, "Scene::render");
+                    scene->render();
+                }
+            }
+
+            {
+                SE_PROFILE_SCOPE(m_appContext.perf, "Window::display");
+                m_appContext.window.display();
+            }
+        }
+        SE_FRAME_END(m_appContext.perf);
     }
 
     LOG_INFO(Logger::get()) << "----- Render thread ended -----";

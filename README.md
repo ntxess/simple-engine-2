@@ -3,18 +3,15 @@ Fork of the original simple game engine with new additions and structural change
 
 ## Build x64-Debug
 ```bash
-cmake -S . -B "build/cmake/x64-Debug" -DCMAKE_BUILD_TYPE=Debug
-```
-```bash
-cmake --build "build/cmake/x64-Debug" --config Debug -j
+cmake -S . -B "build/cmake/x64-Debug" -G Ninja -DCMAKE_BUILD_TYPE=Debug -DSIMPLE_ENGINE_ENABLE_PROFILER=ON
+cmake --build "build/cmake/x64-Debug" -j
 ```
 ## Build x64-Release
 ```bash
-cmake -S . -B "build/cmake/x64-Release" -DCMAKE_BUILD_TYPE=Release
+cmake -S . -B "build/cmake/x64-Release" -G Ninja -DCMAKE_BUILD_TYPE=Release -DSIMPLE_ENGINE_ENABLE_PROFILER=ON
+cmake --build "build/cmake/x64-Release" -j
 ```
-```bash
-cmake --build "build/cmake/x64-Release" --config Release -j
-```
+
 # Running in Docker [WIP]
 ## Prerequisite:
 xhost is required for docker to gain access to X11.

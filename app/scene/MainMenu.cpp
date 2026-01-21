@@ -23,7 +23,7 @@ void MainMenu::init()
     }
     
     // Load the config file for texture paths and load them into the resource manager
-    auto texturePaths = m_appContext->configDataSerializer.load("config/texture.json");
+    auto texturePaths = m_appContext->configDataSerializer.load("config/texture.toml");
     if (texturePaths)
     {
         for (const auto& [key, val] : texturePaths->lockedView())

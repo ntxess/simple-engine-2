@@ -22,7 +22,7 @@ public:
     EventSystem() = delete;
     EventSystem(entt::registry& piplineReg, std::chrono::milliseconds watchdogTime);
 
-    constexpr std::string_view name() const override final;
+    constexpr std::string_view name() const override final { return "EventSystem"; }
     void update(entt::registry& entityReg, const float& dt = 0.f) override final;
 
     EventStatus apply(const EffectType effectType, StatusModEvent& statusModEvent, EntityStatus& receiverStatus) const;

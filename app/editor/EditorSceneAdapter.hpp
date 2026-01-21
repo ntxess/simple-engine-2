@@ -19,6 +19,8 @@
 #include "Components.hpp"
 #include "interface/IScene.hpp"
 #include "interface/ISceneVisitor.hpp"
+#include "util/BatchRenderer2D.hpp"
+#include "util/RenderCommands2D.hpp"
 #include "util/Logger.hpp"
 
 struct ComponentPropData
@@ -59,8 +61,13 @@ public:
 
     void processInput();
     void processEvent(const sf::Event& event);
-    void render();
     void update();
+
+    // Snapshot / command-buffer render for the Scene View panel.
+    // buildSceneViewRenderCommands() must be called from the sim thread (safe to read registry).
+    // drawSceneViewFromRenderCommands() must be called from the render thread (SFML draw calls).
+    void buildSceneViewRenderCommands();
+    void drawSceneViewFromRenderCommands(sf::RenderTexture& target) const;
     void accept(ISceneVisitor* visitor, entt::entity entityID);
 
     entt::registry& getRegistry() const;
@@ -116,5 +123,8 @@ public:
 private:
     entt::entity m_renderTextureID;
     std::unique_ptr<IScene> m_scene;
+    TripleBufferedRenderCommands2D m_sceneViewCmds;
+    // Render-thread-only helper (mutable because drawSceneViewFromRenderCommands is const).
+    mutable BatchRenderer2D m_sceneViewBatcher{ Batch2DConfig{ Batch2DBackend::VertexBuffer, Batch2DSortMode::PreserveOrder } };
 };
 

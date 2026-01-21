@@ -3,7 +3,18 @@ file(GLOB_RECURSE CORE_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp"
 )
 
+# Exclude rapidjson-dependent files from build (kept for legacy reasons)
+list(FILTER CORE_SOURCES EXCLUDE REGEX ".*JsonDataStoreSerializer\\.cpp$")
+
 add_library(core_engine STATIC ${CORE_SOURCES})
+
+# ------------------------------
+# Compile definitions
+# ------------------------------
+target_compile_definitions(core_engine PUBLIC
+    $<$<BOOL:${SIMPLE_ENGINE_ENABLE_PROFILER}>:SIMPLE_ENGINE_ENABLE_PROFILER=1>
+    $<$<NOT:$<BOOL:${SIMPLE_ENGINE_ENABLE_PROFILER}>>:SIMPLE_ENGINE_ENABLE_PROFILER=0>
+)
 
 # ------------------------------
 # Include directories
@@ -13,7 +24,7 @@ set(DEP_DIR "${CMAKE_SOURCE_DIR}/dep")
 target_include_directories(core_engine PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}            # core/ as include root
     ${DEP_DIR}/entt-3.16.0/src             # EnTT
-    ${DEP_DIR}/rapidjson-1.1.0/include     # RapidJSON
+    # ${DEP_DIR}/rapidjson-1.1.0/include     # RapidJSON (disabled - kept for legacy)
     ${DEP_DIR}/tomlplusplus-3.4.0/include  # toml++
 )
 

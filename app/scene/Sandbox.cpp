@@ -23,7 +23,7 @@ void Sandbox::init()
     }
 
     // Load the config file for texture paths and load them into the resource manager
-    auto texturePaths = m_appContext->configDataSerializer.load("config/texture.json");
+    auto texturePaths = m_appContext->configDataSerializer.load("config/texture.toml");
     if (texturePaths)
     {
         for (const auto& [key, val] : texturePaths->lockedView())
@@ -71,8 +71,8 @@ void Sandbox::init()
         { sf::Keyboard::Scancode::D, new Movement(m_player, { 1,  0 }) }
     };
 
-    float width = static_cast<float>(m_appContext->configData.get<int>("width").value());
-    float height = static_cast<float>(m_appContext->configData.get<int>("height").value());
+    float width = static_cast<float>(m_appContext->configData.getCoerced<int>("video-settings.resolution.width").value_or(1920));
+    float height = static_cast<float>(m_appContext->configData.getCoerced<int>("video-settings.resolution.height").value_or(1080));
 
     m_reg.get<Sprite>(m_player).setPosition({200, 200});
 
@@ -89,7 +89,7 @@ void Sandbox::init()
 
     m_system.addSystem<CollisionSystem>(true, m_collisionEventReg, sf::Vector2f{ 0.f, 0.f }, m_appContext->window.getSize());
     m_system.addSystem<EventSystem>(true, m_collisionEventReg, std::chrono::milliseconds(36000));
-    m_system.addSystem<WayPointSystem>(true, "Speed");
+    m_system.addSystem<WayPointSystem>(true, "Speed", m_appContext->jobScheduler.get());
 }
 
 void Sandbox::processEvent(const sf::Event& event)
