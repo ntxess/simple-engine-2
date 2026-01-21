@@ -7,6 +7,9 @@
 #include <thread>
 
 #include "ApplicationContext.hpp"
+#include "interface/IRenderCommands2DEmitter.hpp"
+#include "util/BatchRenderer2D.hpp"
+#include "util/RenderCommands2D.hpp"
 
 class Engine
 {
@@ -33,4 +36,9 @@ private:
     std::thread m_audioThread;
     std::thread m_resourceThread;
     mutable std::shared_mutex m_sceneMutex;
+
+    // Optional command-buffer renderer (used when the active scene implements IRenderCommands2DEmitter).
+    TripleBufferedRenderCommands2D m_renderCmds2D;
+    BatchRenderer2D m_batcher2D{ Batch2DConfig{ Batch2DBackend::VertexBuffer, Batch2DSortMode::PreserveOrder } };
+    std::atomic<bool> m_useRenderCmds2D{false};
 };

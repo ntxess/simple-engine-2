@@ -4,6 +4,7 @@
 #include <optional>
 #include <thread>
 
+#include "Components.hpp"
 #include <SFML/Window/ContextSettings.hpp>
 #include <SFML/Window/Event.hpp>
 #include <SFML/Window/VideoMode.hpp>
@@ -226,6 +227,23 @@ void Engine::physicThread()
                 m_appContext.sceneManager.getActiveScene()->update();
             }
             {
+                // If the scene supports it, build a render-command snapshot for the render thread.
+                SE_PROFILE_SCOPE(m_appContext.perf, "Scene::buildRenderCommands2D");
+                IScene* scene = m_appContext.sceneManager.getActiveScene();
+                if (auto* emitter = dynamic_cast<IRenderCommands2DEmitter*>(scene))
+                {
+                    auto& out = m_renderCmds2D.beginWrite();
+                    out.clear();
+                    emitter->buildRenderCommands2D(out);
+                    m_renderCmds2D.publish();
+                    m_useRenderCmds2D.store(true, std::memory_order_release);
+                }
+                else
+                {
+                    m_useRenderCmds2D.store(false, std::memory_order_release);
+                }
+            }
+            {
                 // Basic per-tick counters (cheap and extremely useful).
                 auto& reg = m_appContext.sceneManager.getActiveScene()->getRegistry();
                 SE_COUNTER_SET(
@@ -265,9 +283,32 @@ void Engine::renderThread()
             }
 
             {
-                SE_PROFILE_SCOPE(m_appContext.perf, "Scene::render");
+                // If the active scene implements IRenderCommands2DEmitter, use the batch renderer for 2D drawing.
+                // Otherwise, fall back to the legacy Scene::render() path.
                 std::shared_lock<std::shared_mutex> guard(m_sceneMutex);
-                m_appContext.sceneManager.getActiveScene()->render();
+                IScene* scene = m_appContext.sceneManager.getActiveScene();
+
+                if (m_useRenderCmds2D.load(std::memory_order_acquire))
+                {
+                    {
+                        SE_PROFILE_SCOPE(m_appContext.perf, "Renderer2D::flush");
+                        const auto& cmds = m_renderCmds2D.acquireRead();
+                        m_batcher2D.begin();
+                        m_batcher2D.submit(cmds);
+                        m_batcher2D.flush(m_appContext.window);
+                    }
+
+                    if (auto* emitter = dynamic_cast<IRenderCommands2DEmitter*>(scene))
+                    {
+                        SE_PROFILE_SCOPE(m_appContext.perf, "Scene::renderOverlay");
+                        emitter->renderOverlay(m_appContext.window);
+                    }
+                }
+                else
+                {
+                    SE_PROFILE_SCOPE(m_appContext.perf, "Scene::render");
+                    scene->render();
+                }
             }
 
             {

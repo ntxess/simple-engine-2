@@ -135,8 +135,8 @@ void Editor::update()
 
         // Build a render snapshot/command buffer for the scene view (sim-thread safe).
         {
-            SE_PROFILE_SCOPE(m_appContext->perf, "Editor::SelectedScene::buildSceneViewCommands");
-            m_selectedSceneData->buildSceneViewCommands();
+            SE_PROFILE_SCOPE(m_appContext->perf, "Editor::SelectedScene::buildSceneViewRenderCommands");
+            m_selectedSceneData->buildSceneViewRenderCommands();
         }
 
         // High-signal counters for iteration: how big is the simulation right now?
@@ -495,17 +495,9 @@ void Editor::renderSceneViewPanel(const ImVec2& pos, const ImVec2& size)
     // Clear the previous buffer then call to the actual scenes render function
     renderTexture.clear();
 
-    if (m_selectedSceneData->shouldUseSceneViewCommands())
-    {
-        SE_PROFILE_SCOPE(m_appContext->perf, "Editor::SelectedScene::renderFromCommands");
-        m_selectedSceneData->renderSceneViewFromCommands(renderTexture);
-    }
-    else
-    {
-        // Fallback: old path for scenes that haven't been migrated yet.
-        SE_PROFILE_SCOPE(m_appContext->perf, "Editor::SelectedScene::render");
-        m_selectedSceneData->render();
-    }
+    // All scenes render via command buffer now (no direct scene->render() calls from the Scene View).
+    SE_PROFILE_SCOPE(m_appContext->perf, "Editor::SelectedScene::drawFromRenderCommands");
+    m_selectedSceneData->drawSceneViewFromRenderCommands(renderTexture);
 
     displayEntityVisualizers();
     displayCollisionSystemVisualizer();

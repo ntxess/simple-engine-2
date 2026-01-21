@@ -15,11 +15,12 @@ class Texture;
 }
 
 /**
- * Minimal render command representation for 2D sprites.
+ * 2D render commands intended for a snapshot/command-buffer renderer.
  *
- * Designed to be produced on the simulation thread and consumed on the render thread
- * without touching the live ECS/registry.
+ * Producer (sim thread) builds commands from ECS state; consumer (render thread) draws commands
+ * without reading the live registry.
  */
+
 struct SpriteDrawCmd
 {
     const sf::Texture* texture = nullptr;
@@ -31,18 +32,34 @@ struct SpriteDrawCmd
     float rotationDeg = 0.f;
 };
 
+struct RectDrawCmd
+{
+    sf::Vector2f position{};
+    sf::Vector2f size{};
+    sf::Color color{255, 255, 255, 255};
+};
+
+struct RenderCommands2D
+{
+    std::vector<SpriteDrawCmd> sprites;
+    std::vector<RectDrawCmd> rects;
+
+    void clear()
+    {
+        sprites.clear();
+        rects.clear();
+    }
+};
+
 /**
- * Triple-buffered sprite command list.
+ * Triple-buffered render command storage.
  *
- * - Producer thread: beginWrite() -> fill vector -> publish()
- * - Consumer thread: acquireRead() -> draw
- *
- * Triple buffering avoids producer overwriting the buffer currently being drawn.
+ * Triple buffering avoids the producer overwriting the buffer currently being consumed.
  */
-class TripleBufferedSpriteCommands
+class TripleBufferedRenderCommands2D
 {
 public:
-    std::vector<SpriteDrawCmd>& beginWrite()
+    RenderCommands2D& beginWrite()
     {
         const int readIdx = m_readIndex.load(std::memory_order_acquire);
         if (m_writeIndex == readIdx)
@@ -58,7 +75,7 @@ public:
         m_writeIndex = (m_writeIndex + 1) % 3;
     }
 
-    const std::vector<SpriteDrawCmd>& acquireRead() const
+    const RenderCommands2D& acquireRead() const
     {
         const int idx = m_readyIndex.load(std::memory_order_acquire);
         m_readIndex.store(idx, std::memory_order_release);
@@ -70,6 +87,6 @@ private:
     std::atomic<int> m_readyIndex{0};
     int m_writeIndex = 1;
 
-    mutable std::array<std::vector<SpriteDrawCmd>, 3> m_buffers{};
+    mutable std::array<RenderCommands2D, 3> m_buffers{};
 };
 

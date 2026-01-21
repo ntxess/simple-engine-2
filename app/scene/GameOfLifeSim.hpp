@@ -41,6 +41,11 @@ public:
     void accept(ISceneVisitor* visitor, entt::entity entityID) override final;
     entt::registry& getRegistry() override final;
 
+    // Read-only access for snapshot/command-buffer renderers.
+    const Grid& currentGrid() const;
+    int gridWidth() const { return m_width; }
+    int gridHeight() const { return m_height; }
+
 private:
     const Grid& getCurrentGrid() const;
 
