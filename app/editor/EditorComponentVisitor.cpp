@@ -396,6 +396,7 @@ void EditorComponentVisitor::visit(UpdateEntityPolling* updateEntityPolling, ent
     int cooldownTicks = static_cast<int>(updateEntityPolling->cooldownTicks);
     if (ImGui::InputInt(("Ticks##PollDurInput" + ID).c_str(), &cooldownTicks))
         updateEntityPolling->cooldownTicks = static_cast<std::uint64_t>(std::max(cooldownTicks, 0));
+    ImGui::Checkbox(("Ready on start##PollReadyInput" + ID).c_str(), &updateEntityPolling->readyOnStart);
 
     ImGui::PopItemWidth();
 

@@ -30,3 +30,25 @@ file are those of the original code, as in docs/milestone-specs.md).
 
 Goldens: `effects` changed from tick 302 (its TEMPTIMED of 40 s outlives the
 2 s watchdog it sets); `stress` and `patrol` unchanged.
+
+## R2 Cooldowns are per (source, receiver) pair, decided once per tick
+
+A polled source (UpdateEntityPolling) keeps its cooldown separately for every
+receiver. In a tick it affects an overlapping receiver if it has not already
+affected that receiver in this tick and either more than `ticks(cooldown)`
+ticks have passed since it last affected that receiver, or it has never
+affected it and `readyOnStart` is set, or more than `ticks(cooldown)` ticks
+have passed since the source was created. The decision is made once per pair
+and tick, and a positive decision records the contact. Self and same-team
+pairs are skipped before the decision and do not use it. Event-driven sources
+(UpdateEntityEvent only) have no cooldown.
+
+Before: one cooldown per source, restarted by whichever receiver was checked
+first in the tick (UpdateEntityPolling::isReady, called per candidate from
+core/system/CollisionSystem.cpp:88; core/component/UpdateEntityPolling.cpp:18-24),
+so a source affected at most one receiver per cooldown and the quadtree's
+order chose which; `readyOnStart` was ignored (UpdateEntityPolling.cpp:8-11),
+so every source first waited one cooldown after creation.
+
+Goldens: all three changed (`stress` from tick 534, `effects` from tick 14,
+`patrol` from tick 1, where the player starts on an enemy).

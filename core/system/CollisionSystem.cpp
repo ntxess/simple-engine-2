@@ -50,6 +50,12 @@ void CollisionSystem::quadTreeUpdate(entt::registry& entityReg)
 
 void CollisionSystem::collisionUpdate(entt::registry& entityReg)
 {
+    // Rule R2: cooldowns are kept per (source, receiver) pair; drop the ones that ran out.
+    for (auto&& [entityID, polling] : entityReg.view<UpdateEntityPolling>().each())
+    {
+        polling.forgetExpired(m_simTime.tick);
+    }
+
     // Event-driven collision update
     const auto& eventView = entityReg.view<Sprite, TeamTag, EffectsList, UpdateEntityEvent>();
     for (const auto& sourceID : eventView)
@@ -86,7 +92,7 @@ void CollisionSystem::collisionUpdateImpl(entt::registry& entityReg, const entt:
             LOG_TRACE(Logger::get()) << "Entity [" << static_cast<unsigned int>(sourceID) << "] collided with same team";
             continue;
         }
-        else if (entityReg.all_of<UpdateEntityPolling>(sourceID) && !entityReg.get<UpdateEntityPolling>(sourceID).isReady(m_simTime.tick))
+        else if (entityReg.all_of<UpdateEntityPolling>(sourceID) && !entityReg.get<UpdateEntityPolling>(sourceID).isReadyFor(receiverID, m_simTime.tick))
         {
             LOG_TRACE(Logger::get()) << "Entity [" << static_cast<unsigned int>(sourceID) << "] is not ready to collide";
             continue;
