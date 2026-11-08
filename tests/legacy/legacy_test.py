@@ -13,6 +13,10 @@ usage:
       A paced run in a visible window records its keyboard input; replaying
       that recording headless must give the same projection run hash. Needs
       an interactive desktop (label "desktop", docs/gates.md).
+  legacy_test.py record-replay --exe EXE --scenario DIR/NAME --work DIR
+      Headless: a replay of DIR/NAME.seinput recorded with --record must hold
+      exactly the frames it replayed (the sparse file expanded per tick), and
+      replaying that recording must give the same projection run hash.
   legacy_test.py reference --exe EXE --scenario DIR/NAME --work DIR [--update]
       The per-tick projection hashes must equal the golden DIR/NAME.sehash,
       and the projection must equal the golden DIR/NAME.seproj.gz line for
@@ -139,6 +143,76 @@ def cmd_live_replay(args):
     return 0
 
 
+def parse_seinput(path):
+    """Reads a .seinput into a list of (tick, held, pressed, released)."""
+    frames = []
+    with open(path, encoding="ascii") as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#"):
+                frames.append(tuple(int(value, 16) for value in line.split()))
+    return frames
+
+
+def expand_seinput(frames, ticks):
+    """The frames LegacyInputReader::next gives for ticks 1..ticks: a tick
+    without a line repeats the previous held state with no edges, and lines
+    for earlier ticks still update the held state."""
+    by_tick = {frame[0]: frame for frame in frames}
+    held = 0
+    for frame in frames:
+        if frame[0] < 1:
+            held = frame[1]
+    expanded = []
+    for tick in range(1, ticks + 1):
+        frame = by_tick.get(tick, (tick, held, 0, 0))
+        held = frame[1]
+        expanded.append(frame)
+    return expanded
+
+
+def cmd_record_replay(args):
+    """Replays the scenario's inputs while recording them, checks that the
+    recording holds exactly the frames the replay consumed, then replays the
+    recording: the run hash must be the same."""
+    work = pathlib.Path(args.work)
+    scenario = ["--scenario", f"{args.scenario}.scenario.json"]
+    source = parse_seinput(f"{args.scenario}.seinput")
+    # The recorder must see every field set somewhere, or a swapped or dropped
+    # field could go unnoticed.
+    for index, field in ((1, "held"), (2, "pressed"), (3, "released")):
+        if not any(frame[index] for frame in source):
+            print(f"FAIL: {args.scenario}.seinput has no non-zero {field} "
+                  "mask; the round trip would not cover it")
+            return 1
+    recording = work / "recorded.seinput"
+    ticks, recorded_hash, recorded = run_replay(
+        args.exe, scenario_args(args.scenario) + ["--record", recording],
+        work, "record")
+    expected = expand_seinput(source, ticks)
+    produced = parse_seinput(recording)
+    if produced != expected:
+        for index in range(max(len(expected), len(produced))):
+            want = expected[index] if index < len(expected) else None
+            got = produced[index] if index < len(produced) else None
+            if want != got:
+                print(f"FAIL: recorded frame {index + 1} is {got}, the "
+                      f"replayed input was {want} (tick, held, pressed, "
+                      f"released); {recording}")
+                return 1
+    replay_ticks, replay_hash, replay = run_replay(
+        args.exe, scenario + ["--inputs", recording], work, "replay")
+    if replay_ticks != ticks or replay_hash != recorded_hash:
+        print(f"FAIL: recording run {ticks} ticks, hash {recorded_hash}; "
+              f"replay of the recording {replay_ticks} ticks, "
+              f"hash {replay_hash}")
+        print(first_difference(recorded, replay))
+        return 1
+    print(f"ok: {ticks} recorded frames match the replayed input; replaying "
+          f"them gives hash {recorded_hash}")
+    return 0
+
+
 def write_hashes(path, blocks, run_hash, name):
     """Writes the .sehash golden; keeps an existing golden whose content is
     the same (line endings aside, which git may have converted)."""
@@ -224,7 +298,7 @@ def cmd_reference(args):
 def main():
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
-    for command in ("selfdet", "live-replay", "reference"):
+    for command in ("selfdet", "live-replay", "record-replay", "reference"):
         p = sub.add_parser(command)
         p.add_argument("--exe", required=True)
         p.add_argument("--scenario", required=True)
@@ -241,6 +315,8 @@ def main():
         if not args.ticks:
             args.ticks = "600"
         return cmd_live_replay(args)
+    if args.command == "record-replay":
+        return cmd_record_replay(args)
     return cmd_reference(args)
 
 

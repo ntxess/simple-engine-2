@@ -13,6 +13,10 @@
 #                              so the legacy test presets exclude it; run it by
 #                              hand (docs/gates.md):
 #                              ctest --test-dir out/build/legacy-msvc-debug -L desktop
+#   legacy.record_replay.NAME  headless: replaying NAME.seinput with --record
+#                              records exactly the frames it replayed (non-zero
+#                              held, pressed and released masks), and replaying
+#                              the recording gives the same hash
 #   legacy.reference.NAME      every tick's projection hash equals the golden
 #                              NAME.sehash and the projection equals the golden
 #                              NAME.seproj.gz (generated at legacy-ref-v1); a
@@ -34,6 +38,15 @@ foreach(_scenario IN LISTS _legacy_scenarios)
             --work "${_legacy_work}/selfdet/${_scenario}"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
   set_tests_properties(legacy.selfdet.${_scenario} PROPERTIES LABELS legacy)
+
+  add_test(NAME legacy.record_replay.${_scenario}
+    COMMAND "${Python3_EXECUTABLE}" "${_legacy_driver}" record-replay
+            --exe "$<TARGET_FILE:legacy_replay>"
+            --scenario "${_legacy_fixtures}/${_scenario}"
+            --work "${_legacy_work}/record_replay/${_scenario}"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+  set_tests_properties(legacy.record_replay.${_scenario} PROPERTIES
+    LABELS legacy)
 
   add_test(NAME legacy.reference.${_scenario}
     COMMAND "${Python3_EXECUTABLE}" "${_legacy_driver}" reference
