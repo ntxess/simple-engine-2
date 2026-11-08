@@ -4,13 +4,13 @@ StatusModEvent::StatusModEvent()
     : sourceID{entt::null}
     , receiverID{entt::null}
     , effectType{EffectType::NULLTYPE}
-    , effect{nullptr}
+    , effect{}
     , startTick{0}
     , lastApplyTick{0}
     , elapsedTicks{0}
 {}
 
-StatusModEvent::StatusModEvent(const entt::entity source, const entt::entity receiver, const EffectType type, Effects* effect, std::uint64_t nowTick)
+StatusModEvent::StatusModEvent(const entt::entity source, const entt::entity receiver, const EffectType type, const Effects& effect, std::uint64_t nowTick)
     : sourceID{source}
     , receiverID{receiver}
     , effectType{type}

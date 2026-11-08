@@ -12,6 +12,7 @@ The legacy reference retires when nothing is left open
 | EventBus / TaskScheduler / BoundedQueue | core/util/EventBus.*, TaskScheduler.*, BoundedQueue.hpp | deleted (M1a) | Two idle TaskScheduler threads with no callers (only ApplicationContext held an EventBus) |
 | Wall-clock effect and cooldown timing | core/system/EventSystem.cpp:95,100,135,144; core/component/UpdateEntity*.cpp | re-specified (M1a) | Ticks of LegacySimTime (120 Hz); authored milliseconds convert with msToTicks = ceil(ms * rate / 1000); the editor edits cooldowns in ticks |
 | Effect model INSTANT / OVERTIME / TEMPTIMED | core/system/EventSystem.cpp:54-176 | open (M1b, M3) | Rules R1, R7 |
+| Raw `Effects*` from a pending event into the source's EffectsList | core/component/StatusModEvent.hpp:26; core/system/CollisionSystem.cpp:104 | re-specified (M1a) | StatusModEvent copies the effect at contact; the pointer dangled when the inspector erased or the vector grew (app/editor/EditorComponentVisitor.cpp:67-70) |
 | Per-source collision cooldown | core/component/UpdateEntityPolling.cpp:18-24 | open (M1b, M3) | Rule R2: per (source, receiver) pair |
 | Self and same-team contact skips | core/system/CollisionSystem.cpp:78-87 | open (M3) | Characterization test |
 | Quadtree broadphase | core/util/QuadTree.cpp | open (M1b, M3) | Rule R3 brute force in the reference; spatial hash in the engine |

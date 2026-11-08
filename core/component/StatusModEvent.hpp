@@ -13,7 +13,7 @@ class StatusModEvent : public IComponent
 {
 public:
     StatusModEvent();
-    StatusModEvent(const entt::entity source, const entt::entity receiver, const EffectType type, Effects* effect, std::uint64_t nowTick = 0);
+    StatusModEvent(const entt::entity source, const entt::entity receiver, const EffectType type, const Effects& effect, std::uint64_t nowTick = 0);
     StatusModEvent(const StatusModEvent& other) = default;
     StatusModEvent(StatusModEvent&& other) noexcept = default;
     StatusModEvent& operator=(const StatusModEvent& other) = default;
@@ -24,7 +24,7 @@ public:
     entt::entity sourceID;
     entt::entity receiverID;
     EffectType effectType;
-    Effects* effect;
+    Effects effect;              // Copied from the source's EffectsList at contact, so later edits cannot dangle
     std::uint64_t startTick;     // Tick of the contact that created the event
     std::uint64_t lastApplyTick; // Tick the timing of the next application counts from (starts at startTick)
     std::uint64_t elapsedTicks;  // Ticks accumulated by the applications so far

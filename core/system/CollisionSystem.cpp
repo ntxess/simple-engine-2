@@ -95,14 +95,14 @@ void CollisionSystem::collisionUpdateImpl(entt::registry& entityReg, const entt:
         // For all of the source entity modifiers, apply effects to receiver
         if (entityReg.all_of<EffectsList>(sourceID))
         {
-            for (auto& [effectType, effect] : entityReg.get<EffectsList>(sourceID).effectsList)
+            for (const auto& [effectType, effect] : entityReg.get<EffectsList>(sourceID).effectsList)
             {
                 // Get the receiver status and apply effects
                 if (entityReg.all_of<EntityStatus>(receiverID))
                 {
                     entt::entity statusModEventID = m_piplineReg.create();
 
-                    m_piplineReg.emplace_or_replace<StatusModEvent>(statusModEventID, sourceID, receiverID, effectType, &effect, m_simTime.tick);
+                    m_piplineReg.emplace_or_replace<StatusModEvent>(statusModEventID, sourceID, receiverID, effectType, effect, m_simTime.tick);
 
                     LOG_INFO(Logger::get())
                         << "Collision Event ID [" << static_cast<unsigned int>(statusModEventID)
