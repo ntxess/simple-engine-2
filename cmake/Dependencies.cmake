@@ -9,7 +9,14 @@
 
 include(FetchContent)
 
-set(SE_DEPS_CACHE "${CMAKE_SOURCE_DIR}/.deps" CACHE PATH
+# The SE_DEPS_CACHE environment variable lets git worktrees and WSL clones
+# share one archive cache with the main checkout.
+if(DEFINED ENV{SE_DEPS_CACHE} AND NOT "$ENV{SE_DEPS_CACHE}" STREQUAL "")
+  set(_se_default_cache "$ENV{SE_DEPS_CACHE}")
+else()
+  set(_se_default_cache "${CMAKE_SOURCE_DIR}/.deps")
+endif()
+set(SE_DEPS_CACHE "${_se_default_cache}" CACHE PATH
     "Shared download cache for pinned dependency archives")
 set(FETCHCONTENT_TRY_FIND_PACKAGE_MODE NEVER)
 

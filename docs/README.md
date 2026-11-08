@@ -16,6 +16,8 @@ behaviour reference until every rule and editor operation is ported.
 | [deps.md](deps.md) | Pinned dependencies, hashes and why each is used |
 | [gates.md](gates.md) | Verification gates that need hardware or setup not on the dev machine |
 | [ledger.md](ledger.md) | Completeness ledger: every legacy feature ported, re-specified or deleted |
+| [implementation-plan.md](implementation-plan.md) | The approved milestone plan (M0-M19) |
+| [milestone-specs.md](milestone-specs.md) | Detailed specs for M1 and M2 |
 | rules/gameplay-rules.md | Declared gameplay rules applied to the legacy reference (milestone M1b) |
 
 ## Building
