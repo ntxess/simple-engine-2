@@ -68,10 +68,10 @@ void Sandbox::init()
     m_reg.get<EntityStatus>(m_player).values["HP"] = 100.f;
     m_reg.get<PlayerInput>(m_player).input =
     {
-        { sf::Keyboard::Scancode::W, new Movement(m_player, { 0, -1 }) },
-        { sf::Keyboard::Scancode::A, new Movement(m_player, { -1, 0 }) },
-        { sf::Keyboard::Scancode::S, new Movement(m_player, { 0,  1 }) },
-        { sf::Keyboard::Scancode::D, new Movement(m_player, { 1,  0 }) }
+        { LegacyAction::Up,    new Movement(m_player, { 0, -1 }) },
+        { LegacyAction::Left,  new Movement(m_player, { -1, 0 }) },
+        { LegacyAction::Down,  new Movement(m_player, { 0,  1 }) },
+        { LegacyAction::Right, new Movement(m_player, { 1,  0 }) }
     };
 
     float width = static_cast<float>(m_appContext->configData.get<int>("width").value());
@@ -101,26 +101,26 @@ void Sandbox::init()
 
 void Sandbox::processEvent(const sf::Event& event)
 {
-    if (const auto* keyPressed = event.getIf<sf::Event::KeyPressed>())
-    {
-        if (keyPressed->scancode == sf::Keyboard::Scancode::Escape)
-            m_appContext->sceneManager.addScene(std::make_unique<MainMenu>(m_appContext));
-
-        //auto& controller = m_reg.get<PlayerInput>(m_player);
-        //for (auto& [key, action] : controller.input)
-        //	if (event.key.code == key)
-        //		action->execute(m_reg);
-    }
+    // Keys are read per tick from ApplicationContext::input (processInput), so that a recorded
+    // input file replays the scene exactly.
 }
 
 void Sandbox::processInput()
 {
-    auto& controller = m_reg.get<PlayerInput>(m_player);
-    for (auto& [key, action] : controller.input)
-        if (sf::Keyboard::isKeyPressed(key))
-            action->execute(m_reg);
+    const LegacyInputFrame* input = m_appContext->input;
+    if (!input)
+        return;
 
-    //m_reg.get<PlayerInput>(m_player).processInput(m_reg);
+    // Exit (Escape) leaves for the main menu when the Sandbox runs as the root scene. Inside the
+    // editor the Editor is the active scene and Escape stays an editor key, as before.
+    if (input->wasPressed(LegacyAction::Exit) && m_appContext->sceneManager.getActiveScene() == this)
+        m_appContext->sceneManager.addScene(std::make_unique<MainMenu>(m_appContext));
+
+    // The player may have been destroyed (HP <= 0).
+    if (!m_reg.valid(m_player) || !m_reg.all_of<PlayerInput>(m_player))
+        return;
+
+    m_reg.get<PlayerInput>(m_player).processInput(m_reg, *input);
 }
 
 void Sandbox::update()

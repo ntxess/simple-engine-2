@@ -1,21 +1,22 @@
 #pragma once 
 
-#include <unordered_map>
+#include <map>
 
-#include <SFML/Window/Keyboard.hpp>
 #include <entt/entity/entity.hpp>
 #include <entt/entity/registry.hpp>
 
 #include "interface/ICommand.hpp"
 #include "interface/IComponent.hpp"
 #include "interface/IComponentVisitor.hpp"
+#include "util/LegacyInput.hpp"
 
 class PlayerInput : public IComponent
 {
 public:
     void accept(IComponentVisitor* visitor, entt::entity entityID) override;
 
-    void processInput(entt::registry& reg);
+    // Executes the command of every action held in this tick's input frame, in action order.
+    void processInput(entt::registry& reg, const LegacyInputFrame& frame);
 
-    std::unordered_map<sf::Keyboard::Scancode, ICommand*> input;
+    std::map<LegacyAction, ICommand*> input;
 };

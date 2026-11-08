@@ -18,16 +18,25 @@ Engine::Engine(const std::string& relativeConfigPath, std::unique_ptr<IScene> in
     : m_appContext{std::make_shared<ApplicationContext>()}
     , m_options{std::move(options)}
     , m_windowActive{false}
+    , m_ok{false}
 {
     LOG_INFO(Logger::get()) << "Initializing system. Reading main configuration file...";
+
+    // Scenes read the tick's input through the context; it is a zero frame until the first tick.
+    m_appContext->input = &m_input;
 
     auto configData = m_appContext->configDataSerializer.load(relativeConfigPath);
     if (configData)
     {
         LOG_DEBUG(Logger::get()) << "Loaded configuration data successfully.";
         m_appContext->configData = std::move(*configData);
-        configureWindow(std::move(initialScene));
-        m_windowActive = m_appContext->window.isOpen();
+        m_ok = openInputFiles();
+        if (m_ok)
+        {
+            configureWindow(std::move(initialScene));
+            m_ok = m_appContext->window.isOpen();
+        }
+        m_windowActive = m_ok;
     }
     else
     {
@@ -82,6 +91,45 @@ void Engine::run()
 }
 
 /**
+ * @brief [Public] False when the engine cannot run: missing configuration, window or input file.
+*/
+bool Engine::ok() const
+{
+    return m_ok;
+}
+
+/**
+ * @brief [Private] Loads the key bindings and opens the replay and record files.
+*/
+bool Engine::openInputFiles()
+{
+    m_sampler.loadBindings(m_appContext->configData);
+
+    if (!m_options.replayPath.empty())
+    {
+        std::string error;
+        m_reader = std::make_unique<LegacyInputReader>();
+        if (!m_reader->open(m_options.replayPath, &error))
+        {
+            LOG_ERROR(Logger::get()) << "Failed to read input replay: " << error;
+            return false;
+        }
+    }
+
+    if (!m_options.recordPath.empty())
+    {
+        const int tickRate = m_appContext->configData.get<int>("sim-tick-rate").value_or(120);
+        if (!m_recorder.open(m_options.recordPath, static_cast<std::uint32_t>(std::max(tickRate, 1))))
+        {
+            LOG_ERROR(Logger::get()) << "Failed to open input recording: " << m_options.recordPath;
+            return false;
+        }
+    }
+
+    return true;
+}
+
+/**
  * @brief [Private] Drains the window's event queue without blocking.
 */
 void Engine::processEvents()
@@ -100,6 +148,10 @@ void Engine::processEvents()
 */
 void Engine::handleEvent(const sf::Event& event)
 {
+    // Key edges are latched for the next tick; a replay ignores the keyboard.
+    if (!m_reader)
+        m_sampler.onEvent(event);
+
     if (event.is<sf::Event::Closed>())
     {
         LOG_INFO(Logger::get()) << "Triggered Event::Closed";
@@ -144,12 +196,15 @@ void Engine::handleEvent(const sf::Event& event)
 }
 
 /**
- * @brief [Private] Runs one simulation tick. Scene changes requested during the tick are applied
- * at its end, so every tick runs entirely in one scene.
+ * @brief [Private] Runs one simulation tick: latch the tick's input frame (replayed, or sampled
+ * from the keyboard), record it, run the scene, then apply scene changes at the tick boundary,
+ * so every tick runs entirely in one scene.
 */
 void Engine::step()
 {
-    ++m_appContext->simTime.tick;
+    const std::uint64_t tick = ++m_appContext->simTime.tick;
+    m_input = m_reader ? m_reader->next(tick) : m_sampler.sampleTick(tick);
+    m_recorder.record(m_input);
 
     IScene* scene = m_appContext->sceneManager.getActiveScene();
     scene->processInput();

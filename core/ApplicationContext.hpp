@@ -5,6 +5,7 @@
 #include "serializer/JsonDataStoreSerializer.hpp"
 #include "serializer/GameDataStoreSerializer.hpp"
 #include "util/DataStore.hpp"
+#include "util/LegacyInput.hpp"
 #include "util/LegacyRandom.hpp"
 #include "util/LegacySimTime.hpp"
 #include <SFML/System/Clock.hpp>
@@ -26,6 +27,7 @@ struct ApplicationContext
 	float deltaTime;
 	LegacySimTime simTime;
 	std::uint64_t seed = 0;
+	const LegacyInputFrame* input = nullptr; // Input of the tick being simulated (set by Engine)
 	DataStore<> configData;
 	DataStore<> gameData;
 	JsonDataStoreSerializer configDataSerializer;

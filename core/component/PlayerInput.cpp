@@ -5,14 +5,14 @@ void PlayerInput::accept(IComponentVisitor* visitor, entt::entity entityID)
     visitor->visit(this, entityID);
 }
 
-void PlayerInput::processInput(entt::registry& reg)
+void PlayerInput::processInput(entt::registry& reg, const LegacyInputFrame& frame)
 {
-    for (const auto& [key, action] : input)
+    for (const auto& [action, command] : input)
     {
-        if (sf::Keyboard::isKeyPressed(key))
+        if (frame.isHeld(action))
         {
             // Entity registry is passes in for convinience when creating more complex actions
-            action->execute(reg);
+            command->execute(reg);
         }
     }
 }

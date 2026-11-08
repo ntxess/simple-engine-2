@@ -14,7 +14,7 @@ namespace
 {
 	void printUsage()
 	{
-		std::fprintf(stderr, "usage: editor_app [--seed N]\n");
+		std::fprintf(stderr, "usage: editor_app [--seed N] [--record FILE.seinput]\n");
 	}
 
 	// Parses the command line into options; returns false on an unknown or incomplete argument.
@@ -27,6 +27,10 @@ namespace
 			if (arg == "--seed" && hasValue)
 			{
 				options.seed = std::strtoull(argv[++i], nullptr, 0);
+			}
+			else if (arg == "--record" && hasValue)
+			{
+				options.recordPath = argv[++i];
 			}
 			else
 			{
@@ -72,6 +76,11 @@ int main(int argc, char** argv)
 	}
 
 	Engine engine("config/config.json", std::make_unique<Editor>(), options);
+	if (!engine.ok())
+	{
+		LOG_FATAL(Logger::get()) << "Engine failed to start.";
+		return -1;
+	}
 	engine.run();
 
 	return 0;

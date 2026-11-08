@@ -22,6 +22,8 @@ The legacy reference retires when nothing is left open
 | Resource cache semantics | core/manager/ResourceManager.hpp:64-120 | open (M9) | AssetRegistry; key checked before decode |
 | Waypoint canvas editing rules | app/editor/Editor.cpp:828-885, :903-930 | open (M10) | Characterization tests |
 | Profiler axis rule | app/editor/EditorSceneSystemVisitor.cpp:29 | open (M10) | |
+| Keyboard polled with isKeyPressed in processInput | app/scene/Sandbox.cpp:111-114 | re-specified (M1a) | LegacyInputFrame per tick (held sampled once, edges from events), recorded and replayed as `.seinput`; the engine gets InputFrame (M2, M8) |
+| Escape replaces the Sandbox with MainMenu | app/scene/Sandbox.cpp:97-100 | open (M13) | Read from the tick's input (Exit pressed), only when the Sandbox is the root scene |
 | Unseeded randomness | app/editor/Editor.cpp:939-940; app/scene/GameOfLifeSim.cpp:29-30 | re-specified (M1a) | `std::mt19937(seed ^ stream)` (core/util/LegacyRandom.hpp); seed from config "seed" or `--seed`; the editor generator takes stream StressGenerator + press index |
 | Stress generator distributions | app/editor/Editor.cpp:941,948,950 | open (M1a, M10) | Seeded; distributions written down |
 | Component removal in the inspector | app/editor/Editor.cpp:508-517 | open (M11) | Restored as a real registry command |
