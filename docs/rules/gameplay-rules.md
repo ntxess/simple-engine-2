@@ -106,8 +106,8 @@ the player 1 px per input poll, a rate tied to the render loop
 (core/command/Movement.cpp:12, app/editor/Editor.cpp:950).
 
 Goldens: all three changed from tick 0, where the projection first prints the
-Speed stat in its new unit (path-following positions are now speed × dt in
-px/s × s, which may round differently in the last bit).
+Speed stat in its new unit (path-following positions are now speed Ã— dt in
+px/s Ã— s, which may round differently in the last bit).
 
 ## R6 Zero-length path segments are skipped
 
