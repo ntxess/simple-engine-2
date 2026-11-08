@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <sstream>
@@ -118,6 +119,7 @@ private:
 
     std::atomic<bool> m_startButtonEnabled;
     std::atomic<bool> m_forwardFrameEnabled;
+    std::uint64_t m_generateCount;
 
     // Current loaded scene data
     std::unordered_map<std::string, std::unique_ptr<EditorSceneAdapter>> m_editorSceneMap;

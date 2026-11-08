@@ -1,12 +1,51 @@
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <memory>
+#include <string>
+#include <string_view>
 
 #include "Engine.hpp"
 #include "editor/Editor.hpp"
 #include "serializer/JsonDataStoreSerializer.hpp"
 #include "util/Logger.hpp"
 
-int main()
+namespace
 {
+	void printUsage()
+	{
+		std::fprintf(stderr, "usage: editor_app [--seed N]\n");
+	}
+
+	// Parses the command line into options; returns false on an unknown or incomplete argument.
+	bool parseArguments(int argc, char** argv, EngineOptions& options)
+	{
+		for (int i = 1; i < argc; ++i)
+		{
+			const std::string_view arg = argv[i];
+			const bool hasValue = i + 1 < argc;
+			if (arg == "--seed" && hasValue)
+			{
+				options.seed = std::strtoull(argv[++i], nullptr, 0);
+			}
+			else
+			{
+				return false;
+			}
+		}
+		return true;
+	}
+}
+
+int main(int argc, char** argv)
+{
+	EngineOptions options;
+	if (!parseArguments(argc, argv, options))
+	{
+		printUsage();
+		return 2;
+	}
+
 	// Start logging in the console until configuration file is read.
 	Logger::getInstance().setupConsoleLog();
 	LOG_INFO(Logger::get()) << "Engine pre-initialization setup.";
@@ -32,7 +71,7 @@ int main()
 		}
 	}
 
-	Engine engine("config/config.json", std::make_unique<Editor>());
+	Engine engine("config/config.json", std::make_unique<Editor>(), options);
 	engine.run();
 
 	return 0;

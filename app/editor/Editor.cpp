@@ -16,6 +16,7 @@ Editor::Editor()
     , m_enableLogViewer{false}
     , m_startButtonEnabled{false}
     , m_forwardFrameEnabled{false}
+    , m_generateCount{0}
     , m_selectedSceneData{nullptr}
 {}
 
@@ -936,9 +937,9 @@ void Editor::generateEntities(size_t numOfEntities)
     float width = static_cast<float>(m_appContext->configData.get<int>("width").value());
     float height = static_cast<float>(m_appContext->configData.get<int>("height").value());
 
-    // Generate a ton of sprite for testing in random places within the boundary of the window
-    std::random_device dev;
-    std::mt19937 rng(dev());
+    // Generate a ton of sprite for testing in random places within the boundary of the window.
+    // Each press draws the next seeded stream, so a session with the same seed generates the same entities.
+    std::mt19937 rng = makeLegacyRng(m_appContext->seed, RngStream::StressGenerator + m_generateCount++);
     std::uniform_int_distribution<std::mt19937::result_type> dist6(0, static_cast<unsigned int>(width));
 
     for (size_t i = 0; i < numOfEntities; i++)

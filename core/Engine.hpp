@@ -2,11 +2,20 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 
 #include <SFML/Window/Event.hpp>
 
 #include "ApplicationContext.hpp"
+
+/**
+ * @brief Command-line options of the legacy runtime.
+*/
+struct EngineOptions
+{
+    std::optional<std::uint64_t> seed;  // Overrides config "seed"
+};
 
 /**
  * @brief Single-threaded engine loop of the legacy reference.
@@ -22,7 +31,7 @@ public:
     static constexpr std::uint64_t maxAccumulatedMicroseconds = 250'000;
 
     Engine() = delete;
-    Engine(const std::string& relativeConfigPath, std::unique_ptr<IScene> initialScene);
+    Engine(const std::string& relativeConfigPath, std::unique_ptr<IScene> initialScene, EngineOptions options = {});
 
     void run();
 
@@ -35,5 +44,6 @@ private:
 
 private:
     std::shared_ptr<ApplicationContext> m_appContext;
+    EngineOptions m_options;
     bool m_windowActive;
 };

@@ -14,8 +14,9 @@
 /**
  * @brief [Public] Normal constuctor.
 */
-Engine::Engine(const std::string& relativeConfigPath, std::unique_ptr<IScene> initialScene)
+Engine::Engine(const std::string& relativeConfigPath, std::unique_ptr<IScene> initialScene, EngineOptions options)
     : m_appContext{std::make_shared<ApplicationContext>()}
+    , m_options{std::move(options)}
     , m_windowActive{false}
 {
     LOG_INFO(Logger::get()) << "Initializing system. Reading main configuration file...";
@@ -186,6 +187,8 @@ void Engine::configureWindow(std::unique_ptr<IScene> initialScene)
     bool fullscreenEnabled = m_appContext->configData.get<bool>("fullscreen").value_or(false);
     const int tickRate = m_appContext->configData.get<int>("sim-tick-rate").value_or(120);
     m_appContext->simTime.setRate(static_cast<std::uint32_t>(std::max(tickRate, 1)));
+    // Scenes seed their random streams from this during init (util/LegacyRandom.hpp).
+    m_appContext->seed = m_options.seed.value_or(static_cast<std::uint64_t>(m_appContext->configData.get<int>("seed").value_or(0)));
     m_appContext->aspectRatio = static_cast<float>(width) / static_cast<float>(height);
     // Milliseconds per simulation tick (the scenes' systems still take dt in ms).
     m_appContext->deltaTime = static_cast<float>(m_appContext->simTime.dt * 1000.0);
@@ -199,6 +202,7 @@ void Engine::configureWindow(std::unique_ptr<IScene> initialScene)
         << "\tWindow width: " << width << "\n"
         << "\tWindow height: " << height << "\n"
         << "\tSimulation tick rate: " << m_appContext->simTime.rate << "\n"
+        << "\tSeed: " << m_appContext->seed << "\n"
         << "\tDelta time: " << m_appContext->deltaTime;
 
     LOG_DEBUG(Logger::get()) << "Configuration data: \n" << m_appContext->configData;

@@ -3,7 +3,8 @@
         "name": "Rampage",
         "version": "0.1b",
         "debug-mode": true,
-        "debug-log-filter-severity": "debug"
+        "debug-log-filter-severity": "debug",
+        "seed": 1
     },
     "system-paths": {
         "config-folder": "config/",
