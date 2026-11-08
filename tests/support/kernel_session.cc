@@ -95,6 +95,7 @@ KernelSessionResult RunKernelSession(const KernelSessionOptions& options) {
   StateEnv env;
   env.registry = &module.Registry();
   env.seed = options.seed;
+  env.world_kind = options.world_kind;
   GameStateStack states(module.Factory(), env);
 
   // A replay carries its own session log; extra edits would silently not

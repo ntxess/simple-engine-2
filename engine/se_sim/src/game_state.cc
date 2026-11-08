@@ -69,7 +69,11 @@ void GameStateStack::Request(StackOp op, std::string_view state_id) {
 void GameStateStack::CollectWorldRequests() {
   for (const Entry& entry : stack_) {
     for (World* world : entry.state->Worlds()) {
-      if (!world->CReg().ctx().contains<WorldStateRequests>()) continue;
+      const auto* queued = world->CReg().ctx().find<WorldStateRequests>();
+      if (queued == nullptr || queued->commands.empty()) continue;
+      // Taking the queue changes the World's registry context, so a Play
+      // World needs its gate open, as for any other boundary mutation.
+      const MutationGate gate = world->OpenGate(GateReason::kStateChange);
       auto& requests = world->Reg().ctx().get<WorldStateRequests>();
       for (StateCommand& command : requests.commands) {
         queue_.push_back(std::move(command));

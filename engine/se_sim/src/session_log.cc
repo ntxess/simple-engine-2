@@ -216,14 +216,21 @@ void SessionLog::Insert(SessionEntry entry) {
   pending_.insert(at, std::move(entry));
 }
 
-void SessionLog::Enqueue(SessionEntry entry, GameStateStack& states) {
+void SessionLog::Enqueue(SessionEntry entry, Tick next_tick,
+                         GameStateStack& states) {
   entry.seq = next_seq_++;
   if (!states.SimRunning()) {
-    // Paused: apply now, logged against the next tick (apply_before).
+    // Paused at the boundary before next_tick. Finish that boundary's
+    // pending work in RunTick's order, which is also a replay's order, then
+    // apply the entry there.
+    states.ApplyPending();
+    ApplyDue(next_tick, states);
+    entry.apply_before = next_tick;
     if (!Apply(entry, states)) ++failures_;
     applied_.push_back(std::move(entry));
     return;
   }
+  entry.apply_before = std::max(entry.apply_before, next_tick);
   Insert(std::move(entry));
 }
 

@@ -4,20 +4,28 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include <cstddef>
+#include <cstdint>
 #include <entt/entity/registry.hpp>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 #include "se_core/core_components.h"
 #include "se_core/guid.h"
+#include "se_core/input_frame.h"
+#include "se_core/jobs.h"
 #include "se_core/thread_role.h"
 #include "se_core/world.h"
 #include "se_sim/game_module.h"
 #include "se_sim/game_state.h"
+#include "se_sim/replay.h"
+#include "se_sim/sim_driver.h"
 #include "support/kernel_test_module.h"
+#include "support/test_roles.h"
 
 namespace se {
 namespace {
@@ -59,11 +67,12 @@ float MoverRadius(const World& world) {
 }
 
 TEST_CASE("Entries apply at the boundary before their tick", "[session_log]") {
-  InlineOwnerScope owner;
+  const testing::MainThreadScope main_thread;
+  const InlineOwnerScope owner;
   Fixture f;
   f.Start();
   SessionLog log;
-  log.Enqueue(MoverEdit(f.module.Registry(), 10, 77.0F), *f.states);
+  log.Enqueue(MoverEdit(f.module.Registry(), 10, 77.0F), 1, *f.states);
   REQUIRE(log.PendingCount() == 1);
   log.ApplyDue(9, *f.states);
   CHECK(log.Applied().empty());
@@ -76,7 +85,8 @@ TEST_CASE("Entries apply at the boundary before their tick", "[session_log]") {
 }
 
 TEST_CASE("Entries apply in (tick, seq) order", "[session_log]") {
-  InlineOwnerScope owner;
+  const testing::MainThreadScope main_thread;
+  const InlineOwnerScope owner;
   Fixture f;
   f.Start();
   SessionLog log;
@@ -91,23 +101,166 @@ TEST_CASE("Entries apply in (tick, seq) order", "[session_log]") {
   f.states->Clear();
 }
 
-TEST_CASE("While paused, entries apply at once against the next tick",
+TEST_CASE("A live entry for a past tick is logged against the next tick",
           "[session_log]") {
-  InlineOwnerScope owner;
+  const testing::MainThreadScope main_thread;
+  const InlineOwnerScope owner;
   Fixture f;
   f.Start();
-  // Nothing runs on an empty stack, which counts as paused.
-  GameStateStack paused(f.module.Factory(), {});
   SessionLog log;
-  log.Enqueue(MakeMarker(57, SessionOp::kPause), paused);
+  // Queued at tick 11 for tick 3, which has already run.
+  log.Enqueue(MoverEdit(f.module.Registry(), 3, 5.0F), 11, *f.states);
+  log.ApplyDue(10, *f.states);
+  CHECK(log.Applied().empty());
+  log.ApplyDue(11, *f.states);
   REQUIRE(log.Applied().size() == 1);
-  REQUIRE(log.Applied()[0].apply_before == 57);
-  REQUIRE(log.PendingCount() == 0);
+  REQUIRE(log.Applied()[0].apply_before == 11);
+  CHECK(MoverRadius(f.Top()) == 5.0F);
   f.states->Clear();
 }
 
+// The editor's paused Play: the gameplay state with its World, not stepping
+// while g_play_running is false.
+bool g_play_running = true;
+
+const GameStateFactory& KernelStates() {
+  static const GameStateFactory kStates = [] {
+    GameStateFactory factory;
+    KernelTestModule().register_states(factory);
+    return factory;
+  }();
+  return kStates;
+}
+
+class PausablePlay final : public GameState {
+ public:
+  explicit PausablePlay(const StateEnv& env)
+      : inner_(KernelStates().Create(testing::kGameplayState, env)) {}
+  void OnEnter() SE_REQUIRES(g_sim_owner) override { inner_->OnEnter(); }
+  void OnExit() SE_REQUIRES(g_sim_owner) override { inner_->OnExit(); }
+  [[nodiscard]] std::span<World* const> Worlds() const override {
+    return inner_->Worlds();
+  }
+  [[nodiscard]] bool SimRunning() const override { return g_play_running; }
+
+ private:
+  std::unique_ptr<GameState> inner_;
+};
+
+constexpr std::string_view kPlayState = "play";
+
+const GameStateFactory& PlayStates() {
+  static const GameStateFactory kStates = [] {
+    GameStateFactory factory;
+    factory.Register(kPlayState,
+                     [](const StateEnv& env) -> std::unique_ptr<GameState> {
+                       return std::make_unique<PausablePlay>(env);
+                     });
+    return factory;
+  }();
+  return kStates;
+}
+
+// A Play session driven tick by tick through SimDriver::RunTick.
+class PlaySession {
+ public:
+  PlaySession()
+      : module_(KernelTestModule()), driver_(module_.MutableSchedule(), pool_) {
+    StateEnv env;
+    env.registry = &module_.Registry();
+    env.seed = 3;
+    env.world_kind = WorldKind::kPlay;
+    states_ = std::make_unique<GameStateStack>(PlayStates(), env);
+  }
+
+  void Start() SE_REQUIRES(g_sim_owner) {
+    states_->Request(StackOp::kPush, kPlayState);
+    states_->ApplyPending();
+  }
+  // Runs ticks up to and including |last|.
+  void RunTo(Tick last, SessionLog& log) SE_REQUIRES(g_sim_owner) {
+    while (driver_.NextTick() <= last) {
+      const InputFrame frame =
+          testing::ScriptedInput::FrameFor(driver_.NextTick(), 3);
+      hashes_.push_back(
+          driver_.RunTick(*states_, frame, log, recorder_, audio_, 0).hash);
+    }
+  }
+
+  [[nodiscard]] const ComponentRegistry& Registry() const noexcept {
+    return module_.Registry();
+  }
+  [[nodiscard]] GameStateStack& States() noexcept { return *states_; }
+  [[nodiscard]] Tick NextTick() const noexcept { return driver_.NextTick(); }
+  [[nodiscard]] World& Top() const { return *states_->TopWorlds().front(); }
+  [[nodiscard]] const std::vector<std::uint64_t>& Hashes() const noexcept {
+    return hashes_;
+  }
+
+ private:
+  ModuleInstance module_;
+  jobs::ForkJoinPool pool_;
+  SimDriver driver_;
+  ReplayRecorder recorder_;
+  NullAudioSink audio_;
+  std::unique_ptr<GameStateStack> states_;
+  std::vector<std::uint64_t> hashes_;
+};
+
+TEST_CASE("While paused, entries apply at once against the next tick",
+          "[session_log]") {
+  const testing::MainThreadScope main_thread;
+  const InlineOwnerScope owner;
+  g_play_running = true;
+  PlaySession live;
+  live.Start();
+  SessionLog log;
+  live.RunTo(10, log);
+  // Queued for tick 11 while running, then the session pauses before it.
+  log.Enqueue(MoverEdit(live.Registry(), 11, 30.0F), live.NextTick(),
+              live.States());
+  REQUIRE(log.PendingCount() == 1);
+  g_play_running = false;
+  REQUIRE_FALSE(live.States().SimRunning());
+
+  // Paused edits apply at once, whatever tick their builder named: a stale
+  // tick (3) and a future one (999) are both logged against tick 11.
+  log.Enqueue(MoverEdit(live.Registry(), 3, 40.0F), live.NextTick(),
+              live.States());
+  REQUIRE(log.PendingCount() == 0);  // the entry for tick 11 went first
+  REQUIRE(log.Applied().size() == 2);
+  CHECK(MoverRadius(live.Top()) == 40.0F);
+  log.Enqueue(MoverEdit(live.Registry(), 999, 50.0F), live.NextTick(),
+              live.States());
+  CHECK(MoverRadius(live.Top()) == 50.0F);
+  REQUIRE(log.Applied().size() == 3);
+  for (const SessionEntry& entry : log.Applied()) {
+    REQUIRE(entry.apply_before == 11);
+  }
+  REQUIRE(log.Failures() == 0);
+
+  g_play_running = true;
+  live.RunTo(30, log);
+  REQUIRE(live.Hashes().size() == 30);
+
+  // A replay of the written log, never paused, matches tick for tick.
+  auto read = SessionLog::Read(log.Write());
+  REQUIRE(read.has_value());
+  PlaySession replay;
+  replay.Start();
+  replay.RunTo(30, *read);
+  REQUIRE(read->Failures() == 0);
+  REQUIRE(read->Applied().size() == 3);
+  CHECK(replay.Hashes() == live.Hashes());
+  CHECK(MoverRadius(replay.Top()) == 50.0F);
+
+  live.States().Clear();
+  replay.States().Clear();
+}
+
 TEST_CASE("Every op applies to the top state's Worlds", "[session_log]") {
-  InlineOwnerScope owner;
+  const testing::MainThreadScope main_thread;
+  const InlineOwnerScope owner;
   Fixture f;
   f.Start();
   const ComponentRegistry& registry = f.module.Registry();
@@ -165,7 +318,8 @@ TEST_CASE("Every op applies to the top state's Worlds", "[session_log]") {
 
 TEST_CASE("Play Worlds take session edits through their gate",
           "[session_log]") {
-  InlineOwnerScope owner;
+  const testing::MainThreadScope main_thread;
+  const InlineOwnerScope owner;
   Fixture f(WorldKind::kPlay);
   f.Start();
   CHECK(f.Top().Desc().kind == WorldKind::kPlay);
@@ -178,7 +332,8 @@ TEST_CASE("Play Worlds take session edits through their gate",
 }
 
 TEST_CASE("Write and Read round-trip every entry", "[session_log]") {
-  InlineOwnerScope owner;
+  const testing::MainThreadScope main_thread;
+  const InlineOwnerScope owner;
   Fixture f;
   f.Start();
   const ComponentRegistry& registry = f.module.Registry();

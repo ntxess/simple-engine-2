@@ -7,8 +7,16 @@
 //
 // Entries queue against a tick (apply_before) and apply in (apply_before,
 // seq) order at the boundary before that tick (SimDriver::RunTick calls
-// ApplyDue). While the session is paused, Enqueue applies an entry at once
-// and logs it against the next tick, which is where a replay applies it.
+// ApplyDue). Enqueue is given the next tick N and logs every entry against a
+// boundary a replay reaches in the same order (ADR-018):
+//   - running: against max(apply_before, N), so a stale tick cannot make a
+//     replay apply the entry earlier than the live session did;
+//   - paused (no running World): the session waits at the boundary before
+//     N. That boundary's pending work runs first, as RunTick would run it
+//     (GameStateStack::ApplyPending, then the entries due by N), then the
+//     entry applies at once and is logged against N. A replay's boundary
+//     before N applies the same things in the same order, because the
+//     paused entry's seq is above those of the entries it followed.
 //
 // SessionEntry::type is the component's stable name id
 // (ComponentInfo::name_id), so logs read the same on every compiler.
@@ -104,9 +112,12 @@ struct ComponentValue {
 
 class SessionLog {
  public:
-  // Queues a live entry against entry.apply_before; while the session is
-  // paused (no running World) it applies at once instead.
-  void Enqueue(SessionEntry entry, GameStateStack& states)
+  // Queues a live entry; |next_tick| is the tick the session runs next
+  // (SimDriver::NextTick()). Running: queued against max(apply_before,
+  // next_tick). Paused: completes the boundary before |next_tick| (pending
+  // GameState commands, then entries due by it), applies the entry at once
+  // and logs it against |next_tick|.
+  void Enqueue(SessionEntry entry, Tick next_tick, GameStateStack& states)
       SE_REQUIRES(g_sim_owner);
   // Queues an entry for its tick without applying it (scripted edits,
   // fixtures).

@@ -31,6 +31,8 @@ struct KernelSessionOptions {
   std::uint64_t clock_seed = 7;
   // World seed (scene generation, spawn phases, scripted input).
   std::uint64_t seed = 42;
+  // kPlay runs the editor's Play-World gate checks.
+  WorldKind world_kind = WorldKind::kRuntime;
   Tick ticks = 600;
   // Logged edits to schedule; empty for none.
   std::string edits_path;

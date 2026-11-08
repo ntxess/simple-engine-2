@@ -25,6 +25,7 @@
 #include "se_sim/replay.h"
 #include "se_sim/session_log.h"
 #include "se_sim/sim_driver.h"
+#include "support/kernel_session.h"
 #include "support/kernel_test_module.h"
 #include "support/test_roles.h"
 
@@ -49,11 +50,11 @@ const ComponentRegistry& CoreRegistry() {
 // Records its callbacks; owns one World; "pause" states do not run.
 class TraceState final : public GameState {
  public:
-  TraceState(std::string name, bool runs)
-      : name_(std::move(name)), runs_(runs) {}
+  TraceState(std::string name, bool runs, WorldKind kind = WorldKind::kRuntime)
+      : name_(std::move(name)), runs_(runs), kind_(kind) {}
 
   void OnEnter() SE_REQUIRES(g_sim_owner) override {
-    world_ = std::make_unique<World>(CoreRegistry(), WorldDesc{});
+    world_ = std::make_unique<World>(CoreRegistry(), WorldDesc{.kind = kind_});
     worlds_[0] = world_.get();
     Trace().push_back(name_ + ".enter");
   }
@@ -74,6 +75,7 @@ class TraceState final : public GameState {
  private:
   std::string name_;
   bool runs_;
+  WorldKind kind_;
   std::unique_ptr<World> world_;
   std::array<World*, 1> worlds_{};
 };
@@ -89,11 +91,15 @@ GameStateFactory TraceFactory() {
   factory.Register("pause", [](const StateEnv&) -> std::unique_ptr<GameState> {
     return std::make_unique<TraceState>("pause", false);
   });
+  factory.Register("play", [](const StateEnv&) -> std::unique_ptr<GameState> {
+    return std::make_unique<TraceState>("play", true, WorldKind::kPlay);
+  });
   return factory;
 }
 
 TEST_CASE("Push pauses, replace destroys, pop resumes", "[game_state]") {
-  InlineOwnerScope owner;
+  const testing::MainThreadScope main_thread;
+  const InlineOwnerScope owner;
   Trace().clear();
   const GameStateFactory factory = TraceFactory();
   GameStateStack stack(factory, {});
@@ -120,7 +126,8 @@ TEST_CASE("Push pauses, replace destroys, pop resumes", "[game_state]") {
 }
 
 TEST_CASE("Commands apply in FIFO order at one boundary", "[game_state]") {
-  InlineOwnerScope owner;
+  const testing::MainThreadScope main_thread;
+  const InlineOwnerScope owner;
   Trace().clear();
   const GameStateFactory factory = TraceFactory();
   GameStateStack stack(factory, {});
@@ -141,7 +148,8 @@ TEST_CASE("Commands apply in FIFO order at one boundary", "[game_state]") {
 
 TEST_CASE("Unknown states and pops of an empty stack are rejected",
           "[game_state]") {
-  InlineOwnerScope owner;
+  const testing::MainThreadScope main_thread;
+  const InlineOwnerScope owner;
   const GameStateFactory factory = TraceFactory();
   GameStateStack stack(factory, {});
   stack.Request(StackOp::kPop);
@@ -152,7 +160,8 @@ TEST_CASE("Unknown states and pops of an empty stack are rejected",
 }
 
 TEST_CASE("Only a running top state steps; render alphas", "[game_state]") {
-  InlineOwnerScope owner;
+  const testing::MainThreadScope main_thread;
+  const InlineOwnerScope owner;
   const GameStateFactory factory = TraceFactory();
   GameStateStack stack(factory, {});
   CHECK_FALSE(stack.SimRunning());
@@ -181,7 +190,8 @@ TEST_CASE("Only a running top state steps; render alphas", "[game_state]") {
 
 TEST_CASE("Systems request state changes for the next boundary",
           "[game_state]") {
-  InlineOwnerScope owner;
+  const testing::MainThreadScope main_thread;
+  const InlineOwnerScope owner;
   Trace().clear();
   const GameStateFactory factory = TraceFactory();
   GameStateStack stack(factory, {});
@@ -194,6 +204,65 @@ TEST_CASE("Systems request state changes for the next boundary",
   REQUIRE(stack.TopId() == "b");
   CHECK(Trace() == std::vector<std::string>{"a.enter", "a.exit", "b.enter"});
   stack.Clear();
+}
+
+// A Play World mutates only through its gate. Taking the commands its
+// systems queued happens at the boundary, outside the tick's gate.
+TEST_CASE("Play Worlds hand their GameState requests over at the boundary",
+          "[game_state]") {
+  const testing::MainThreadScope main_thread;
+  const InlineOwnerScope owner;
+  Trace().clear();
+  const GameStateFactory factory = TraceFactory();
+  GameStateStack stack(factory, {});
+  stack.Request(StackOp::kPush, "play");
+  stack.ApplyPending();
+  World& world = *stack.RunningWorlds().front();
+  REQUIRE(world.Desc().kind == WorldKind::kPlay);
+  {
+    // What Schedule::Step does around the systems.
+    const MutationGate gate = world.OpenGate(GateReason::kTick);
+    RequestGameState(world, StackOp::kPush, "b");
+  }
+  REQUIRE_FALSE(world.GateOpen());
+  stack.ApplyPending();
+  REQUIRE(stack.TopId() == "b");
+  stack.Request(StackOp::kPop);
+  stack.ApplyPending();
+  REQUIRE(stack.TopId() == "play");
+  // Boundaries with nothing queued do not touch the World.
+  stack.ApplyPending();
+  CHECK_FALSE(world.GateOpen());
+  CHECK(Trace() == std::vector<std::string>{"play.enter", "play.pause",
+                                            "b.enter", "b.exit",
+                                            "play.resume"});
+  stack.Clear();
+}
+
+// The kernel module's GameOver rule in a Play World: tick 300 requests it,
+// tick 301 runs in the game_over World, with the same hashes as a runtime
+// World (and through --det-crosscheck, which clones the Play World).
+TEST_CASE("The kernel module's GameOver works in a Play World",
+          "[game_state][c6]") {
+  const testing::MainThreadScope main_thread;
+  testing::KernelSessionOptions options;
+  options.ticks = testing::kGameOverTick + 20;
+  options.edits_path = testing::EditsFixturePath();
+  const testing::KernelSessionResult runtime =
+      testing::RunKernelSession(options);
+  REQUIRE(runtime.error.empty());
+  options.world_kind = WorldKind::kPlay;
+  options.det_crosscheck = 7;
+  const testing::KernelSessionResult play = testing::RunKernelSession(options);
+  REQUIRE(play.error.empty());
+  REQUIRE(play.hashes.size() == options.ticks);
+  CHECK(play.top_states[testing::kGameOverTick - 1] == testing::kGameplayState);
+  CHECK(play.top_states[testing::kGameOverTick] == testing::kGameOverState);
+  REQUIRE(play.session_applied == 4);
+  REQUIRE(play.session_failures == 0);
+  CHECK(play.crosscheck_ok);
+  REQUIRE(play.crosschecks > 0);
+  CHECK(play.hashes == runtime.hashes);
 }
 
 // Red team C6: the GameOver requested by a rule in the first tick of a

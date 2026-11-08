@@ -68,10 +68,14 @@ World::World(const ComponentRegistry& registry, WorldDesc desc)
 
 World::~World() = default;
 
-void World::CheckMutation() const {
+void World::CheckAccess() const {
   SE_ASSERT_MSG(std::this_thread::get_id() == owner_,
                 "World accessed from a thread that does not own it");
   SE_ASSERT_NOT_IN_FORK();
+}
+
+void World::CheckMutation() const {
+  CheckAccess();
   SE_ASSERT_MSG(desc_.kind != WorldKind::kPlay || open_gates_ > 0,
                 "Play World mutated while its MutationGate is closed");
 }
@@ -203,7 +207,9 @@ void World::RecordHash() {
 }
 
 std::unique_ptr<World> World::Clone() const {
-  CheckMutation();
+  // Reading the source needs ownership, not an open gate: a Play World can
+  // be cloned between ticks (--det-crosscheck).
+  CheckAccess();
   auto copy = std::make_unique<World>(*registry_, desc_);
   // The entity storage: same ids and versions, same packed order, same free
   // list, so later creates hand out the same ids as in the original.

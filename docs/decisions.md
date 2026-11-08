@@ -155,3 +155,26 @@ optional snake_case accessors, so the milestone spec's `owner()`,
 written `Owner()`, `SetOwner()`, `Stats()`, `Applied()`, `Worlds()` and
 `SimRunning()`, and the spec's public `World::clock` member is
 `Clock()`/`MutableClock()` (Google style keeps class data private).
+
+## ADR-018 SessionLog entries are logged where a replay applies them (2026-11-08)
+
+**Decision.** `SessionLog::Enqueue(entry, next_tick, states)` takes the tick
+the session runs next and stamps `apply_before` itself. While running, an
+entry is queued against `max(apply_before, next_tick)`, so a stale tick
+cannot make a replay apply it earlier than the live session did. While
+paused, the session waits at the boundary before `next_tick`: Enqueue first
+completes that boundary's pending work in RunTick's order
+(`GameStateStack::ApplyPending`, then the entries due by `next_tick`), then
+applies the entry and logs it against `next_tick`.
+
+**Why.** The spec says paused entries apply at once and are logged against
+the next tick, but the caller's `apply_before` was kept, so a replay applied
+the entry at another boundary. Applying it at once while earlier work for
+the same boundary was still pending also put it ahead of that work, while a
+replay applies the boundary as ApplyPending, then (apply_before, seq). The
+boundary is completed first so the live order and the replay order are the
+same by construction. The visible effect: a GameState change the last tick
+requested, or an entry already queued for the next tick, takes effect when
+the first edit is made in a pause instead of at resume, before any tick runs
+either way. tests/kernel/session_log_test.cc replays a paused session's
+written log and compares every hash.

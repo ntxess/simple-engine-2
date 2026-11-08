@@ -9,7 +9,9 @@
 //   - structural calls and Reg() require g_sim_owner (ADR-007) and assert the
 //     World's owner thread and not-in-fork;
 //   - a Play World may only be mutated while a MutationGate is open (the
-//     Schedule opens one per tick, the SessionLog one per applied entry);
+//     Schedule opens one per tick, the SessionLog one per applied entry,
+//     the GameStateStack one when it takes the World's queued commands);
+//     reading it, Clone() included, needs no gate;
 //   - every registered storage is created in the constructor, so nothing
 //     creates a storage lazily later (EnTT's non-const access would);
 //   - destroys are requested and drained in Cleanup, followed by
@@ -56,6 +58,9 @@ enum class GateReason : std::uint8_t {
   kTick,
   kSessionLog,
   kLoad,
+  // GameStateStack taking the GameState commands systems queued in the World
+  // (a tick boundary).
+  kStateChange,
   kEditorCommand,
   kTest,
 };
@@ -173,7 +178,9 @@ class World {
  private:
   friend class MutationGate;
 
-  // The owner-thread, not-in-fork and gate checks of Reg().
+  // The owner-thread and not-in-fork checks of every registry access.
+  void CheckAccess() const;
+  // CheckAccess() plus the Play-World gate check of Reg().
   void CheckMutation() const;
   [[nodiscard]] std::uint64_t EntityDigestOf(entt::entity entity,
                                              const Guid& guid) const;
