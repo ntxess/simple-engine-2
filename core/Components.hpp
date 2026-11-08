@@ -1,5 +1,6 @@
 #pragma once
 
+#include "component/DestroyRequest.hpp"
 #include "component/Effects.hpp"
 #include "component/EffectsList.hpp"
 #include "component/EntityStatus.hpp"
@@ -7,6 +8,7 @@
 #include "component/MovementPattern.hpp"
 #include "component/PlayerInput.hpp"
 #include "component/SceneViewRenderer.hpp"
+#include "component/SpawnIndex.hpp"
 #include "component/Sprite.hpp"
 #include "component/StatusModEvent.hpp"
 #include "component/TeamTag.hpp"

@@ -24,6 +24,15 @@ void WayPointSystem::update(entt::registry& reg, const float& dt)
         WayPoint* headPtr = wpc.currentPath;
         WayPoint* nextPtr = headPtr->next();
 
+        // Rule R6: zero-length segments (coincident waypoints) are skipped without moving, instead
+        // of dividing by their zero length below.
+        while (nextPtr != nullptr && headPtr->distanceToNext <= 0.f)
+        {
+            headPtr = nextPtr;
+            nextPtr = headPtr->next();
+        }
+        wpc.currentPath = headPtr;
+
         if (nextPtr == nullptr)
         {
             if (wpc.repeat)

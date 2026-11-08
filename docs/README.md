@@ -18,7 +18,8 @@ behaviour reference until every rule and editor operation is ported.
 | [ledger.md](ledger.md) | Completeness ledger: every legacy feature ported, re-specified or deleted |
 | [implementation-plan.md](implementation-plan.md) | The approved milestone plan (M0-M19) |
 | [milestone-specs.md](milestone-specs.md) | Detailed specs for M1 and M2 |
-| rules/gameplay-rules.md | Declared gameplay rules applied to the legacy reference (milestone M1b) |
+| [rules/gameplay-rules.md](rules/gameplay-rules.md) | Declared gameplay rules R1-R10 applied to the legacy reference (milestone M1b) |
+| [../tests/fixtures/reference/README.md](../tests/fixtures/reference/README.md) | The legacy reference scenarios, inputs and golden projections (legacy_replay, tests/legacy) |
 
 ## Building
 

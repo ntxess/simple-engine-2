@@ -45,7 +45,7 @@ changes the legacy code and re-baselines the golden projections.
 - R6 Zero-length path segments are guarded (WayPointSystem.cpp:42-43).
 - R7 OVERTIME's first application comes exactly one interval after contact (`>=` in ticks), applied floor(duration/interval) times (:98).
 - R8 Contacts are sorted by (source, receiver) SpawnIndex before effects apply.
-- R9 System order is Input → WayPoint → Collision → Event → GameRules → Cleanup (Sandbox.cpp:90-92).
+- R9 System order is Input → WayPoint → Boundary → Collision → Event → GameRules → Cleanup (Sandbox.cpp:90-92). Boundary is the clamp of every sprite to the scene bounds that M1a moved out of `render()` (Sandbox.cpp:155); it is part of movement, so it runs after WayPoint and before Collision and contacts use the clamped positions. The goldens depend on this order and M3 reproduces it (amended after the M1 review).
 - R10 HP ≤ 0 destroys are deferred to the end of the tick (Sandbox.cpp:126-136).
 
 Exit: three scenarios × 3600 ticks with golden projections generated at

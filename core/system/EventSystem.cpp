@@ -1,10 +1,13 @@
 #include "EventSystem.hpp"
 
+#include <algorithm>
+
 #include "util/Logger.hpp"
 
-EventSystem::EventSystem(entt::registry& piplineReg, std::chrono::milliseconds watchdogTime)
+EventSystem::EventSystem(entt::registry& piplineReg, const LegacySimTime& simTime, std::uint64_t watchdogTicks)
     : m_piplineReg{piplineReg}
-    , m_eventWatchdogTime{watchdogTime}
+    , m_simTime{simTime}
+    , m_eventWatchdogTicks{watchdogTicks}
 {}
 
 constexpr std::string_view EventSystem::name() const
@@ -12,12 +15,25 @@ constexpr std::string_view EventSystem::name() const
     return "EventSystem";
 }
 
+void EventSystem::setWatchdogTicks(std::uint64_t watchdogTicks)
+{
+    m_eventWatchdogTicks = watchdogTicks;
+}
+
 void EventSystem::update(entt::registry& entityReg, const float& dt)
 {
     LOG_TRACE(Logger::get()) << "Entering EventSystem::update()";
 
+    // Rule R8: events are processed in creation order, which follows the sorted contacts.
+    m_order.clear();
     const auto& statusModView = m_piplineReg.view<StatusModEvent>();
     for (const auto& eventID : statusModView)
+    {
+        m_order.emplace_back(statusModView.get<StatusModEvent>(eventID).sequence, eventID);
+    }
+    std::sort(m_order.begin(), m_order.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+
+    for (const auto& [sequence, eventID] : m_order)
     {
         const entt::entity receiverID = m_piplineReg.get<StatusModEvent>(eventID).receiverID;
 
@@ -76,14 +92,14 @@ EventSystem::EventStatus EventSystem::apply(const EffectType effectType, StatusM
 
 EventSystem::EventStatus EventSystem::instantEvent(StatusModEvent& statusModEvent, EntityStatus& receiverStatus) const
 {
-    const auto it = receiverStatus.values.find(statusModEvent.effect->targetStat);
+    const auto it = receiverStatus.values.find(statusModEvent.effect.targetStat);
     if (it != receiverStatus.values.end())
     {
-        it->second += statusModEvent.effect->modificationVal;
+        it->second += statusModEvent.effect.modificationVal;
         LOG_DEBUG(Logger::get())
-            << "Applying instant event. Modifying \"" << statusModEvent.effect->targetStat
+            << "Applying instant event. Modifying \"" << statusModEvent.effect.targetStat
             << "\" of entity [" << static_cast<unsigned int>(statusModEvent.receiverID)
-            << "] by " << statusModEvent.effect->modificationVal
+            << "] by " << statusModEvent.effect.modificationVal
             << ". Current val: " << it->second;
     }
 
@@ -92,36 +108,48 @@ EventSystem::EventStatus EventSystem::instantEvent(StatusModEvent& statusModEven
 
 EventSystem::EventStatus EventSystem::overTimeEvent(StatusModEvent& statusModEvent, EntityStatus& receiverStatus) const
 {
-    const auto currDuration = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - statusModEvent.timeStart);
+    // Durations are authored in milliseconds and compared in ticks (msToTicks rounds up).
+    // Rule R7: the first application comes exactly one interval after the contact, the next ones one
+    // interval apart, floor(duration / interval) times in all. An interval of 0 applies once per tick,
+    // for ticks(duration) ticks.
+    const std::uint64_t nowTick = m_simTime.tick;
+    const std::uint64_t currTicks = nowTick - statusModEvent.lastApplyTick;
+    const std::int64_t intervalMs = statusModEvent.effect.tickRate.count();
+    const std::int64_t durationMs = statusModEvent.effect.maxDuration.count();
+    const std::uint64_t intervalTicks = std::max<std::uint64_t>(msToTicks(intervalMs, m_simTime.rate), 1);
+    const std::uint64_t totalApplications = intervalMs > 0
+        ? static_cast<std::uint64_t>(std::max<std::int64_t>(durationMs, 0) / intervalMs)
+        : msToTicks(durationMs, m_simTime.rate);
 
     // TickRate controls the rate at which the effects applies its modification to the receivers stats
-    if (currDuration > statusModEvent.effect->tickRate)
+    if (statusModEvent.applications < totalApplications && currTicks >= intervalTicks)
     {
-        statusModEvent.timeStart = std::chrono::steady_clock::now();
-        statusModEvent.timeElapsed += currDuration;
+        statusModEvent.lastApplyTick = nowTick;
+        statusModEvent.elapsedTicks += currTicks;
+        ++statusModEvent.applications;
 
-        const auto it = receiverStatus.values.find(statusModEvent.effect->targetStat);
+        const auto it = receiverStatus.values.find(statusModEvent.effect.targetStat);
         if (it != receiverStatus.values.end())
         {
-            it->second += statusModEvent.effect->modificationVal;
+            it->second += statusModEvent.effect.modificationVal;
             LOG_DEBUG(Logger::get())
-                << "Applying over-time event. Modifying \"" << statusModEvent.effect->targetStat
+                << "Applying over-time event. Modifying \"" << statusModEvent.effect.targetStat
                 << "\" of entity [" << static_cast<unsigned int>(statusModEvent.receiverID)
-                << "] by " << statusModEvent.effect->modificationVal
+                << "] by " << statusModEvent.effect.modificationVal
                 << ". Current val: " << it->second;
         }
     }
 
-    if (m_eventWatchdogTime < currDuration || statusModEvent.timeElapsed >= statusModEvent.effect->maxDuration)
+    if (m_eventWatchdogTicks < currTicks || statusModEvent.applications >= totalApplications)
     {
-        const auto it = receiverStatus.values.find(statusModEvent.effect->targetStat);
+        const auto it = receiverStatus.values.find(statusModEvent.effect.targetStat);
         if (it != receiverStatus.values.end())
         {
             LOG_DEBUG(Logger::get())
-                << "Completed over-time event. \"" << statusModEvent.effect->targetStat
+                << "Completed over-time event. \"" << statusModEvent.effect.targetStat
                 << "\" stat of entity [" << static_cast<unsigned int>(statusModEvent.receiverID)
                 << "] is " << it->second
-                << ". Time elapsed: " << statusModEvent.timeElapsed.count() << " >= " << statusModEvent.effect->maxDuration.count();
+                << ". Applications: " << statusModEvent.applications << " of " << totalApplications;
         }
 
         return EventStatus::COMPLETE;
@@ -132,45 +160,56 @@ EventSystem::EventStatus EventSystem::overTimeEvent(StatusModEvent& statusModEve
 
 EventSystem::EventStatus EventSystem::tempTimedEvent(StatusModEvent& statusModEvent, EntityStatus& receiverStatus) const
 {
-    const auto currDuration = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - statusModEvent.timeStart);
+    const std::uint64_t nowTick = m_simTime.tick;
+    const std::uint64_t currTicks = nowTick - statusModEvent.lastApplyTick;
+    const std::uint64_t durationTicks = msToTicks(statusModEvent.effect.maxDuration.count(), m_simTime.rate);
 
-    // If event some how lasts longer than it should, consider it complete and prep for destroy
-    if (m_eventWatchdogTime < currDuration)
-        return EventStatus::COMPLETE;
-
-    // Only modify the receiverStatus once in this type of event. We can use the timeElapsed variable as a bool to prevent reaccessing this logic
-    if (statusModEvent.timeElapsed == std::chrono::milliseconds(0))
+    // If event some how lasts longer than it should, consider it complete and prep for destroy.
+    // Rule R1 (docs/rules/gameplay-rules.md): the modification is reverted on this path too.
+    if (m_eventWatchdogTicks < currTicks)
     {
-        statusModEvent.timeStart = std::chrono::steady_clock::now();
-        statusModEvent.timeElapsed += std::chrono::milliseconds(1); // Disable this logic block with this variable
+        if (statusModEvent.elapsedTicks != 0)
+            revertTempTimed(statusModEvent, receiverStatus);
+        return EventStatus::COMPLETE;
+    }
 
-        const auto it = receiverStatus.values.find(statusModEvent.effect->targetStat);
+    // Only modify the receiverStatus once in this type of event. We can use the elapsedTicks variable as a bool to prevent reaccessing this logic
+    if (statusModEvent.elapsedTicks == 0)
+    {
+        statusModEvent.lastApplyTick = nowTick;
+        statusModEvent.elapsedTicks += 1; // Disable this logic block with this variable
+
+        const auto it = receiverStatus.values.find(statusModEvent.effect.targetStat);
         if (it != receiverStatus.values.end())
         {
-            it->second += statusModEvent.effect->modificationVal;
+            it->second += statusModEvent.effect.modificationVal;
             LOG_DEBUG(Logger::get())
-                << "Applying temporary-timed event. Modifying \"" << statusModEvent.effect->targetStat
+                << "Applying temporary-timed event. Modifying \"" << statusModEvent.effect.targetStat
                 << "\" of entity [" << static_cast<unsigned int>(statusModEvent.receiverID)
-                << "] by " << statusModEvent.effect->modificationVal
+                << "] by " << statusModEvent.effect.modificationVal
                 << ". Current val: " << it->second;
         }
     }
 
-    if (currDuration >= statusModEvent.effect->maxDuration)
+    if (currTicks >= durationTicks)
     {
-        const auto it = receiverStatus.values.find(statusModEvent.effect->targetStat);
-        if (it != receiverStatus.values.end())
-        {
-            it->second += statusModEvent.effect->modificationVal * -1.f;
-            LOG_DEBUG(Logger::get())
-                << "Completed temporary-timed event. Restoring \"" << statusModEvent.effect->targetStat
-                << "\" of entity [" << static_cast<unsigned int>(statusModEvent.receiverID)
-                << "] by " << statusModEvent.effect->modificationVal
-                << ". Current val: " << it->second;
-        }
-
+        revertTempTimed(statusModEvent, receiverStatus);
         return EventStatus::COMPLETE;
     }
 
     return EventStatus::INCOMPLETE;
+}
+
+void EventSystem::revertTempTimed(StatusModEvent& statusModEvent, EntityStatus& receiverStatus) const
+{
+    const auto it = receiverStatus.values.find(statusModEvent.effect.targetStat);
+    if (it != receiverStatus.values.end())
+    {
+        it->second += statusModEvent.effect.modificationVal * -1.f;
+        LOG_DEBUG(Logger::get())
+            << "Completed temporary-timed event. Restoring \"" << statusModEvent.effect.targetStat
+            << "\" of entity [" << static_cast<unsigned int>(statusModEvent.receiverID)
+            << "] by " << statusModEvent.effect.modificationVal
+            << ". Current val: " << it->second;
+    }
 }

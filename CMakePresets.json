@@ -261,6 +261,42 @@
       "configurePreset": "clangcl-dev"
     },
     {
+      "name": "legacy-msvc-debug",
+      "inherits": "test-base",
+      "configurePreset": "legacy-msvc-debug",
+      "filter": {
+        "include": {
+          "label": "legacy"
+        },
+        "exclude": {
+          "label": "desktop"
+        }
+      },
+      "execution": {
+        "noTestsAction": "error",
+        "stopOnFailure": false,
+        "jobs": 4
+      }
+    },
+    {
+      "name": "legacy-msvc-release",
+      "inherits": "test-base",
+      "configurePreset": "legacy-msvc-release",
+      "filter": {
+        "include": {
+          "label": "legacy"
+        },
+        "exclude": {
+          "label": "desktop"
+        }
+      },
+      "execution": {
+        "noTestsAction": "error",
+        "stopOnFailure": false,
+        "jobs": 4
+      }
+    },
+    {
       "name": "linux-clang-debug",
       "inherits": "test-base",
       "configurePreset": "linux-clang-debug",
@@ -374,6 +410,40 @@
         {
           "type": "test",
           "name": "clangcl-dev"
+        }
+      ]
+    },
+    {
+      "name": "legacy-msvc-debug",
+      "steps": [
+        {
+          "type": "configure",
+          "name": "legacy-msvc-debug"
+        },
+        {
+          "type": "build",
+          "name": "legacy-msvc-debug"
+        },
+        {
+          "type": "test",
+          "name": "legacy-msvc-debug"
+        }
+      ]
+    },
+    {
+      "name": "legacy-msvc-release",
+      "steps": [
+        {
+          "type": "configure",
+          "name": "legacy-msvc-release"
+        },
+        {
+          "type": "build",
+          "name": "legacy-msvc-release"
+        },
+        {
+          "type": "test",
+          "name": "legacy-msvc-release"
         }
       ]
     },

@@ -11,6 +11,7 @@ block a milestone; each lists the exact command to run once the setup exists.
 | ThreadSanitizer | M0, M4, M14, M17 | WSL toolchain above | `... scripts/wsl-build.sh linux-clang-tsan` | passing (M0); re-run at every milestone |
 | ASan + UBSan on Linux | every milestone | WSL toolchain above | `... scripts/wsl-build.sh linux-clang-asan` | passing (M0) |
 | Linux determinism goldens (detmath, determinism_kernel) | M2 | WSL toolchain above | first run: `SE_UPDATE_GOLDENS=1 ... scripts/wsl-build.sh linux-clang-debug`, check the new tests/golden/linux-clang/*.txt against tests/golden/windows-msvc (they should match: MSVC and clang-cl agree bit for bit), then commit them | pending |
+| Legacy live recording replays headless (`legacy.selfdet.live_replay`) | M1 | an interactive desktop session (a visible window for about 5 s); the legacy test presets exclude label `desktop` | `scripts/ci.ps1 -Presets legacy-msvc-debug`, then `ctest --test-dir out/build/legacy-msvc-debug -L desktop` | passed by hand 2026-11-08; rerun after changes to core/Engine.cpp or core/util/LegacyInput.* |
 | SPIR-V shader compilation | M7 | glslang-tools in WSL (installed) | rebuild the `se_shaders` target | ready for M7 |
 | Modal drag keeps ticking | M5 | an interactive desktop session | `ctest --preset msvc-dev -L desktop -R modal` | pending |
 | Paced presentation under 1% misses | M6 | PresentMon | `tools/presentmon/run.ps1 -Mode Paced` | pending |

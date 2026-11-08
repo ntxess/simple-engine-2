@@ -1,5 +1,10 @@
 #include "EditorComponentVisitor.hpp"
 
+#include <algorithm>
+#include <cstdint>
+
+#include <misc/cpp/imgui_stdlib.h>
+
 void EditorComponentVisitor::visit(Effects* effects, entt::entity entityID)
 {
     // Implemented in the EffectsList visitor
@@ -36,9 +41,9 @@ void EditorComponentVisitor::visit(EffectsList* effectsList, entt::entity entity
 
         ImGui::SameLine(elDivider1Pos + 10.f);
 
-        char* targetStat = const_cast<char*>(effect.targetStat.c_str());
-        if (ImGui::InputText(("##EffectName" + std::to_string(index) + ID).c_str(), targetStat, 64, 0))
-            effect.targetStat = targetStat;
+        // Edits the std::string in place (imgui_stdlib resizes it); the old code wrote up to 64 bytes
+        // through const_cast into the string's own buffer.
+        ImGui::InputText(("##EffectName" + std::to_string(index) + ID).c_str(), &effect.targetStat);
 
         ImGui::SameLine(elDivider1Pos * 2 + 20.f);
 
@@ -370,9 +375,9 @@ void EditorComponentVisitor::visit(UpdateEntityEvent* updateEntityEvent, entt::e
     ImGui::PushItemWidth((ImGui::GetWindowWidth() / 4.f) - 25.f);
 
     ImGui::Text("I-Frame duration");
-    int maxDuration = static_cast<int>(updateEntityEvent->maxDuration.count());
-    if (ImGui::InputInt(("Sec##EventDurInput" + ID).c_str(), &maxDuration))
-        updateEntityEvent->maxDuration = std::chrono::milliseconds(maxDuration);
+    int cooldownTicks = static_cast<int>(updateEntityEvent->cooldownTicks);
+    if (ImGui::InputInt(("Ticks##EventDurInput" + ID).c_str(), &cooldownTicks))
+        updateEntityEvent->cooldownTicks = static_cast<std::uint64_t>(std::max(cooldownTicks, 0));
 
     ImGui::PopItemWidth();
 
@@ -388,9 +393,10 @@ void EditorComponentVisitor::visit(UpdateEntityPolling* updateEntityPolling, ent
     ImGui::PushItemWidth((ImGui::GetWindowWidth() / 4.f) - 25.f);
 
     ImGui::Text("I-Frame duration");
-    int maxDuration = static_cast<int>(updateEntityPolling->maxDuration.count());
-    if (ImGui::InputInt(("Sec##PollDurInput" + ID).c_str(), &maxDuration))
-        updateEntityPolling->maxDuration = std::chrono::milliseconds(maxDuration);
+    int cooldownTicks = static_cast<int>(updateEntityPolling->cooldownTicks);
+    if (ImGui::InputInt(("Ticks##PollDurInput" + ID).c_str(), &cooldownTicks))
+        updateEntityPolling->cooldownTicks = static_cast<std::uint64_t>(std::max(cooldownTicks, 0));
+    ImGui::Checkbox(("Ready on start##PollReadyInput" + ID).c_str(), &updateEntityPolling->readyOnStart);
 
     ImGui::PopItemWidth();
 

@@ -104,3 +104,9 @@ endif()
 
 add_subdirectory(core)
 add_subdirectory(app)
+
+# Tests of the reference (label "legacy"), driven by legacy_replay through a
+# Python script. tests/legacy is added from here, not from tests/CMakeLists.txt,
+# because the legacy presets build without the engine.
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+add_subdirectory("${CMAKE_SOURCE_DIR}/tests/legacy" "${CMAKE_BINARY_DIR}/tests_legacy")

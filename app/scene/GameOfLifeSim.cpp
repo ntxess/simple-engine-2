@@ -26,8 +26,7 @@ GameOfLifeSim::~GameOfLifeSim()
 void GameOfLifeSim::init()
 {
     const float aliveProbability = 0.07f;
-    std::random_device dev;
-    std::mt19937 rng(dev());
+    std::mt19937 rng = makeLegacyRng(m_appContext->seed, RngStream::GameOfLife);
     std::bernoulli_distribution dist(aliveProbability);
 
     Grid& grid = m_grids[0];

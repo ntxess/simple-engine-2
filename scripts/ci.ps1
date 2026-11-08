@@ -11,18 +11,31 @@
   scripts/ci.ps1                       # commit gate: msvc-dev, msvc-asan, clangcl-dev
   scripts/ci.ps1 -Milestone            # adds msvc-debug, msvc-release and WSL TSan/ASan
   scripts/ci.ps1 -Presets msvc-dev     # one preset
+  scripts/ci.ps1 -Presets legacy-msvc-debug,legacy-msvc-release
+                                       # the legacy reference (build + "legacy" tests)
+  scripts/ci.ps1 -Legacy               # appends both legacy presets to the selection
 #>
 param(
   [string[]]$Presets = @('msvc-dev', 'msvc-asan', 'clangcl-dev'),
-  [switch]$Milestone
+  [switch]$Milestone,
+  [switch]$Legacy
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
+# The gate checks goldens and never rewrites them: with SE_UPDATE_GOLDENS=1 left
+# in the shell, every golden test would re-baseline its golden and pass.
+if (Test-Path Env:SE_UPDATE_GOLDENS) {
+  Write-Warning 'SE_UPDATE_GOLDENS is set; ci.ps1 clears it so that the golden tests check their goldens.'
+  Remove-Item Env:SE_UPDATE_GOLDENS
+}
 # powershell -File passes "a,b" as one string; accept both forms.
 $Presets = @($Presets | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
 if ($Milestone) {
   $Presets = @('msvc-debug', 'msvc-dev', 'msvc-release', 'msvc-asan', 'clangcl-dev',
                'wsl:linux-clang-tsan', 'wsl:linux-clang-asan')
+}
+if ($Legacy) {
+  $Presets = @($Presets) + @('legacy-msvc-debug', 'legacy-msvc-release')
 }
 $failed = @()
 foreach ($preset in $Presets) {
