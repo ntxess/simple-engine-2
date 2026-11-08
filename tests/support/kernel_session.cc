@@ -106,6 +106,10 @@ KernelSessionResult RunKernelSession(const KernelSessionOptions& options) {
         "session log";
     return result;
   }
+  if (options.replay != nullptr && options.input != nullptr) {
+    result.error = "a replay is the input; do not pass another InputSource";
+    return result;
+  }
   SessionLog log;
   if (options.replay != nullptr) {
     auto read = SessionLog::Read(options.replay->SessionBytes());
@@ -134,9 +138,10 @@ KernelSessionResult RunKernelSession(const KernelSessionOptions& options) {
   SimDriver driver(module.MutableSchedule(), pool);
   NullAudioSink audio;
   ScriptedInput scripted(options.seed);
-  InputSource& input = options.replay != nullptr
-                           ? static_cast<InputSource&>(*options.replay)
-                           : static_cast<InputSource&>(scripted);
+  InputSource* source = &scripted;
+  if (options.replay != nullptr) source = options.replay;
+  if (options.input != nullptr) source = options.input;
+  InputSource& input = *source;
   {
     const InlineOwnerScope owner(OnMainThread());
     states.Request(StackOp::kPush, module.Module().start_state);
@@ -144,8 +149,14 @@ KernelSessionResult RunKernelSession(const KernelSessionOptions& options) {
   }
 
   FixedStepper stepper;
-  SyntheticFrameClock clock(options.hz > 0.0 ? options.hz : 120.0,
-                            options.clock_seed, options.jitter_sec);
+  SyntheticClockConfig clock_config;
+  clock_config.hz = options.hz > 0.0 ? options.hz : 120.0;
+  clock_config.seed = options.clock_seed;
+  clock_config.jitter_sec = options.jitter_sec;
+  clock_config.miss_probability = options.miss_probability;
+  clock_config.vblanks_known = options.vblanks_known;
+  clock_config.timer_p99_sec = options.timer_p99_sec;
+  SyntheticFrameClock clock(clock_config);
   const FrameCosts costs;  // no measurements: the cap is k_rt + 1
   while (driver.NextTick() <= options.ticks) {
     if (!states.SimRunning()) {
@@ -188,6 +199,7 @@ KernelSessionResult RunKernelSession(const KernelSessionOptions& options) {
     }
   }
 
+  result.stepper = stepper.Stats();
   result.session_applied = log.Applied().size();
   result.session_failures = log.Failures();
   if (options.record) {

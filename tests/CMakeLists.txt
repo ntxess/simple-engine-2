@@ -34,6 +34,7 @@ se_add_module(se_test_support KIND STATIC
     support/kernel_test_components.cc
     support/kernel_test_module.cc
     support/null_wake_main.cc
+    support/stamped_input.cc
     support/virtual_display.cc
   PUBLIC_DEPS
     se_core
