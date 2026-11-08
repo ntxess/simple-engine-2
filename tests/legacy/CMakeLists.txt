@@ -9,6 +9,10 @@
 #                              M1a exit)
 #   legacy.selfdet.live_replay a paced run in a visible window, recorded, then
 #                              replayed headless, gives the same hash
+#   legacy.reference.NAME      every tick's projection hash equals the golden
+#                              NAME.sehash; each declared rule
+#                              (docs/rules/gameplay-rules.md) re-baselines it:
+#                              SE_UPDATE_GOLDENS=1 ctest --preset legacy-msvc-debug -R reference
 
 set(_legacy_driver "${CMAKE_CURRENT_SOURCE_DIR}/legacy_test.py")
 set(_legacy_fixtures "${CMAKE_SOURCE_DIR}/tests/fixtures/reference")
@@ -23,6 +27,14 @@ foreach(_scenario IN LISTS _legacy_scenarios)
             --work "${_legacy_work}/selfdet/${_scenario}"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
   set_tests_properties(legacy.selfdet.${_scenario} PROPERTIES LABELS legacy)
+
+  add_test(NAME legacy.reference.${_scenario}
+    COMMAND "${Python3_EXECUTABLE}" "${_legacy_driver}" reference
+            --exe "$<TARGET_FILE:legacy_replay>"
+            --scenario "${_legacy_fixtures}/${_scenario}"
+            --work "${_legacy_work}/reference"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+  set_tests_properties(legacy.reference.${_scenario} PROPERTIES LABELS legacy)
 endforeach()
 
 # Opens a visible window for about five seconds; keys pressed meanwhile are

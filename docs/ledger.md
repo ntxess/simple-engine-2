@@ -31,6 +31,32 @@ The legacy reference retires when nothing is left open
 | Effect stat name edited through `const_cast` into std::string storage | app/editor/EditorComponentVisitor.cpp:39-41 | re-specified (M1a) | `ImGui::InputText` on the std::string (misc/cpp/imgui_stdlib.h) |
 | ImGui frame time passed in milliseconds as seconds | app/editor/Editor.cpp:136 against core/Engine.cpp:143 | re-specified (M1a) | `ApplicationContext::realFrameSeconds`, the measured frame time; `deltaTime` is gone |
 | Unseeded randomness | app/editor/Editor.cpp:939-940; app/scene/GameOfLifeSim.cpp:29-30 | re-specified (M1a) | `std::mt19937(seed ^ stream)` (core/util/LegacyRandom.hpp); seed from config "seed" or `--seed`; the editor generator takes stream StressGenerator + press index |
-| Stress generator distributions | app/editor/Editor.cpp:941,948,950 | open (M1a, M10) | Seeded; distributions written down |
+| Stress generator distributions | app/editor/Editor.cpp:941,948,950 (now core/util/StressGenerator.cpp) | open (M10) | Seeded and written down (M1a); see "Stress generator distributions" below. The engine's generator decides its own distributions explicitly (M10) |
 | Component removal in the inspector | app/editor/Editor.cpp:508-517 | open (M11) | Restored as a real registry command |
 | Game of Life simulation | app/scene/GameOfLifeSim.cpp:51-87 | open (M16) | Sample state and first fork-site candidate |
+
+## Stress generator distributions
+
+The editor's Generate and Replace buttons (Editor::generateEntities, paths from
+core/util/StressGenerator.cpp; `legacy_replay --generate N` makes the same
+draws). Each press seeds `std::mt19937` with the low 32 bits of
+`seed ^ (0x53545200 + press index)`, the press index counting from 0 per
+session. With `d = std::uniform_int_distribution<std::uint32_t>(0, W)` (MSVC
+STL; W = width = 1920, H = height = 1080, both bounds inclusive), each entity
+draws, in this order:
+
+- **Waypoint count** (Editor.cpp:941): `for (j = 0; j <= d(rng) % 10; ++j)`
+  redraws its bound before every iteration, including the first. With
+  r = d % 10, P(r = 0) = 193/1921 and P(r = k) = 192/1921 for k = 1..9, so
+  P(continue after k points) = 192 (10 - k) / 1921 and a path has 1 to 10
+  points: P(N = 1..10) = 0.1005, 0.1803, 0.2160, 0.2014, 0.1510, 0.0905,
+  0.0422, 0.0145, 0.0033, 0.0004 (mean 3.66). Each entity takes 3N + 1 draws.
+- **x** (Editor.cpp:948): `d(rng) % W`: uniform on 0..W-1 except that 0 is
+  twice as likely (d = 0 and d = W).
+- **y** (Editor.cpp:948): `d(rng) % H`, drawn after x: d folds onto
+  0..H-1, so y in 0..W-H (0..840) is twice as likely as W-H+1..H-1
+  (841..1079).
+- **Fixed** (Editor.cpp:950 and following): the sprite starts at the first
+  point; HP 100, Speed 0.5 px/ms (500 px/s after rule R5), team ENEMY,
+  repeating path, UpdateEntityEvent; no EffectsList, so generated enemies
+  never damage the player. A one-point path never moves.
