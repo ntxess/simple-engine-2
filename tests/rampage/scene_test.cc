@@ -2,7 +2,9 @@
 //
 // Scenes and prefabs (se-scene-v1): the sandbox scene and the prefabs load;
 // merge patches override values and replace arrays whole; saving and
-// reloading a World gives the same hash; and malformed scenes are errors.
+// reloading a World gives the same hash; malformed scenes are errors; and
+// the sandbox scene (the Sandbox after one press of the editor's Generate
+// button with seed 1) plays exactly like the legacy `stress` scenario.
 
 #include "game_rampage/scene.h"
 
@@ -19,7 +21,9 @@
 
 #include "game_rampage/components.h"
 #include "game_rampage/module.h"
+#include "game_rampage/projection.h"
 #include "rampage/support/rampage_session.h"
+#include "rampage/support/seinput.h"
 #include "rampage/support/test_world.h"
 #include "se_core/core_components.h"
 #include "se_core/error.h"
@@ -238,6 +242,44 @@ TEST_CASE("Malformed scenes are errors", "[rampage][scene]") {
   CHECK_FALSE(Loads(Scene("{" + guid + R"(, "prefab": "bad"})"), prefabs));
   CHECK_FALSE(Loads(Scene("{" + guid + R"(, "prefab": "missing"})"), prefabs));
   CHECK_FALSE(Loads(Scene("{" + guid + R"(, "colour": "red"})"), prefabs));
+}
+
+// The projection of every tick of a session.
+std::vector<std::string> Projections(const SceneRequest& scene,
+                                     const std::vector<InputFrame>& frames)
+    SE_REQUIRES(g_main) SE_EXCLUDES(g_sim_owner) {
+  testing::FrameListInput input(frames);
+  testing::RampageSessionOptions options;
+  options.scene = scene;
+  options.input = &input;
+  options.ticks = frames.size();
+  std::vector<std::string> blocks;
+  options.on_world = [&blocks](const World& world) {
+    WriteProjection(world, blocks.emplace_back());
+  };
+  const testing::RampageSessionResult result =
+      testing::RunRampageSession(options);
+  REQUIRE(result.error.empty());
+  return blocks;
+}
+
+TEST_CASE("The sandbox scene plays like the legacy stress scenario",
+          "[rampage][scene]") {
+  const testing::MainThreadScope main_thread;
+  const auto frames = testing::ReadSeinput(testing::RampageFixtureDir() +
+                                           "/reference/stress.seinput");
+  REQUIRE(frames.has_value());
+  REQUIRE(frames->size() == 3600);
+  const std::vector<std::string> scene =
+      Projections(testing::SandboxSceneRequest(), *frames);
+  const std::vector<std::string> legacy =
+      Projections(testing::ReferenceScenarioRequest("stress"), *frames);
+  REQUIRE(scene.size() == 3601);
+  REQUIRE(legacy.size() == scene.size());
+  for (std::size_t i = 0; i < scene.size(); ++i) {
+    INFO("tick " << i);
+    REQUIRE(scene[i] == legacy[i]);
+  }
 }
 
 }  // namespace

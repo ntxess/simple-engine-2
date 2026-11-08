@@ -12,6 +12,7 @@ se_add_module(game_rampage KIND STATIC
     src/legacy_scenario.cc
     src/module.cc
     src/movement.cc
+    src/projection.cc
     src/rampage_components.cc
     src/scene.cc
     src/stats.cc

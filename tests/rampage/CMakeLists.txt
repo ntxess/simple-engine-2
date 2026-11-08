@@ -1,7 +1,19 @@
 # game_rampage tests (docs/milestone-specs.md, M3b "Tests"); label rampage.
 #
 #   se_rampage_tests      Catch2: serialization, broadphase, effects, path,
-#                         boundary, JSON, scenes and the legacy scenarios
+#                         boundary, JSON, scenes, the legacy scenarios and
+#                         the projection
+#   ref.sandbox.NAME      label reference: se_replay runs the legacy scenario
+#                         NAME with its inputs for 3600 ticks, and
+#                         tools/refcmp/refcmp.py compares the projection with
+#                         tests/fixtures/reference/NAME.seproj.gz (the
+#                         legacy-ref-v2 goldens, with rules R11 to R13)
+#   ref.sandbox_v1.NAME   the same with --legacy-rules v1 against the
+#                         legacy-ref-v1 goldens kept in
+#                         tests/fixtures/reference/v1/
+#
+# Until tests/fixtures/reference/ holds the legacy-ref-v2 goldens (M3a), its
+# files equal the v1 copies, and ref.sandbox.NAME is registered disabled.
 
 # game_rampage's link-graph contract: never SDL, ImGui, audio, crash or LZ4
 # libraries (checked against every module's closure by se_check_link_graph).
@@ -38,6 +50,7 @@ se_add_module(se_rampage_tests KIND EXECUTABLE
     json_test.cc
     legacy_scenario_test.cc
     path_test.cc
+    projection_test.cc
     scene_test.cc
     serialization_test.cc
   PRIVATE_DEPS
@@ -58,3 +71,53 @@ catch_discover_tests(se_rampage_tests
   TEST_PREFIX "rampage."
   ADD_TAGS_AS_LABELS
   PROPERTIES LABELS rampage)
+
+set(_se_ref "${CMAKE_SOURCE_DIR}/tests/fixtures/reference")
+set(_se_refcmp "${CMAKE_SOURCE_DIR}/tools/refcmp/refcmp.py")
+
+# Legacy comparisons: run, then compare (fixtures order the two).
+function(_se_reference_test name dir rules golden disabled)
+  set(_out "${_se_rampage_out}/${name}.seproj")
+  add_test(NAME ${name}.run
+    COMMAND se_replay --module rampage
+            --legacy-scenario "${dir}/${golden}.scenario.json"
+            --inputs "${dir}/${golden}.seinput" --ticks 3600
+            --legacy-rules ${rules} --projection-out "${_out}")
+  add_test(NAME ${name}
+    COMMAND Python3::Interpreter "${_se_refcmp}" "${_out}"
+            "${dir}/${golden}.seproj.gz")
+  set_tests_properties(${name}.run PROPERTIES
+    FIXTURES_SETUP ${name} LABELS "reference;rampage")
+  set_tests_properties(${name} PROPERTIES
+    FIXTURES_REQUIRED ${name} LABELS "reference;rampage")
+  if(disabled)
+    set_tests_properties(${name}.run ${name} PROPERTIES DISABLED TRUE)
+  endif()
+endfunction()
+
+foreach(_se_name stress effects patrol)
+  file(SHA256 "${_se_ref}/${_se_name}.seproj.gz" _se_v2)
+  file(SHA256 "${_se_ref}/v1/${_se_name}.seproj.gz" _se_v1)
+  set(_se_pending FALSE)
+  if(_se_v2 STREQUAL _se_v1)
+    set(_se_pending TRUE)
+    message(STATUS "ref.sandbox.${_se_name} disabled: "
+                   "tests/fixtures/reference still holds legacy-ref-v1")
+  endif()
+  _se_reference_test(ref.sandbox.${_se_name} "${_se_ref}" v2 ${_se_name}
+                     ${_se_pending})
+  _se_reference_test(ref.sandbox_v1.${_se_name} "${_se_ref}/v1" v1
+                     ${_se_name} FALSE)
+endforeach()
+
+# refcmp itself: a projection equals itself, and a changed stat is found.
+add_test(NAME refcmp.self
+  COMMAND Python3::Interpreter "${_se_refcmp}"
+          "${_se_ref}/v1/effects.seproj.gz" "${_se_ref}/v1/effects.seproj.gz")
+add_test(NAME refcmp.detects_difference
+  COMMAND Python3::Interpreter "${_se_refcmp}"
+          "${_se_ref}/v1/effects.seproj.gz" "${_se_ref}/v1/patrol.seproj.gz")
+set_tests_properties(refcmp.detects_difference PROPERTIES
+  PASS_REGULAR_EXPRESSION "FIRST DIFFERENCE")
+set_tests_properties(refcmp.self refcmp.detects_difference PROPERTIES
+  LABELS "tools;rampage")

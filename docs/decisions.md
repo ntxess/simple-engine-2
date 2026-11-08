@@ -226,3 +226,52 @@ packed arrays the chunks index. The signals see every structural path,
 typed or type-erased, and only the captured storages count, so unrelated
 structural changes (a DestroyRequest, a new Name) do not invalidate a view.
 Release builds connect nothing.
+
+## ADR-022 Transform::rot is in radians, the way sf::Angle stores it (2026-11-08)
+
+**Decision.** `Transform::rot` and `PrevTransform::rot` hold radians.
+game_rampage keeps them in [0, 2 pi): a heading in degrees becomes
+`degrees * (pi / 180)` wrapped by sf::Angle's `positiveRemainder`, with
+SFML's float constants and operation order (`RotationFromHeading`), and the
+projection prints `rot * (180 / pi)` normalised to [0, 360). Editors and
+scene authors may show degrees; components store radians.
+
+**Why.** se::dm's SinCos and Atan2 work in radians (the kernel test module
+already stores Atan2's result), the RenderList (M3c) rotates corners with
+`dm::SinCos(rot)`, and copying sf::Angle's operations made the engine's
+legacy-ref-v1 projections bit-identical to the reference's (refcmp reports
+zero deviation on all three scenarios), rotation included.
+
+## ADR-023 Scene files name stats; components store their ids (2026-11-08)
+
+**Decision.** In se-scene-v1 scenes and prefabs, `Stats` is written as an
+object of named values (`"Stats": {"HP": 100, "Speed": 500}`) and an
+effect's stat as its name (`"stat": "HP"`). The loader turns them into the
+registry form (`{"values": [{"id": <Fnv1a32 of the name>, ...}]}`, sorted
+by id) before the component's JSON hook reads it, and records the names in
+the World's StatNames; SaveScene writes the named form back. The registry
+form is accepted as well. An entity with a Path whose Transform sets no
+position starts at the path's first point (R12).
+
+**Why.** Authors cannot write FNV hashes, and with stats as an object a
+merge patch changes one stat (`"overrides": {"Stats": {"Speed": 250}}`)
+where an array would be replaced whole. glaze stays confined: the
+translation is JSON to JSON, in game_rampage's scene loader.
+
+## ADR-024 The legacy comparison keeps both reference rule sets (2026-11-08)
+
+**Decision.** game_rampage implements R11 to R13 by default. The World
+setting `RulesConfig::version = kV1` (`se_replay --legacy-rules v1`)
+restores the legacy-ref-v1 boundary clamp and path stepping, nothing else.
+`ref.sandbox_v1.NAME` compares that build against the legacy-ref-v1
+goldens, kept with their scenarios and inputs in
+tests/fixtures/reference/v1/; `ref.sandbox.NAME` compares the default build
+against tests/fixtures/reference/ (legacy-ref-v2 once M3a re-baselines it).
+CMake registers `ref.sandbox.NAME` disabled while the two directories'
+goldens are identical, that is until M3a's goldens arrive.
+
+**Why.** The v1 comparison proves the port of R1 to R10 and everything the
+projection shows (stat arithmetic, effect timing, the watchdog, spawn
+order, the player's movement, rotation normalisation, the line format)
+independently of the three new rules, and it stays a regression test after
+M3a moves the main goldens on.
