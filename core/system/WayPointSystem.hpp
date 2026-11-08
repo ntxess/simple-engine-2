@@ -12,6 +12,10 @@
 #include "Components.hpp"
 #include "interface/ISystem.hpp"
 
+/**
+ * @brief Moves entities along their MovementPattern at their bound speed stat, in px/s; dt is the
+ * tick length in seconds (rule R5).
+*/
 class WayPointSystem : public ISystem
 {
 public:

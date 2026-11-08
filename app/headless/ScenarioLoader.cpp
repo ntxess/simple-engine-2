@@ -480,7 +480,7 @@ void ScenarioLoader::appendStressEntities(Scenario& scenario, const std::vector<
         ScenarioEntity e;
         e.team = Team::ENEMY;
         e.texture = "player";
-        e.stats = { { "HP", 100.f }, { "Speed", 0.5f } };
+        e.stats = { { "HP", 100.f }, { "Speed", 500.f } }; // px/s (rule R5)
         e.path = path;
         e.repeat = true;
         e.moving = true;

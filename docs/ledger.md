@@ -57,6 +57,6 @@ draws, in this order:
   0..H-1, so y in 0..W-H (0..840) is twice as likely as W-H+1..H-1
   (841..1079).
 - **Fixed** (Editor.cpp:950 and following): the sprite starts at the first
-  point; HP 100, Speed 0.5 px/ms (500 px/s after rule R5), team ENEMY,
+  point; HP 100, Speed 500 px/s (0.5 px/ms before rule R5), team ENEMY,
   repeating path, UpdateEntityEvent; no EffectsList, so generated enemies
   never damage the player. A one-point path never moves.

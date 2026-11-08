@@ -85,3 +85,21 @@ side as its heading turned (67.9 px instead of 48 px at 45 degrees).
 Goldens: all three changed, each for a short stretch of ticks around contacts
 (`stress` from tick 438, 47 ticks; `effects` from tick 1303, 104 ticks;
 `patrol` from tick 118, 59 ticks).
+
+## R5 Seconds throughout
+
+Rates are per second and systems receive the tick length in seconds
+(1/120 s). The Speed stat that WayPointSystem follows is in px/s: the stress
+generator's 0.5 px/ms becomes 500 px/s, and the scenario fixtures' Speed
+values are multiplied by 1000. The player's movement command moves it at an
+explicit 120 px/s (1 px per tick, as before). Durations of effects and
+cooldowns stay authored in milliseconds and convert to ticks with `ticks(ms)`.
+
+Before: Sandbox passed dt in milliseconds (the physics thread's 1000/frame-rate,
+then 1000/120 since the single loop), Speed was in px/ms, and Movement moved
+the player 1 px per input poll, a rate tied to the render loop
+(core/command/Movement.cpp:12, app/editor/Editor.cpp:950).
+
+Goldens: all three changed from tick 0, where the projection first prints the
+Speed stat in its new unit (path-following positions are now speed × dt in
+px/s × s, which may round differently in the last bit).

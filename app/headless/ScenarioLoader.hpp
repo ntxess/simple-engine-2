@@ -32,7 +32,7 @@ class Sandbox;
  *           "texture": "player",                        (key in config/texture.json)
  *           "position": [x, y],                         (default: the first path point)
  *           "rotation": 0,                              (degrees)
- *           "stats": {"HP": 100, "Speed": 0.5},         (EntityStatus, in this order)
+ *           "stats": {"HP": 100, "Speed": 500},         (EntityStatus, in this order; Speed in px/s)
  *           "path": [[x, y], ...], "repeat": true,      (MovementPattern)
  *           "moving": true,                             (UpdateEntityEvent at spawn)
  *           "polling": {"cooldownMs": 1000, "readyOnStart": true},
@@ -99,6 +99,6 @@ namespace ScenarioLoader
     // Applies the player overrides and spawns the entities into the Sandbox's registry.
     bool spawn(const Scenario& scenario, Sandbox& sandbox, ApplicationContext& ctx, std::string& error);
 
-    // Enemies as the editor's stress generator creates them: HP 100, Speed 0.5, repeating path.
+    // Enemies as the editor's stress generator creates them: HP 100, Speed 500 px/s, repeating path.
     void appendStressEntities(Scenario& scenario, const std::vector<std::vector<sf::Vector2f>>& paths);
 }

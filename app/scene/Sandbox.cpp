@@ -67,12 +67,15 @@ void Sandbox::init()
     m_reg.emplace<UpdateEntityPolling>(m_player, msToTicks(1000, tickRate), true, m_appContext->simTime.tick);
     m_reg.emplace<EntityStatus>(m_player);
     m_reg.get<EntityStatus>(m_player).values["HP"] = 100.f;
+    // Rule R5: the player walks at 120 px/s (the old 1 px per input poll, at 120 ticks per second).
+    constexpr float playerSpeed = 120.f;
+    const LegacySimTime& simTime = m_appContext->simTime;
     m_reg.get<PlayerInput>(m_player).input =
     {
-        { LegacyAction::Up,    new Movement(m_player, { 0, -1 }) },
-        { LegacyAction::Left,  new Movement(m_player, { -1, 0 }) },
-        { LegacyAction::Down,  new Movement(m_player, { 0,  1 }) },
-        { LegacyAction::Right, new Movement(m_player, { 1,  0 }) }
+        { LegacyAction::Up,    new Movement(m_player, { 0, -1 }, playerSpeed, simTime) },
+        { LegacyAction::Left,  new Movement(m_player, { -1, 0 }, playerSpeed, simTime) },
+        { LegacyAction::Down,  new Movement(m_player, { 0,  1 }, playerSpeed, simTime) },
+        { LegacyAction::Right, new Movement(m_player, { 1,  0 }, playerSpeed, simTime) }
     };
 
     float width = static_cast<float>(m_appContext->configData.get<int>("width").value());
@@ -128,8 +131,8 @@ void Sandbox::update()
 {
     LOG_TRACE(Logger::get()) << "Entering update()";
 
-    // Systems take dt in milliseconds per tick (WayPointSystem's Speed stat is in px/ms).
-    m_system.update(m_reg, static_cast<float>(m_appContext->simTime.dt * 1000.0));
+    // Rule R5: systems take dt in seconds (WayPointSystem's Speed stat is in px/s).
+    m_system.update(m_reg, static_cast<float>(m_appContext->simTime.dt));
 
     // Delete anything that has zero or less HP
     const auto& view = m_reg.view<EntityStatus>();

@@ -961,7 +961,7 @@ void Editor::generateEntities(size_t numOfEntities)
         m_selectedSceneData->getRegistry().get<Sprite>(mob).setPosition({ root->coordinate.x, root->coordinate.y });
         m_selectedSceneData->getRegistry().emplace<EntityStatus>(mob);
         m_selectedSceneData->getRegistry().get<EntityStatus>(mob).values["HP"] = 100.f;
-        m_selectedSceneData->getRegistry().get<EntityStatus>(mob).values["Speed"] = 0.5f;
+        m_selectedSceneData->getRegistry().get<EntityStatus>(mob).values["Speed"] = 500.f; // px/s (rule R5)
         m_selectedSceneData->getRegistry().emplace<TeamTag>(mob, Team::ENEMY);
         m_selectedSceneData->getRegistry().emplace<MovementPattern>(mob, std::move(root), true);
         m_selectedSceneData->getRegistry().emplace<UpdateEntityEvent>(mob);
