@@ -1,6 +1,8 @@
 # se_replay: runs a game module headless and reports per-tick hashes
-# (docs/milestone-specs.md, M2 "Tools and tests"). Tool code, so it links the
-# test support library that holds the kernel test module.
+# (docs/milestone-specs.md, M2 "Tools and tests"; the rampage module, M3b).
+# Tool code, so it links the test support libraries that hold the kernel test
+# module and the rampage session. The rampage replay and reference tests are
+# registered in tests/rampage/CMakeLists.txt.
 
 se_add_module(se_replay KIND EXECUTABLE
   SOURCES
@@ -9,6 +11,7 @@ se_add_module(se_replay KIND EXECUTABLE
     se_core
     se_sim
     se_test_support
+    rampage_test_support
   TEST)
 
 set(_se_replay_out "${CMAKE_BINARY_DIR}/se_replay_out")
@@ -56,12 +59,8 @@ add_test(NAME replay.kernel_golden_detects_change
 set_tests_properties(replay.kernel_golden_detects_change PROPERTIES
   WILL_FAIL TRUE
   ENVIRONMENT_MODIFICATION "SE_UPDATE_GOLDENS=unset:")
-add_test(NAME replay.rampage_not_yet
-  COMMAND se_replay --module rampage)
-set_tests_properties(replay.rampage_not_yet PROPERTIES
-  PASS_REGULAR_EXPRESSION "not available until M3")
 set_tests_properties(replay.kernel_golden_60hz replay.kernel_record_144hz
   replay.kernel_replay_30hz replay.edits_with_inputs_rejected
   replay.kernel_det_crosscheck
-  replay.kernel_golden_detects_change replay.rampage_not_yet
+  replay.kernel_golden_detects_change
   PROPERTIES LABELS "determinism;tools")

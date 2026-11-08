@@ -1,0 +1,25 @@
+{
+  "format": "se-prefab-v1",
+  "name": "player",
+  "components": {
+    "Transform": {"pos": {"x": 200, "y": 200}},
+    "Collider": {"half_extents": {"x": 24, "y": 24}},
+    "Team": {"id": "friendly"},
+    "PlayerControl": {"player": 0, "speed": 120},
+    "MoveIntent": {},
+    "KinematicBody": {},
+    "EffectSource": {
+      "effects": [
+        {"kind": "instant", "stat": "HP", "value": -10},
+        {"kind": "over_time", "stat": "HP", "value": -1,
+         "duration_ms": 5000, "interval_ms": 1000},
+        {"kind": "temp_timed", "stat": "HP", "value": -10,
+         "duration_ms": 5000}
+      ],
+      "polled": true,
+      "cooldown_ms": 1000,
+      "ready_on_start": true
+    },
+    "Stats": {"HP": 100}
+  }
+}

@@ -38,3 +38,11 @@ Re-baseline after a declared rule: `SE_UPDATE_GOLDENS=1 ctest --preset legacy-ms
 (rewrites the goldens instead of checking them and prints a warning; an
 unchanged golden keeps its file). `scripts/ci.ps1` clears `SE_UPDATE_GOLDENS`,
 so the commit gate always checks.
+
+## v1/
+
+`v1/NAME.scenario.json`, `v1/NAME.seinput` and `v1/NAME.seproj.gz` are the
+files of `legacy-ref-v1` (rules R1 to R10, before M3a's R11 to R13), kept
+for the engine's comparison `ref.sandbox_v1.NAME` (tests/rampage,
+`se_replay --legacy-rules v1`, docs/decisions.md ADR-025). They never
+change; the files above move on with each declared rule.
