@@ -1,5 +1,6 @@
 #pragma once
 
+#include "component/DestroyRequest.hpp"
 #include "component/Effects.hpp"
 #include "component/EffectsList.hpp"
 #include "component/EntityStatus.hpp"

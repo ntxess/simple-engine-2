@@ -177,3 +177,20 @@ the end of update(), after the HP check (since M1a; in render() before that).
 
 Goldens: all three changed around contacts (`stress` from tick 439, 19 ticks;
 `effects` from tick 13; `patrol` from tick 119, 14 ticks).
+
+## R10 HP <= 0 destroys are deferred to the end of the tick
+
+GameRules marks every entity whose HP stat is 0 or less after the tick's
+effects (an EntityStatus without HP counts as 0) with a DestroyRequest.
+Cleanup, the last step of the tick, destroys all requested entities in
+SpawnIndex order. No system sees an entity destroyed in the middle of the
+tick, and the destroy order (which decides entt's id recycling) is fixed.
+
+Before: Sandbox::update destroyed each such entity on the spot while iterating
+the EntityStatus view (app/scene/Sandbox.cpp:126-136).
+
+Goldens: unchanged. Nothing ran after that loop within the tick, and
+destroying the current entity of an entt view is safe, so the deferred point
+produces the same projections; the rule fixes the single destroy point and
+its order, which the engine's Cleanup phase (World::DrainDestroyRequests)
+reproduces.

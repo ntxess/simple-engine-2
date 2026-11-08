@@ -1,5 +1,10 @@
 #include "Sandbox.hpp"
 
+#include <algorithm>
+#include <cstdint>
+#include <utility>
+#include <vector>
+
 Sandbox::Sandbox()
     : m_appContext{nullptr}
     , m_player{entt::null}
@@ -98,8 +103,8 @@ void Sandbox::init()
         });
     m_reg.get<EffectsList>(m_player).effectsList.push_back({ EffectType::TEMPTIMED, Effects{"HP", -10.f, std::chrono::milliseconds(5000)} });
 
-    // Rule R9: Input (processInput) -> WayPoint -> Boundary -> Collision -> Event -> GameRules and
-    // Cleanup (the HP check in update()). The systems run in the order they are added.
+    // Rule R9: Input (processInput) -> WayPoint -> Boundary -> Collision -> Event -> GameRules ->
+    // Cleanup (both at the end of update()). The systems run in the order they are added.
     m_system.addSystem<WayPointSystem>(true, "Speed");
     m_system.addSystem<BoundarySystem>(true, m_bounds);
     m_system.addSystem<CollisionSystem>(true, m_collisionEventReg, m_appContext->simTime, sf::Vector2f{ 0.f, 0.f }, m_bounds);
@@ -137,17 +142,29 @@ void Sandbox::update()
     // Rule R5: systems take dt in seconds (WayPointSystem's Speed stat is in px/s).
     m_system.update(m_reg, static_cast<float>(m_appContext->simTime.dt));
 
-    // Delete anything that has zero or less HP
+    // GameRules: anything that has zero or less HP is requested for destruction (a missing HP stat
+    // counts as 0)
     const auto& view = m_reg.view<EntityStatus>();
     for (const auto& entity : view)
     {
         if (m_reg.get<EntityStatus>(entity).getOr("HP", 0.f) <= 0.f)
-        {
-            LOG_INFO(Logger::get()) << "Destroying entity [" << static_cast<unsigned int>(entity) << "]";
+            m_reg.emplace_or_replace<DestroyRequest>(entity);
+    }
 
-            m_system.getSystem<CollisionSystem>()->remove(m_reg, entity);
-            m_reg.destroy(entity);
-        }
+    // Cleanup, at the end of the tick (rule R10): destroy the requested entities in SpawnIndex order
+    std::vector<std::pair<std::uint32_t, entt::entity>> doomed;
+    for (const auto& entity : m_reg.view<DestroyRequest>())
+    {
+        const SpawnIndex* spawnIndex = m_reg.try_get<SpawnIndex>(entity);
+        doomed.emplace_back(spawnIndex ? spawnIndex->value : UINT32_MAX, entity);
+    }
+    std::sort(doomed.begin(), doomed.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+    for (const auto& [spawnIndex, entity] : doomed)
+    {
+        LOG_INFO(Logger::get()) << "Destroying entity [" << static_cast<unsigned int>(entity) << "]";
+
+        m_system.getSystem<CollisionSystem>()->remove(m_reg, entity);
+        m_reg.destroy(entity);
     }
 
     LOG_TRACE(Logger::get()) << "Leaving update()";
