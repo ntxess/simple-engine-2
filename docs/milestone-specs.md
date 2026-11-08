@@ -1,4 +1,4 @@
-# Milestone specs: M1 (legacy reference) and M2 (headless kernel)
+# Milestone specs: M1 (legacy reference), M2 (headless kernel), M3 (gameplay port)
 
 Detailed specs for the first milestones after M0. The milestone table and the
 exit criteria are in docs/implementation-plan.md; the design is in
@@ -107,3 +107,305 @@ clocks including a GameOver transition and logged edits; the three stepper
 scenarios; FMA3 on/off hashes match; ENTT_USE_ATOMIC defined, storages
 pre-created, structural asserts in place; serialization round trips. All
 green on msvc-dev, msvc-asan and clangcl-dev, lint included.
+
+## M3 Headless gameplay port (games/rampage, engine/se_render_core, bench/; design build step 1, CF a)
+
+M3 ports the legacy Sandbox's gameplay onto the M2 kernel and proves it
+against the legacy reference. It has three parts. M3a changes the reference
+(rules R11 to R13) and tags `legacy-ref-v2`. M3b (gameplay) and M3c
+(RenderList and se_bench) are new code and are written in parallel with M3a.
+The comparison runs once all three are merged. Nothing in M3 opens a window or
+links SDL3, ImGui or miniaudio.
+
+### M3a: three more declared rules, then tag `legacy-ref-v2`
+
+The M1 review left three characterization items in docs/ledger.md that are
+legacy bugs rather than behaviour worth keeping. They are fixed in the
+reference first, one commit per rule, exactly as for R1 to R10:
+- each commit writes its rule text into docs/rules/gameplay-rules.md;
+- each re-baselines the goldens of tests/fixtures/reference/ (the `.sehash`
+  and `.seproj.gz` files; Debug and Release must be identical).
+
+Floating-point expressions are evaluated in `float`, in the order written, so
+the engine (M3b) can produce the same bits.
+
+- **R11 The clamp keeps the collider inside the scene bounds**
+  (core/system/BoundarySystem.cpp).
+  - Inputs: the collider's half extents `hw = texture width / 2.f` and
+    `hh = texture height / 2.f` (R4: unrotated, centred on the position), and
+    the bounds `W`, `H` (the configured resolution, as floats).
+  - `x_new = W < 2.f * hw ? W * 0.5f : std::clamp(x, hw, W - hw)`, and the
+    same for y.
+  - Both axes are computed from the position before the clamp and written
+    once.
+
+  Before: the clamp used the size of the rotated global bounds against the
+  centred position. It let half a sprite out on the left and top but kept a
+  whole sprite's margin on the right and bottom. Each axis's `setPosition`
+  also reused the pre-clamp position, so a corner correction on one axis was
+  undone by the other, and sprites could leave the arena.
+- **R12 Path steps follow the polyline** (core/system/WayPointSystem.cpp).
+
+  State: the current segment `i` (from point `i` to the next) and the
+  distance `u` travelled along it (float). The entity starts at its first
+  point, with `u = 0` on segment 0.
+
+  Each tick, if the entity has a Speed stat (without one it does not move, as
+  before), set `rem = speed * dt` with `dt = 1.f / 120.f`, then loop:
+  1. Skip segments of length 0 (R6).
+  2. If no segment is left (the end of a non-repeating path), place the
+     entity exactly on the last point and stop moving for good.
+  3. If `u + rem < len`, set `u = u + rem` and leave the loop.
+  4. Otherwise set `rem = (u + rem) - len` and `u = 0.f`, and continue with
+     the next segment.
+
+  - Position: `a + (b - a) * (u / len)` per axis, where `a` and `b` are the
+    segment's points and `len = std::sqrt(dx * dx + dy * dy)` is precomputed
+    per segment.
+  - Heading: the segment's `atan2(dy, dx) * (180.f / pi) + 90.f` degrees.
+  - An entity is "moved" (UpdateEntityEvent, the dirty flag of R2 and R8) on
+    every tick its position changes.
+
+  Before:
+  - the tick's whole step followed the current segment even past its end;
+  - the next segment began only once the travelled distance passed the next
+    waypoint's running total, so corners were overshot by up to one step;
+  - the position was integrated from per-tick increments, so it drifted from
+    the path.
+- **R13 Repeating paths close the loop** (WayPointSystem.cpp:27-34). A
+  repeating path with two or more distinct points continues from its last
+  point back to its first along a closing segment, then starts over at
+  segment 0. The entity therefore cycles the closed polygon, and a two-point
+  path goes back and forth. A path whose points all coincide never moves.
+  Before: at the last waypoint the progress reset while the sprite kept its
+  position, so the path replayed offset from its end point.
+
+Update these ledger rows to "re-specified (M3a)":
+- "Clamp corrections read the position from before the first correction";
+- "A path step is taken in full past the waypoint";
+- "Repeating paths restart progress, not position".
+
+The editor's path drawing (app/editor) is unchanged.
+
+Exit:
+- three scenarios × 3600 ticks re-baselined;
+- self-determinism tests green;
+- `editor_app` runs;
+- tag `legacy-ref-v2` (the orchestrator creates the tag).
+
+### M3b: game_rampage (games/rampage; Google style; DETERMINISTIC)
+
+`game_rampage` is a STATIC module built with se_add_module:
+- FORBID SDL3::SDL3-static, se_imgui, miniaudio, sentry and lz4_static;
+  platform includes are banned;
+- depends on se_core, se_sim and se_render_core (for SpriteRenderer only).
+
+The `rampage` executable comes in M13; in M3 the module runs through
+se_replay.
+
+**Components.** They are declared in game_rampage/components.h and
+registered in rampage_components.cc through reflect_glaze.h. All are plain
+aggregates, kHashed and kSerialized unless noted, and each gets a JSON and a
+BEVE round-trip test.
+
+- `Team { TeamId id; }`, with `enum class TeamId : std::uint8_t
+  { kUnaffiliated, kFriendly, kEnemy }`.
+- `Stats { std::vector<StatValue> values; }`, with
+  `StatValue { StatId id; float value; }`.
+  - `StatId` is `Fnv1a32(name)`, an interned id. A `StatNames` table in the
+    World's ctx maps ids back to names for the projection and, later, the
+    editor.
+  - `values` is kept sorted by id.
+  - A missing stat reads as absent, not 0, except where a rule says
+    otherwise (R10).
+- `EffectDef { EffectKind kind; StatId stat; float value;
+  std::int64_t duration_ms; std::int64_t interval_ms; }`, with
+  `enum class EffectKind { kInstant, kOverTime, kTempTimed }`. Tick counts
+  derive as `TicksFromMs(ms) = ceil(ms * 120 / 1000)`, in integer arithmetic.
+- `EffectSource { std::vector<EffectDef> effects; bool polled;
+  std::int64_t cooldown_ms; bool ready_on_start; }`. A polled source is the
+  legacy UpdateEntityPolling. Otherwise the source is event-driven and acts
+  on the ticks it moved (R2).
+- `PairCooldowns { std::vector<PairCooldown> pairs; }` on polled sources,
+  with `PairCooldown { Guid receiver; Tick last; }`, sorted by receiver Guid.
+- `ActiveEffects { std::vector<ActiveEffect> effects; }` on the receiver,
+  with `ActiveEffect { EffectDef def; EntityRef source; Tick start;
+  Tick next; std::uint32_t applied; std::uint64_t seq; }`.
+  - Effects apply in `seq` (creation) order (R8).
+  - The event watchdog (scene setting `event_watchdog_ms`) ends an effect
+    early (R1, R7).
+- `Collider { Vec2 half_extents; ColliderRole role; std::uint32_t layer;
+  std::uint32_t mask; }`, with `enum class ColliderRole : std::uint8_t
+  { kBody, kHitbox, kHurtbox, kTrigger }`. M3 uses one AABB per entity (R4);
+  the shape list arrives with tiles (M19).
+- `KinematicBody { Vec2 velocity; }`, `MoveIntent { Vec2 dir; }` and
+  `PlayerControl { std::uint8_t player; float speed; }`, with speed 120 px/s
+  (R5).
+- `Path { std::vector<Vec2> points; bool loop; std::uint32_t segment;
+  float u; bool done; }` (R6, R12, R13). Per-segment lengths are cached in a
+  non-hashed derived component that is rebuilt on load.
+- `Moved {}`, not serialized. Movement sets it on ticks the position changed,
+  and Cleanup removes it. It is R2's condition for an event-driven source.
+- Scene settings live in the World's ctx: `ArenaBounds { float w, h; }`,
+  `EffectSettings { std::int64_t event_watchdog_ms; }`, and the seed.
+
+**Systems.** They are stateless structs registered by the GameModule. One
+Schedule is shared by se_replay and the tests, and later by the runtime and
+the editor. The phases reproduce R9's order:
+
+| Phase | Systems |
+|---|---|
+| Input | `PlayerInputSystem`: InputFrame held bits → MoveIntent. The actions Up, Left, Down, Right follow LegacyAction order (bit i = action i), the same mapping se_replay uses for `.seinput` |
+| Intent | `IntentSystem`: MoveIntent × PlayerControl.speed → KinematicBody.velocity |
+| Movement | The built-in PrevTransformCopy runs first. Then `KinematicMoveSystem` (the player: `pos += velocity * dt`, in the float order of the legacy Movement::execute), `PathSystem` (R12, R13, R6) and `BoundarySystem` (R11) |
+| Collision | `CollisionSystem`, in order: <ul><li>cached world AABBs;</li><li>a spatial-hash broadphase (64 px cells; its scratch lives in ctx and is cleared and reused, so steady-state ticks do not allocate);</li><li>an AABB narrow phase that needs a positive-area overlap (R3);</li><li>self and same-team skips;</li><li>contacts sorted by (source, receiver) spawn serial (R8);</li><li>the per-pair cooldown, decided once per tick (R2);</li><li>one ActiveEffect per effect, in list order.</li></ul> |
+| Effects | `EffectSystem`: <ul><li>INSTANT applies once;</li><li>OVERTIME applies floor(d/i) times, starting one interval after contact, compared with `>=` in ticks (R7);</li><li>TEMPTIMED applies once and is always reverted, at its end or by the watchdog (R1);</li><li>an effect is dropped with its receiver.</li></ul> |
+| GameRules | `DeathRule`: HP ≤ 0 → DestroyRequest. For entities with Stats, a missing HP counts as 0 (R10) |
+| Cleanup | The built-in drain in spawn-serial order (R10), plus removal of Moved |
+
+The spawn serial (Spawned.spawn_serial) plays the role of the legacy
+SpawnIndex: the player comes first, then the entities in file order. Systems
+use se::dm for every transcendental; std::sqrt is allowed, since it is
+correctly rounded.
+
+**Content and loading.**
+
+- Scene and prefabs:
+  - `assets/scenes/sandbox.scene.json` holds the legacy Sandbox::init
+    content;
+  - `assets/prefabs/player.prefab.json` and
+    `assets/prefabs/enemy.prefab.json` hold the player and the stress
+    generator's archetype (app/editor/Editor.cpp:966-980).
+- The format is `se-scene-v1`: `{format, settings {bounds, seed,
+  event_watchdog_ms}, entities [{guid, name, prefab?, components
+  {<registry name>: <json>}, overrides {<registry name>: <RFC 7386 merge
+  patch>}}]}`.
+  - Arrays are replaced whole.
+  - There are no nested prefabs.
+  - `LoadScene` returns `std::expected<..., Error>`. It uses only the
+    ComponentRegistry's JSON hooks, so glaze stays confined.
+- `LoadLegacyScenario(path)` reads `se-legacy-scenario-v1`
+  (app/headless/ScenarioLoader.hpp) into the same World shape.
+  - Collider sizes come from the PNG IHDR chunk (24 bytes) of the texture
+    named in config/texture.json; no image decoder is used before M7.
+  - Guids derive from the scenario name and the spawn index.
+- `WriteProjection(const World&, std::string&)` emits a tick's block in the
+  exact `.seproj` format of core/util/SemanticProjection.cpp, so the two
+  trees' projections compare as text. Per entity:
+  - the spawn serial;
+  - x and y;
+  - the rotation in degrees, normalised to [0, 360);
+  - HP, then the other stats sorted by name;
+  - values printed with `%.9g`, and `-` when absent.
+- se_replay:
+  - `--module rampage` with `--scene FILE` or `--legacy-scenario FILE`;
+  - `--inputs X.seinput`;
+  - `--projection-out` in the seproj format, and `--hash-out` as for the
+    kernel module.
+
+  This replaces the M2 test `replay.rampage_not_yet`.
+- `tools/refcmp/refcmp.py` (Python 3, stdlib only) reads `.seproj` or
+  `.seproj.gz`. For each tick it requires:
+  - the same set of live spawn serials;
+  - every stat value equal as text (exact float equality);
+  - |Δx| and |Δy| ≤ 1e-3 px;
+  - the rotation within 1e-3 degrees, modulo 360.
+
+  It reports the first difference (the tick, the entity and both lines),
+  then a summary of the largest deviations.
+
+**Tests.** They live in tests/rampage with the label `rampage`, registered
+from tests/rampage/CMakeLists.txt, which tests/CMakeLists.txt adds with one
+line.
+
+- broadphase_test: the spatial hash finds exactly the brute-force pair set
+  over seeded random worlds. The worlds cover:
+  - varied sizes and clusters;
+  - boxes that straddle or touch cell edges;
+  - boxes that touch without overlapping;
+  - entities far outside the arena.
+- effects_test covers:
+  - R1;
+  - R2: both readyOnStart values, two receivers of one source, and the
+    same-team and self skips;
+  - R7: the 250/1100 and 1000/5000 cases, interval 0, and a duration shorter
+    than the interval;
+  - the watchdog paths, and a receiver destroyed mid-effect;
+  - R8 order with non-integer sums.
+- path_test covers:
+  - R6;
+  - R12: several waypoints in one step, and the stop at the end with the
+    exact end position;
+  - R13: the closing segment, two points, and coincident points.
+- boundary_test covers R11: corners, and boxes larger than the bounds.
+- scene_test: the sandbox scene and the prefabs load; merge patches override
+  values and replace arrays whole; saving and reloading the World gives the
+  same hash.
+- determinism: the sandbox under 30, 60, 144 and 160 Hz synthetic clocks
+  gives the same per-tick hashes, checked against a per-platform golden
+  `determinism_rampage`.
+- `ref.sandbox.{stress,effects,patrol}` (label `reference`): se_replay runs
+  the legacy scenario and inputs for 3600 ticks, and refcmp checks the result
+  against tests/fixtures/reference/NAME.seproj.gz at `legacy-ref-v2`.
+
+### M3c: se_render_core and se_bench (engine/se_render_core, bench/)
+
+`se_render_core` is a STATIC, headless module (no SDL, no GPU, no ImGui) that
+depends on se_core. Rendering never writes simulation state.
+
+- Two components, registered by
+  `RegisterRenderComponents(ComponentRegistry&)`, serialized but not hashed:
+  - `SpriteRenderer { std::uint32_t texture; Rect region; Vec2 origin;
+    Rgba8 tint; std::int16_t layer; float z; bool flip_x; bool flip_y; }`,
+    where `texture` is an interned asset key until M9's handles;
+  - `Camera2D { Vec2 center; float zoom; Vec2 virtual_size;
+    bool integer_scale; bool primary; }`.
+- `void BuildRenderList(const World&, const Camera2D&, float alpha,
+  RenderList&)`:
+  - interpolates PrevTransform → Transform by alpha: position and scale
+    linearly, rotation along the shorter arc;
+  - does not interpolate when `teleport_tick` is the World's current tick or
+    PrevTransform is from an older tick;
+  - culls each sprite's rotated bounds against the camera rect;
+  - sorts by (layer, texture, z, spawn serial);
+  - fills `RenderList { std::vector<SpriteQuad> quads;
+    std::vector<QuadBatch> batches; RenderStats stats; }`, with
+    `SpriteQuad { std::array<Vec2, 4> pos; std::array<Vec2, 4> uv;
+    Rgba8 tint; }` and `QuadBatch { std::uint32_t texture;
+    std::uint32_t first; std::uint32_t count; }`;
+  - reuses the list's buffers across frames, so nothing is allocated once
+    warm;
+  - computes rotation with se::dm::SinCos.
+- tests/render (label `render`): interpolation at alpha 0, 0.5 and 1;
+  teleports; the shorter arc across ±180°; culling at the camera edges; sort
+  stability; batch runs; flips and the origin.
+- `bench/se_bench` (EXECUTABLE, SE_BUILD_BENCH):
+  - command line: `se_bench --suite NAME [--n N] [--iterations K]
+    [--json FILE]`;
+  - reports the median, p95, p99 and max of each suite;
+  - thresholds for the 7700X live in bench/thresholds.json;
+  - CTest `bench.*` (label `bench`) runs only in the Release presets.
+
+  Suites:
+  - `renderlist_10k`: 10k sprites over 8 textures with random poses. This is
+    the exit gate: p95 ≤ 1 ms in Release.
+  - `rampage_tick_5k`, added once M3b is merged: one tick of 5k moving
+    colliders on paths. Its threshold is the measured p95 with 2× headroom;
+    the design's budget is 1/160 s.
+
+### Exit (M3)
+
+- The broadphase matches brute force, and the effect, path, boundary and
+  interpolation tests pass.
+- `ref.sandbox.*`, against `legacy-ref-v2`, over 3600 ticks of all three
+  scenarios:
+  - liveness and stats are exact;
+  - positions are within 1e-3 px;
+  - rotations are within 1e-3 degrees.
+- RenderList of 10k sprites: p95 ≤ 1 ms in Release.
+- Green on:
+  - msvc-dev, msvc-asan and clangcl-dev, lint included;
+  - msvc-debug and msvc-release;
+  - the legacy presets;
+  - WSL linux-clang-debug, -asan and -tsan, with linux-clang goldens for
+    every new golden.

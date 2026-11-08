@@ -246,7 +246,7 @@ Names below are written as in the design. In code they take Google style: `.h` /
   - FMA3 on and off.
   - From M14: W = 0/1/3/7 across chaos seeds.
   - From M17: inline against threaded.
-  - From M3: comparison against legacy `legacy-ref-v1` projections.
+  - From M3: comparison against legacy `legacy-ref-v2` projections (rules R11-R13 are added to the reference in M3a; see docs/milestone-specs.md).
 - **Desktop tests** (label `desktop`, from M5) run on this machine, which has an RTX 3080, an AMD iGPU and two monitors: SendInput drags, NULL acquire, AppInit failure, throw injection on D3D12 and Vulkan.
 - **Visual checks:** run the sandbox and the editor and screenshot them at M7 and M10.
 - **Hardware-only gates** are tracked in `docs/gates.md`: laptops (4-core, 2P+8E on battery), Linux GPU stacks, a VRR panel, a photodiode, PresentMon, a gamepad, sleep/resume, and soaks on the weakest machine.
