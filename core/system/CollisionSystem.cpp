@@ -2,8 +2,9 @@
 
 #include "util/Logger.hpp"
 
-CollisionSystem::CollisionSystem(entt::registry& piplineReg, const sf::Vector2f& center, const sf::Vector2u& size)
+CollisionSystem::CollisionSystem(entt::registry& piplineReg, const LegacySimTime& simTime, const sf::Vector2f& center, const sf::Vector2u& size)
 	: m_piplineReg{piplineReg}
+    , m_simTime{simTime}
     , m_quadTree{std::make_unique<QuadTree>(sf::Rect<float>{{center.x, center.y}, {static_cast<float>(size.x), static_cast<float>(size.y)}})}
 {
     //const auto& view = reg.view<Sprite>();
@@ -85,7 +86,7 @@ void CollisionSystem::collisionUpdateImpl(entt::registry& entityReg, const entt:
             LOG_TRACE(Logger::get()) << "Entity [" << static_cast<unsigned int>(sourceID) << "] collided with same team";
             continue;
         }
-        else if (entityReg.all_of<UpdateEntityPolling>(sourceID) && !entityReg.get<UpdateEntityPolling>(sourceID).isReady())
+        else if (entityReg.all_of<UpdateEntityPolling>(sourceID) && !entityReg.get<UpdateEntityPolling>(sourceID).isReady(m_simTime.tick))
         {
             LOG_TRACE(Logger::get()) << "Entity [" << static_cast<unsigned int>(sourceID) << "] is not ready to collide";
             continue;
@@ -101,7 +102,7 @@ void CollisionSystem::collisionUpdateImpl(entt::registry& entityReg, const entt:
                 {
                     entt::entity statusModEventID = m_piplineReg.create();
 
-                    m_piplineReg.emplace_or_replace<StatusModEvent>(statusModEventID, sourceID, receiverID, effectType, &effect);
+                    m_piplineReg.emplace_or_replace<StatusModEvent>(statusModEventID, sourceID, receiverID, effectType, &effect, m_simTime.tick);
 
                     LOG_INFO(Logger::get())
                         << "Collision Event ID [" << static_cast<unsigned int>(statusModEventID)

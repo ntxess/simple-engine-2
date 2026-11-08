@@ -1,6 +1,6 @@
 #pragma once
 
-#include <chrono>
+#include <cstdint>
 #include <string_view>
 
 #include <entt/entity/entity.hpp>
@@ -8,6 +8,7 @@
 
 #include "Components.hpp"
 #include "interface/ISystem.hpp"
+#include "util/LegacySimTime.hpp"
 
 class EventSystem : public ISystem
 {
@@ -20,7 +21,7 @@ private:
 
 public:
     EventSystem() = delete;
-    EventSystem(entt::registry& piplineReg, std::chrono::milliseconds watchdogTime);
+    EventSystem(entt::registry& piplineReg, const LegacySimTime& simTime, std::uint64_t watchdogTicks);
 
     constexpr std::string_view name() const override final;
     void update(entt::registry& entityReg, const float& dt = 0.f) override final;
@@ -32,5 +33,6 @@ public:
 
 private:
 	entt::registry& m_piplineReg;
-    const std::chrono::milliseconds m_eventWatchdogTime;
+    const LegacySimTime& m_simTime;
+    const std::uint64_t m_eventWatchdogTicks;
 };

@@ -1,6 +1,6 @@
 #pragma once
 
-#include <chrono>
+#include <cstdint>
 
 #include <entt/entity/entity.hpp>
 
@@ -13,10 +13,11 @@ class StatusModEvent : public IComponent
 {
 public:
     StatusModEvent();
-    StatusModEvent(const entt::entity source, const entt::entity receiver, const EffectType type, Effects* effect);
-    StatusModEvent(const StatusModEvent& other);
-    StatusModEvent(StatusModEvent&& other) noexcept;
-    StatusModEvent& operator=(const StatusModEvent& other);
+    StatusModEvent(const entt::entity source, const entt::entity receiver, const EffectType type, Effects* effect, std::uint64_t nowTick = 0);
+    StatusModEvent(const StatusModEvent& other) = default;
+    StatusModEvent(StatusModEvent&& other) noexcept = default;
+    StatusModEvent& operator=(const StatusModEvent& other) = default;
+    StatusModEvent& operator=(StatusModEvent&& other) noexcept = default;
 
     void accept(IComponentVisitor* visitor, entt::entity entityID) override;
 
@@ -24,6 +25,7 @@ public:
     entt::entity receiverID;
     EffectType effectType;
     Effects* effect;
-    std::chrono::steady_clock::time_point timeStart;
-    std::chrono::milliseconds timeElapsed;
+    std::uint64_t startTick;     // Tick of the contact that created the event
+    std::uint64_t lastApplyTick; // Tick the timing of the next application counts from (starts at startTick)
+    std::uint64_t elapsedTicks;  // Ticks accumulated by the applications so far
 };

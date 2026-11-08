@@ -62,7 +62,8 @@ void Sandbox::init()
     m_reg.emplace<TeamTag>(m_player, Team::FRIENDLY);
     m_reg.emplace<PlayerInput>(m_player);
     m_reg.emplace<EffectsList>(m_player);
-    m_reg.emplace<UpdateEntityPolling>(m_player, std::chrono::milliseconds(1000), true);
+    const std::uint32_t tickRate = m_appContext->simTime.rate;
+    m_reg.emplace<UpdateEntityPolling>(m_player, msToTicks(1000, tickRate), true, m_appContext->simTime.tick);
     m_reg.emplace<EntityStatus>(m_player);
     m_reg.get<EntityStatus>(m_player).values["HP"] = 100.f;
     m_reg.get<PlayerInput>(m_player).input =
@@ -93,8 +94,8 @@ void Sandbox::init()
         });
     m_reg.get<EffectsList>(m_player).effectsList.push_back({ EffectType::TEMPTIMED, Effects{"HP", -10.f, std::chrono::milliseconds(5000)} });
 
-    m_system.addSystem<CollisionSystem>(true, m_collisionEventReg, sf::Vector2f{ 0.f, 0.f }, m_bounds);
-    m_system.addSystem<EventSystem>(true, m_collisionEventReg, std::chrono::milliseconds(36000));
+    m_system.addSystem<CollisionSystem>(true, m_collisionEventReg, m_appContext->simTime, sf::Vector2f{ 0.f, 0.f }, m_bounds);
+    m_system.addSystem<EventSystem>(true, m_collisionEventReg, m_appContext->simTime, msToTicks(36000, tickRate));
     m_system.addSystem<WayPointSystem>(true, "Speed");
 }
 
@@ -126,7 +127,8 @@ void Sandbox::update()
 {
     LOG_TRACE(Logger::get()) << "Entering update()";
 
-    m_system.update(m_reg, m_appContext->deltaTime);
+    // Systems take dt in milliseconds per tick (WayPointSystem's Speed stat is in px/ms).
+    m_system.update(m_reg, static_cast<float>(m_appContext->simTime.dt * 1000.0));
 
     // Delete anything that has zero or less HP
     const auto& view = m_reg.view<EntityStatus>();

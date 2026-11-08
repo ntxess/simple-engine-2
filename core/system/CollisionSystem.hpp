@@ -10,13 +10,14 @@
 
 #include "Components.hpp"
 #include "interface/ISystem.hpp"
+#include "util/LegacySimTime.hpp"
 #include "util/QuadTree.hpp"
 
 class CollisionSystem : public ISystem
 {
 public:
     CollisionSystem() = delete;
-    CollisionSystem(entt::registry& piplineReg, const sf::Vector2f& center, const sf::Vector2u& size);
+    CollisionSystem(entt::registry& piplineReg, const LegacySimTime& simTime, const sf::Vector2f& center, const sf::Vector2u& size);
 
     constexpr std::string_view name() const override final;
     void update(entt::registry& entityReg, const float& dt = 0.f) override final;
@@ -31,5 +32,6 @@ private:
 
 private:
 	entt::registry& m_piplineReg;
+    const LegacySimTime& m_simTime;
     std::unique_ptr<QuadTree> m_quadTree;
 };

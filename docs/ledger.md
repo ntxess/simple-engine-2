@@ -8,8 +8,9 @@ The legacy reference retires when nothing is left open
 | Legacy item | Where | Status | Notes |
 |---|---|---|---|
 | JsonDataStoreSerializer tests (GoogleTest) | tests/test.cpp | deleted (M0) | Included non-existent `../src/core/...` paths and a missing `pch.h`; never built. Serialization is re-specified as ComponentRegistry round-trip tests (M2). |
-| Thread-per-subsystem runtime | core/Engine.cpp:116-243 | open (M1a) | Replaced by one paced loop in the reference; by the owner-thread design in the engine |
-| EventBus / TaskScheduler | core/util/EventBus.*, TaskScheduler.* | open (M1a) | No callers; removed from the reference |
+| Thread-per-subsystem runtime | core/Engine.cpp:116-243 | open (M2, M5) | The reference runs one paced main-thread loop since M1a (Engine::run); the engine gets the owner-thread design |
+| EventBus / TaskScheduler / BoundedQueue | core/util/EventBus.*, TaskScheduler.*, BoundedQueue.hpp | deleted (M1a) | Two idle TaskScheduler threads with no callers (only ApplicationContext held an EventBus) |
+| Wall-clock effect and cooldown timing | core/system/EventSystem.cpp:95,100,135,144; core/component/UpdateEntity*.cpp | re-specified (M1a) | Ticks of LegacySimTime (120 Hz); authored milliseconds convert with msToTicks = ceil(ms * rate / 1000); the editor edits cooldowns in ticks |
 | Effect model INSTANT / OVERTIME / TEMPTIMED | core/system/EventSystem.cpp:54-176 | open (M1b, M3) | Rules R1, R7 |
 | Per-source collision cooldown | core/component/UpdateEntityPolling.cpp:18-24 | open (M1b, M3) | Rule R2: per (source, receiver) pair |
 | Self and same-team contact skips | core/system/CollisionSystem.cpp:78-87 | open (M3) | Characterization test |

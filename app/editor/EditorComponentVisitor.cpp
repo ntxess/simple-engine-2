@@ -1,5 +1,8 @@
 #include "EditorComponentVisitor.hpp"
 
+#include <algorithm>
+#include <cstdint>
+
 void EditorComponentVisitor::visit(Effects* effects, entt::entity entityID)
 {
     // Implemented in the EffectsList visitor
@@ -370,9 +373,9 @@ void EditorComponentVisitor::visit(UpdateEntityEvent* updateEntityEvent, entt::e
     ImGui::PushItemWidth((ImGui::GetWindowWidth() / 4.f) - 25.f);
 
     ImGui::Text("I-Frame duration");
-    int maxDuration = static_cast<int>(updateEntityEvent->maxDuration.count());
-    if (ImGui::InputInt(("Sec##EventDurInput" + ID).c_str(), &maxDuration))
-        updateEntityEvent->maxDuration = std::chrono::milliseconds(maxDuration);
+    int cooldownTicks = static_cast<int>(updateEntityEvent->cooldownTicks);
+    if (ImGui::InputInt(("Ticks##EventDurInput" + ID).c_str(), &cooldownTicks))
+        updateEntityEvent->cooldownTicks = static_cast<std::uint64_t>(std::max(cooldownTicks, 0));
 
     ImGui::PopItemWidth();
 
@@ -388,9 +391,9 @@ void EditorComponentVisitor::visit(UpdateEntityPolling* updateEntityPolling, ent
     ImGui::PushItemWidth((ImGui::GetWindowWidth() / 4.f) - 25.f);
 
     ImGui::Text("I-Frame duration");
-    int maxDuration = static_cast<int>(updateEntityPolling->maxDuration.count());
-    if (ImGui::InputInt(("Sec##PollDurInput" + ID).c_str(), &maxDuration))
-        updateEntityPolling->maxDuration = std::chrono::milliseconds(maxDuration);
+    int cooldownTicks = static_cast<int>(updateEntityPolling->cooldownTicks);
+    if (ImGui::InputInt(("Ticks##PollDurInput" + ID).c_str(), &cooldownTicks))
+        updateEntityPolling->cooldownTicks = static_cast<std::uint64_t>(std::max(cooldownTicks, 0));
 
     ImGui::PopItemWidth();
 

@@ -1,13 +1,13 @@
 #include "UpdateEntityPolling.hpp"
 
 UpdateEntityPolling::UpdateEntityPolling()
-    : timeStart{std::chrono::steady_clock::now()}
-    , maxDuration{0}
+    : startTick{0}
+    , cooldownTicks{0}
 {}
 
-UpdateEntityPolling::UpdateEntityPolling(std::chrono::milliseconds duration, bool readyOnStart)
-    : timeStart{std::chrono::steady_clock::now()}
-    , maxDuration{duration}
+UpdateEntityPolling::UpdateEntityPolling(std::uint64_t cooldown, bool readyOnStart, std::uint64_t nowTick)
+    : startTick{nowTick}
+    , cooldownTicks{cooldown}
 {}
 
 void UpdateEntityPolling::accept(IComponentVisitor* visitor, entt::entity entityID)
@@ -15,10 +15,10 @@ void UpdateEntityPolling::accept(IComponentVisitor* visitor, entt::entity entity
     visitor->visit(this, entityID);
 }
 
-bool UpdateEntityPolling::isReady()
+bool UpdateEntityPolling::isReady(std::uint64_t nowTick)
 {
-    const auto currDuration = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - timeStart);
-    if (currDuration <= maxDuration) return false;
-    timeStart = std::chrono::steady_clock::now();
+    const std::uint64_t elapsed = nowTick > startTick ? nowTick - startTick : 0;
+    if (elapsed <= cooldownTicks) return false;
+    startTick = nowTick;
     return true;
 }

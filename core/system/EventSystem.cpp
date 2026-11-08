@@ -2,9 +2,10 @@
 
 #include "util/Logger.hpp"
 
-EventSystem::EventSystem(entt::registry& piplineReg, std::chrono::milliseconds watchdogTime)
+EventSystem::EventSystem(entt::registry& piplineReg, const LegacySimTime& simTime, std::uint64_t watchdogTicks)
     : m_piplineReg{piplineReg}
-    , m_eventWatchdogTime{watchdogTime}
+    , m_simTime{simTime}
+    , m_eventWatchdogTicks{watchdogTicks}
 {}
 
 constexpr std::string_view EventSystem::name() const
@@ -92,13 +93,17 @@ EventSystem::EventStatus EventSystem::instantEvent(StatusModEvent& statusModEven
 
 EventSystem::EventStatus EventSystem::overTimeEvent(StatusModEvent& statusModEvent, EntityStatus& receiverStatus) const
 {
-    const auto currDuration = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - statusModEvent.timeStart);
+    // Durations are authored in milliseconds and compared in ticks (msToTicks rounds up).
+    const std::uint64_t nowTick = m_simTime.tick;
+    const std::uint64_t currTicks = nowTick - statusModEvent.lastApplyTick;
+    const std::uint64_t intervalTicks = msToTicks(statusModEvent.effect->tickRate.count(), m_simTime.rate);
+    const std::uint64_t durationTicks = msToTicks(statusModEvent.effect->maxDuration.count(), m_simTime.rate);
 
     // TickRate controls the rate at which the effects applies its modification to the receivers stats
-    if (currDuration > statusModEvent.effect->tickRate)
+    if (currTicks > intervalTicks)
     {
-        statusModEvent.timeStart = std::chrono::steady_clock::now();
-        statusModEvent.timeElapsed += currDuration;
+        statusModEvent.lastApplyTick = nowTick;
+        statusModEvent.elapsedTicks += currTicks;
 
         const auto it = receiverStatus.values.find(statusModEvent.effect->targetStat);
         if (it != receiverStatus.values.end())
@@ -112,7 +117,7 @@ EventSystem::EventStatus EventSystem::overTimeEvent(StatusModEvent& statusModEve
         }
     }
 
-    if (m_eventWatchdogTime < currDuration || statusModEvent.timeElapsed >= statusModEvent.effect->maxDuration)
+    if (m_eventWatchdogTicks < currTicks || statusModEvent.elapsedTicks >= durationTicks)
     {
         const auto it = receiverStatus.values.find(statusModEvent.effect->targetStat);
         if (it != receiverStatus.values.end())
@@ -121,7 +126,7 @@ EventSystem::EventStatus EventSystem::overTimeEvent(StatusModEvent& statusModEve
                 << "Completed over-time event. \"" << statusModEvent.effect->targetStat
                 << "\" stat of entity [" << static_cast<unsigned int>(statusModEvent.receiverID)
                 << "] is " << it->second
-                << ". Time elapsed: " << statusModEvent.timeElapsed.count() << " >= " << statusModEvent.effect->maxDuration.count();
+                << ". Ticks elapsed: " << statusModEvent.elapsedTicks << " >= " << durationTicks;
         }
 
         return EventStatus::COMPLETE;
@@ -132,17 +137,19 @@ EventSystem::EventStatus EventSystem::overTimeEvent(StatusModEvent& statusModEve
 
 EventSystem::EventStatus EventSystem::tempTimedEvent(StatusModEvent& statusModEvent, EntityStatus& receiverStatus) const
 {
-    const auto currDuration = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - statusModEvent.timeStart);
+    const std::uint64_t nowTick = m_simTime.tick;
+    const std::uint64_t currTicks = nowTick - statusModEvent.lastApplyTick;
+    const std::uint64_t durationTicks = msToTicks(statusModEvent.effect->maxDuration.count(), m_simTime.rate);
 
     // If event some how lasts longer than it should, consider it complete and prep for destroy
-    if (m_eventWatchdogTime < currDuration)
+    if (m_eventWatchdogTicks < currTicks)
         return EventStatus::COMPLETE;
 
-    // Only modify the receiverStatus once in this type of event. We can use the timeElapsed variable as a bool to prevent reaccessing this logic
-    if (statusModEvent.timeElapsed == std::chrono::milliseconds(0))
+    // Only modify the receiverStatus once in this type of event. We can use the elapsedTicks variable as a bool to prevent reaccessing this logic
+    if (statusModEvent.elapsedTicks == 0)
     {
-        statusModEvent.timeStart = std::chrono::steady_clock::now();
-        statusModEvent.timeElapsed += std::chrono::milliseconds(1); // Disable this logic block with this variable
+        statusModEvent.lastApplyTick = nowTick;
+        statusModEvent.elapsedTicks += 1; // Disable this logic block with this variable
 
         const auto it = receiverStatus.values.find(statusModEvent.effect->targetStat);
         if (it != receiverStatus.values.end())
@@ -156,7 +163,7 @@ EventSystem::EventStatus EventSystem::tempTimedEvent(StatusModEvent& statusModEv
         }
     }
 
-    if (currDuration >= statusModEvent.effect->maxDuration)
+    if (currTicks >= durationTicks)
     {
         const auto it = receiverStatus.values.find(statusModEvent.effect->targetStat);
         if (it != receiverStatus.values.end())
