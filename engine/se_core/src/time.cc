@@ -12,6 +12,8 @@
 #include <limits>
 #include <vector>
 
+#include "se_core/assert.h"
+
 namespace se {
 namespace {
 
@@ -145,14 +147,25 @@ StepPlan FixedStepper::Plan(const FrameClock& clock, const FrameCosts& costs,
   }
   const double frame_sec = static_cast<double>(delta_ns) / kNsPerSec;
 
-  UpdateOverload(k_95 < plan.k_rt, frame_sec, clock.modal);
+  // The Overloaded timers count running time only: a pause neither enters
+  // nor leaves Overloaded, and both conditions start over after it.
+  if (running) {
+    UpdateOverload(k_95 < plan.k_rt, frame_sec, clock.modal);
+  } else {
+    below_rt_sec_ = 0.0;
+    clean_sec_ = 0.0;
+  }
+  // No frame runs more than kMaxStepsPerFrame ticks (StepPlan has that many
+  // windows). Below 15 Hz k_rt exceeds it, and debt or dilation takes the
+  // rest.
+  const int k_rt_capped = std::min(plan.k_rt, kMaxStepsPerFrame);
   if (overloaded_) {
-    plan.k_max = std::clamp(k_95, editor_play ? 0 : 1, plan.k_rt);
+    plan.k_max = std::clamp(k_95, editor_play ? 0 : 1, k_rt_capped);
   } else {
     plan.k_max = std::clamp(std::max(plan.k_rt, k_hi), 1,
                             std::min(kMaxStepsPerFrame, plan.k_rt + 1));
     if (!gpu_known && clock.gpu_fence_pending_at_start) {
-      plan.k_max = std::min(plan.k_rt, kMaxStepsPerFrame);
+      plan.k_max = k_rt_capped;
     }
   }
   plan.overloaded = overloaded_;
@@ -215,8 +228,12 @@ StepPlan FixedStepper::Plan(const FrameClock& clock, const FrameCosts& costs,
       fraction_units = acc_units_ % kUnitsPerTick;
     }
 
-    steps = std::min<std::uint64_t>(
-        due, static_cast<std::uint64_t>(std::max(0, plan.k_max)));
+    SE_ASSERT_MSG(plan.k_max >= 0 && plan.k_max <= kMaxStepsPerFrame,
+                  "k_max outside [0, kMaxStepsPerFrame]");
+    // Clamped again so that no build can write past tick_window_end_ns.
+    steps =
+        std::min<std::uint64_t>(due, static_cast<std::uint64_t>(std::clamp(
+                                         plan.k_max, 0, kMaxStepsPerFrame)));
     debt = due - steps;
 
     // Debt the spare rate cannot repay within 0.25 s becomes dilation.

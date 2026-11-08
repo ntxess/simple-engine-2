@@ -21,9 +21,11 @@
 // Cap. k_rt = k in Locked (ADR-008), ceil(T/dt) in Free.
 //   k_hi = floor((T - R_hi - g_hi - m) / S_hi), k_95 likewise with p95.
 //   Normal:     k_max = clamp(max(k_rt, k_hi), 1, min(8, k_rt + 1)).
-//   Overloaded: k_max = clamp(k_95, editor_play ? 0 : 1, k_rt).
+//   Overloaded: k_max = clamp(k_95, editor_play ? 0 : 1, min(8, k_rt)).
 //   Normal with g unknown and the previous fence pending at frame start:
-//   k_max = k_rt.
+//   k_max = min(8, k_rt).
+//   So k_max <= kMaxStepsPerFrame (8) always; below 15 Hz k_rt exceeds it
+//   and the ticks a frame cannot run become debt or dilation.
 //   steps = min(due, k_max). Locked due = k * elapsed intervals + debt.
 //   Free due = accumulator / dt, frame deltas snapped to multiples of T
 //   within max(1.0 ms, timer p99 + 0.1 ms).
@@ -38,7 +40,8 @@
 //
 // Overloaded. Entered after 2 consecutive missed presents with debt, or
 // k_95 < k_rt for 1 s; never while Modal. Left after 1 s with no miss and
-// k_95 >= k_rt.
+// k_95 >= k_rt. Both seconds count running time only: a paused frame keeps
+// the state and restarts both.
 //
 // Budget. B = min(T, steps * S_hi + R_hi + g_hi + m) + miss offset, where
 // each miss adds 1 ms to the offset and it decays by 0.05 ms per frame. The

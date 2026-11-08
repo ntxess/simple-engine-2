@@ -5,8 +5,10 @@
 // dilation, Overloaded, stalls, PlanNext, and the three stepper scenarios of
 // the M2 exit run through tests/support/virtual_display.h.
 
+#include <algorithm>
 #include <catch2/catch_test_macros.hpp>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <utility>
@@ -485,6 +487,127 @@ TEST_CASE("Editor Play floors Overloaded at 0 ticks", "[stepper]") {
     CHECK(plan.steps == (editor ? 0 : 1));
     // The simulation dilates; no tick is skipped.
     REQUIRE(stepper.Stats().dilated_ticks > 0);
+  }
+}
+
+// Below 15 Hz k_rt exceeds kMaxStepsPerFrame (12 at 10 Hz). Every mode
+// must still cap the frame at 8 ticks, because StepPlan holds 8 windows.
+TEST_CASE("Frames below 15 Hz never plan more than kMaxStepsPerFrame ticks",
+          "[stepper]") {
+  enum class Mode { kNormal, kFencePending, kOverloaded };
+  // At 10 Hz: k_95 = floor((100 - 1 - 1.5) / 9) = 10, between 8 and k_rt.
+  FrameCosts slow_ticks;
+  slow_ticks.tick_hi = 9e-3;
+  slow_ticks.non_tick_hi = 1e-3;
+  slow_ticks.gpu_hi = 0.0;
+  slow_ticks.tick_95 = 9e-3;
+  slow_ticks.non_tick_95 = 1e-3;
+  slow_ticks.gpu_95 = 0.0;
+  FrameCosts unknown_gpu = LightCosts();
+  unknown_gpu.gpu_hi = std::numeric_limits<double>::quiet_NaN();
+  unknown_gpu.gpu_95 = std::numeric_limits<double>::quiet_NaN();
+  for (const double hz : {10.0, 11.0, 12.0, 13.0, 14.0, 15.0}) {
+    for (const Mode mode :
+         {Mode::kNormal, Mode::kFencePending, Mode::kOverloaded}) {
+      INFO("hz = " << hz << ", mode = " << static_cast<int>(mode));
+      FixedStepper stepper;
+      const FrameCosts costs = mode == Mode::kOverloaded     ? slow_ticks
+                               : mode == Mode::kFencePending ? unknown_gpu
+                                                             : LightCosts();
+      int max_steps = 0;
+      int max_k_max = 0;
+      for (std::uint64_t frame = 0; frame < 60; ++frame) {
+        FrameClock clock = IdealFrame(hz, frame);
+        clock.gpu_fence_pending_at_start = mode == Mode::kFencePending;
+        const StepPlan plan = stepper.Plan(clock, costs, true, false, false);
+        REQUIRE(plan.steps >= 0);
+        REQUIRE(plan.steps <= kMaxStepsPerFrame);
+        REQUIRE(plan.k_max <= kMaxStepsPerFrame);
+        // The windows end inside the frame, in order.
+        for (int i = 1; i < plan.steps; ++i) {
+          const auto at = static_cast<std::size_t>(i);
+          REQUIRE(plan.tick_window_end_ns[at - 1] <=
+                  plan.tick_window_end_ns[at]);
+        }
+        if (plan.steps > 0) {
+          const auto last = static_cast<std::size_t>(plan.steps - 1);
+          REQUIRE(plan.tick_window_end_ns[last] <= clock.frame_start_ns);
+        }
+        max_steps = std::max(max_steps, plan.steps);
+        max_k_max = std::max(max_k_max, plan.k_max);
+      }
+      CHECK(stepper.Overloaded() == (mode == Mode::kOverloaded));
+      // The cap binds (more than 8 ticks are due every frame) and the rest
+      // is dilation, never a skipped tick.
+      if (hz <= 13.0) {
+        CHECK(max_steps == kMaxStepsPerFrame);
+        CHECK(max_k_max == kMaxStepsPerFrame);
+        REQUIRE(stepper.Stats().dilated_ticks > 0);
+      }
+    }
+  }
+}
+
+TEST_CASE("Paused frames neither enter nor leave Overloaded", "[stepper]") {
+  SECTION("k_95 below k_rt while paused does not count") {
+    FixedStepper stepper;
+    std::uint64_t frame = 0;
+    for (; frame < 120; ++frame) {
+      static_cast<void>(stepper.Plan(IdealFrame(60.0, frame), HeavyCosts(),
+                                     false, false, false));
+    }
+    CHECK_FALSE(stepper.Overloaded());
+    // A second of running time is needed after the pause.
+    for (int i = 0; i < 59; ++i) {
+      static_cast<void>(stepper.Plan(IdealFrame(60.0, frame++), HeavyCosts(),
+                                     true, false, false));
+    }
+    CHECK_FALSE(stepper.Overloaded());
+    for (int i = 0; i < 3; ++i) {
+      static_cast<void>(stepper.Plan(IdealFrame(60.0, frame++), HeavyCosts(),
+                                     true, false, false));
+    }
+    CHECK(stepper.Overloaded());
+  }
+  SECTION("A pause restarts the 1 s below k_rt") {
+    FixedStepper stepper;
+    std::uint64_t frame = 0;
+    for (int i = 0; i < 40; ++i) {
+      static_cast<void>(stepper.Plan(IdealFrame(60.0, frame++), HeavyCosts(),
+                                     true, false, false));
+    }
+    static_cast<void>(stepper.Plan(IdealFrame(60.0, frame++), HeavyCosts(),
+                                   false, false, false));
+    for (int i = 0; i < 40; ++i) {
+      static_cast<void>(stepper.Plan(IdealFrame(60.0, frame++), HeavyCosts(),
+                                     true, false, false));
+    }
+    CHECK_FALSE(stepper.Overloaded());
+  }
+  SECTION("Clean paused frames do not leave Overloaded") {
+    FixedStepper stepper;
+    std::uint64_t frame = 0;
+    for (; frame < 62; ++frame) {
+      static_cast<void>(stepper.Plan(IdealFrame(60.0, frame), HeavyCosts(),
+                                     true, false, false));
+    }
+    REQUIRE(stepper.Overloaded());
+    for (int i = 0; i < 120; ++i) {
+      static_cast<void>(stepper.Plan(IdealFrame(60.0, frame++), LightCosts(),
+                                     false, false, false));
+    }
+    CHECK(stepper.Overloaded());
+    for (int i = 0; i < 59; ++i) {
+      static_cast<void>(stepper.Plan(IdealFrame(60.0, frame++), LightCosts(),
+                                     true, false, false));
+    }
+    CHECK(stepper.Overloaded());
+    for (int i = 0; i < 3; ++i) {
+      static_cast<void>(stepper.Plan(IdealFrame(60.0, frame++), LightCosts(),
+                                     true, false, false));
+    }
+    CHECK_FALSE(stepper.Overloaded());
+    REQUIRE(stepper.Stats().overload_exits == 1);
   }
 }
 
