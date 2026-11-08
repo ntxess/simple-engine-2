@@ -7,7 +7,7 @@ docs/implementation-plan.md, M3). Each scenario runs 3600 ticks at 120 Hz.
 | Scenario | Content |
 |---|---|
 | `stress` | 16 enemies from the editor's stress generator (seed 1, first press); the player sweeps the arena |
-| `effects` | Hand-written row of test entities: effect timing, watchdog, cooldowns (including a polled turret that is not ready on start: the player overlaps it from tick 613 and is first hit at tick 661), stationary receiver, friendly source, death, rotated collider, zero-length path segment, arena edge, and two kinds of source changing one stat by non-integer amounts in the same ticks (application order) |
+| `effects` | Hand-written row of test entities: effect timing, watchdog, cooldowns (including a polled turret that is not ready on start: the player overlaps it from tick 613 and is first hit at tick 661), stationary receiver, friendly source, death, rotated collider, zero-length path segment, arena edge, two kinds of source changing one stat by non-integer amounts in the same ticks (application order), and, out of every source's reach (SpawnIndex 13 to 15), a path that pushes its sprite into the bottom-left corner and ends beyond it, a repeating path with segments shorter than one tick's step whose last point is its first, and a repeating path whose points all coincide |
 | `patrol` | 20 enemies from the stress generator (seed 2, first press); diagonal moves, pauses and reversals |
 
 Files per scenario `NAME`:
