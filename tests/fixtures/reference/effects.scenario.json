@@ -1,7 +1,7 @@
 {
   "format": "se-legacy-scenario-v1",
   "name": "effects",
-  "description": "A row of test entities at y = 540 that the player walks along and back one lane lower. Covers: an OVERTIME interval that does not divide its duration, a TEMPTIMED longer than the event watchdog, the readyOnStart flag, a stationary receiver without a dirty flag, an enemy turret and a friendly source (same-team skip), deaths, a rotated collider, a zero-length path segment, a path along the arena edge, and two sources of different kinds (an escort moving with the player and a stationary charger) adding to the player's Charge stat in the same ticks; Charge starts at 1e7, where a float's spacing is 1, so adding 1.5 and 0.75 rounds differently in the two orders and the order of application shows in the result.",
+  "description": "A row of test entities at y = 540 that the player walks along and back one lane lower. Covers: an OVERTIME interval that does not divide its duration, a TEMPTIMED longer than the event watchdog, a polled enemy turret that is not ready on start (its 5.5 s cooldown runs from its creation, so the player, which overlaps it from tick 613, is first hit at tick 661 and not on contact), a stationary receiver without a dirty flag, a friendly source (same-team skip), deaths, a rotated collider, a zero-length path segment, a path along the arena edge, and two sources of different kinds (an escort moving with the player and a stationary charger) adding to the player's Charge stat in the same ticks; Charge starts at 1e7, where a float's spacing is 1, so adding 1.5 and 0.75 rounds differently in the two orders and the order of application shows in the result.",
   "eventWatchdogMs": 2000,
   "player": {
     "position": [300, 540],
@@ -21,7 +21,7 @@
      "path": [[700, 300], [700, 800]], "repeat": true, "moving": true},
     {"team": "ENEMY", "texture": "player", "position": [900, 540],
      "stats": {"HP": 100}, "moving": false,
-     "polling": {"cooldownMs": 1000, "readyOnStart": false},
+     "polling": {"cooldownMs": 5500, "readyOnStart": false},
      "effects": [
       {"type": "INSTANT", "stat": "HP", "value": -1, "durationMs": 0, "intervalMs": 0}
      ]},

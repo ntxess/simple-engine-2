@@ -58,6 +58,14 @@ so every source first waited one cooldown after creation.
 Goldens: all three changed (`stress` from tick 534, `effects` from tick 14,
 `patrol` from tick 1, where the player starts on an enemy).
 
+Coverage: `readyOnStart` set shows in `patrol`, where the player starts on an
+enemy and affects it at tick 1, before one cooldown has passed. Unset shows in
+`effects` since the M1 review, which gave its turret (created at tick 0) a
+cooldown of 5.5 s = 660 ticks that outlasts the first contact: the player
+overlaps it from tick 613 and is first hit at tick 661; with the flag set the
+hit would come at tick 613. That fixture change re-baselined `effects` from
+tick 613 for 48 ticks (the player's HP).
+
 ## R3 Every overlap is found
 
 Each tick, every source is tested against every candidate receiver, in
