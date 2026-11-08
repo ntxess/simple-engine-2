@@ -1,10 +1,11 @@
 {
   "format": "se-legacy-scenario-v1",
   "name": "effects",
-  "description": "A row of test entities at y = 540 that the player walks along and back one lane lower. Covers: an OVERTIME interval that does not divide its duration, a TEMPTIMED longer than the event watchdog, the readyOnStart flag, a stationary receiver without a dirty flag, an enemy turret and a friendly source (same-team skip), deaths, a rotated collider, a zero-length path segment and a path along the arena edge.",
+  "description": "A row of test entities at y = 540 that the player walks along and back one lane lower. Covers: an OVERTIME interval that does not divide its duration, a TEMPTIMED longer than the event watchdog, the readyOnStart flag, a stationary receiver without a dirty flag, an enemy turret and a friendly source (same-team skip), deaths, a rotated collider, a zero-length path segment, a path along the arena edge, and two sources of different kinds (an escort moving with the player and a stationary charger) changing the player's Charge stat by non-integer amounts in the same ticks, where the order of application shows in the float result.",
   "eventWatchdogMs": 2000,
   "player": {
     "position": [300, 540],
+    "stats": {"Charge": 1},
     "polling": {"cooldownMs": 500, "readyOnStart": true},
     "effects": [
       {"type": "INSTANT", "stat": "HP", "value": -10, "durationMs": 0, "intervalMs": 0},
@@ -45,6 +46,18 @@
      "path": [[1890, 100], [1890, 1000]], "repeat": true, "moving": true},
     {"team": "ENEMY", "texture": "player",
      "stats": {"HP": 60, "Speed": 0.1},
-     "path": [[1500, 760], [400, 760], [400, 700]], "repeat": false, "moving": true}
+     "path": [[1500, 760], [400, 760], [400, 700]], "repeat": false, "moving": true},
+    {"team": "ENEMY", "texture": "player",
+     "stats": {"HP": 10000, "Speed": 0.12},
+     "path": [[240, 540], [1840, 540]], "repeat": false, "moving": true,
+     "effects": [
+      {"type": "INSTANT", "stat": "Charge", "value": 0.7, "durationMs": 0, "intervalMs": 0}
+     ]},
+    {"team": "ENEMY", "texture": "player", "position": [420, 540],
+     "stats": {"HP": 10000}, "moving": false,
+     "polling": {"cooldownMs": 0, "readyOnStart": true},
+     "effects": [
+      {"type": "INSTANT", "stat": "Charge", "value": 0.6, "durationMs": 0, "intervalMs": 0}
+     ]}
   ]
 }

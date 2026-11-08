@@ -7,7 +7,7 @@ docs/implementation-plan.md, M3). Each scenario runs 3600 ticks at 120 Hz.
 | Scenario | Content |
 |---|---|
 | `stress` | 16 enemies from the editor's stress generator (seed 1, first press); the player sweeps the arena |
-| `effects` | Hand-written row of test entities: effect timing, watchdog, cooldowns, stationary receiver, friendly source, death, rotated collider, zero-length path segment, arena edge |
+| `effects` | Hand-written row of test entities: effect timing, watchdog, cooldowns, stationary receiver, friendly source, death, rotated collider, zero-length path segment, arena edge, and two kinds of source changing one stat by non-integer amounts in the same ticks (application order) |
 | `patrol` | 20 enemies from the stress generator (seed 2, first press); diagonal moves, pauses and reversals |
 
 Files per scenario `NAME`:
