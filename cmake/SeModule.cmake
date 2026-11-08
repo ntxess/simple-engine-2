@@ -3,6 +3,10 @@
 #   [PUBLIC_DEPS <target>...] [PRIVATE_DEPS <target>...]
 #   [FORBID <target>...]          targets that must never be in the link
 #                                 closure (checked by se_check_link_graph)
+#   [ALLOW_ONLY <target>...]      the only targets the module may link
+#                                 directly (besides se_warnings and
+#                                 se_determinism); its closure may reach
+#                                 nothing outside theirs (se_check_link_graph)
 #   [BANNED_INCLUDES <regex>...]  include paths the module may not use
 #                                 (checked by tools/checks/check_includes.py)
 #   [DETERMINISTIC]               simulation code: determinism flags, and the
@@ -18,7 +22,7 @@ set_property(GLOBAL PROPERTY SE_CHECK_ENTRIES "")
 
 function(se_add_module name)
   cmake_parse_arguments(PARSE_ARGV 1 arg "DETERMINISTIC;TEST" "KIND"
-    "SOURCES;PUBLIC_DEPS;PRIVATE_DEPS;FORBID;BANNED_INCLUDES")
+    "SOURCES;PUBLIC_DEPS;PRIVATE_DEPS;FORBID;ALLOW_ONLY;BANNED_INCLUDES")
   if(arg_KIND STREQUAL "STATIC")
     add_library(${name} STATIC ${arg_SOURCES})
     set(_scope PUBLIC)
@@ -56,6 +60,7 @@ function(se_add_module name)
   endif()
 
   set_property(TARGET ${name} PROPERTY SE_FORBID "${arg_FORBID}")
+  set_property(TARGET ${name} PROPERTY SE_ALLOW_ONLY "${arg_ALLOW_ONLY}")
   set_property(GLOBAL APPEND PROPERTY SE_MODULES ${name})
 
   set(_det false)
