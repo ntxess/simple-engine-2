@@ -1,7 +1,10 @@
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 #include <SFML/Graphics/RenderTexture.hpp>
 #include <SFML/System/Vector2.hpp>
@@ -34,4 +37,5 @@ private:
 	entt::registry& m_piplineReg;
     const LegacySimTime& m_simTime;
     std::unique_ptr<QuadTree> m_quadTree;
+    std::vector<std::pair<std::uint32_t, entt::entity>> m_candidates; // Receivers of this tick, by SpawnIndex
 };

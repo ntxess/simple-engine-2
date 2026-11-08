@@ -52,3 +52,21 @@ so every source first waited one cooldown after creation.
 
 Goldens: all three changed (`stress` from tick 534, `effects` from tick 14,
 `patrol` from tick 1, where the player starts on an enemy).
+
+## R3 Every overlap is found
+
+Each tick, every source is tested against every candidate receiver, in
+SpawnIndex order: all entities with a SpawnIndex, Sprite and TeamTag. A pair
+overlaps when the two colliders intersect with positive area (touching edges do
+not count).
+
+Before: candidates came from QuadTree::queryRange (core/util/QuadTree.cpp:124),
+which held only entities flagged as moved (UpdateEntityEvent) or polled
+(UpdateEntityPolling) whose position lay inside the arena (QuadTree.cpp:12), and
+visited only nodes whose bounds met the query range, so it missed stationary
+receivers, entities outside the arena and colliders that reached into a node
+from a neighbouring one. The quadtree is still rebuilt for the editor's
+visualizer but no longer decides contacts.
+
+Goldens: `effects` changed from tick 213 (the stationary receiver at x = 500 is
+now hit), `patrol` from tick 1505 (111 ticks differ); `stress` unchanged.

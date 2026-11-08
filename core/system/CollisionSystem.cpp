@@ -1,5 +1,7 @@
 #include "CollisionSystem.hpp"
 
+#include <algorithm>
+
 #include "util/Logger.hpp"
 
 CollisionSystem::CollisionSystem(entt::registry& piplineReg, const LegacySimTime& simTime, const sf::Vector2f& center, const sf::Vector2u& size)
@@ -23,7 +25,7 @@ void CollisionSystem::update(entt::registry& entityReg, const float& dt)
 {
     LOG_TRACE(Logger::get()) << "Entering CollisionSystem::update()";
 
-    quadTreeUpdate(entityReg);  // Rebuild the quadtree for querying collisions
+    quadTreeUpdate(entityReg);  // Rebuild the quadtree (drawn by the editor's visualizer only)
     collisionUpdate(entityReg); // Find and mark all collided entity with a tag
 
     LOG_TRACE(Logger::get()) << "Leaving CollisionSystem::update()";
@@ -56,6 +58,16 @@ void CollisionSystem::collisionUpdate(entt::registry& entityReg)
         polling.forgetExpired(m_simTime.tick);
     }
 
+    // Rule R3: every overlap is found by testing all candidates, in SpawnIndex order, instead of
+    // querying the quadtree (which missed entities it never held or held in a node the range missed).
+    m_candidates.clear();
+    const auto& candidateView = entityReg.view<SpawnIndex, Sprite, TeamTag>();
+    for (const auto& entityID : candidateView)
+    {
+        m_candidates.emplace_back(candidateView.get<SpawnIndex>(entityID).value, entityID);
+    }
+    std::sort(m_candidates.begin(), m_candidates.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+
     // Event-driven collision update
     const auto& eventView = entityReg.view<Sprite, TeamTag, EffectsList, UpdateEntityEvent>();
     for (const auto& sourceID : eventView)
@@ -76,12 +88,14 @@ void CollisionSystem::collisionUpdate(entt::registry& entityReg)
 
 void CollisionSystem::collisionUpdateImpl(entt::registry& entityReg, const entt::entity sourceID)
 {
-    // Query all neighboring entity for collision
-    const sf::FloatRect& sourceHitbox = entityReg.get<Sprite>(sourceID).getGlobalBounds();
-    std::vector<entt::entity> receiverList = m_quadTree->queryRange(entityReg, sourceHitbox);
+    // Test every candidate for collision (rule R3)
+    const sf::FloatRect sourceHitbox = entityReg.get<Sprite>(sourceID).getGlobalBounds();
 
-    for (const auto& receiverID : receiverList)
+    for (const auto& [receiverIndex, receiverID] : m_candidates)
     {
+        if (!sourceHitbox.findIntersection(entityReg.get<Sprite>(receiverID).getGlobalBounds()).has_value())
+            continue;
+
         if (sourceID == receiverID)
         {
             LOG_TRACE(Logger::get()) << "Entity [" << static_cast<unsigned int>(sourceID) << "] collided with self";
