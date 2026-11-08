@@ -6,8 +6,9 @@ and assets/ relative to the working directory.
 
 usage:
   legacy_test.py selfdet --exe EXE --scenario DIR/NAME --work DIR [--ticks N]
-      Two unpaced runs and runs at --fps 30, 60, 144 and 160 must give the same
-      projection run hash.
+      Two unpaced runs and runs at --fps 10, 30, 60, 144 and 160 must give the
+      same projection run hash, and each run must render the number of frames
+      its pacing implies (one tick per frame unpaced; at most 8 per frame).
   legacy_test.py live-replay --exe EXE --scenario DIR/NAME --work DIR
                  [--ticks N] [--fps HZ]
       A paced run in a visible window records its keyboard input; replaying
@@ -34,11 +35,16 @@ import pathlib
 import subprocess
 import sys
 
-SELFDET_FPS = (30, 60, 144, 160)
+# 30/60/144/160 from docs/milestone-specs.md (M1a exit); at 10 Hz, 12 ticks are
+# due per frame, so every frame hits the cap of MAX_STEPS ticks and the
+# accumulator the 0.25 s clamp (Engine::maxStepsPerFrame,
+# Engine::maxAccumulatedMicroseconds).
+SELFDET_FPS = (10, 30, 60, 144, 160)
+MAX_STEPS = 8
 
 
 def run_replay(exe, args, work, label):
-    """Runs legacy_replay; returns (ticks, run_hash, projection_path)."""
+    """Runs legacy_replay; returns (ticks, run_hash, projection_path, frames)."""
     work.mkdir(parents=True, exist_ok=True)
     projection = work / f"{label}.seproj"
     cmd = [str(pathlib.Path(exe).resolve()), *map(str, args),
@@ -54,9 +60,10 @@ def run_replay(exe, args, work, label):
     for line in result.stdout.splitlines():
         key, _, value = line.partition(" ")
         values[key] = value.strip()
-    if "projection-hash" not in values or "ticks" not in values:
+    if not {"projection-hash", "ticks", "frames"} <= values.keys():
         sys.exit(f"FAIL: {label}: no projection hash in output\n{result.stdout}")
-    return int(values["ticks"]), values["projection-hash"], projection
+    return (int(values["ticks"]), values["projection-hash"], projection,
+            int(values["frames"]))
 
 
 def read_blocks(path):
@@ -101,25 +108,57 @@ def scenario_args(scenario):
             "--inputs", f"{scenario}.seinput"]
 
 
+def projection_rate(path):
+    """The tick rate from a .seproj header ("# seproj v1 rate=120")."""
+    with open(path, encoding="ascii") as f:
+        header = f.readline().split()
+    return int(next(field for field in header
+                    if field.startswith("rate="))[len("rate="):])
+
+
+def expected_frames(ticks, fps, rate):
+    """Frames a headless run renders for `ticks` ticks (core/Engine.cpp,
+    runHeadless). Unpaced, one tick per frame. With the synthetic clock at
+    fps Hz, rate/fps ticks are due per frame; while that is below the cap,
+    tick n runs in frame ceil(n * fps / rate). From rate/fps >= 8 every frame
+    runs exactly MAX_STEPS ticks and the backlog sits at the 0.25 s clamp."""
+    if fps == 0:
+        return ticks
+    if rate >= MAX_STEPS * fps:
+        return -(-ticks // MAX_STEPS)
+    return -(-ticks * fps // rate)
+
+
 def cmd_selfdet(args):
     base_args = scenario_args(args.scenario)
     if args.ticks:
         base_args += ["--ticks", args.ticks]
     work = pathlib.Path(args.work)
-    ticks, expected, baseline = run_replay(args.exe, base_args, work, "unpaced")
-    runs = [("repeat", [])] + [(f"fps{fps}", ["--fps", fps])
-                               for fps in SELFDET_FPS]
+    ticks, expected, baseline, frames = run_replay(
+        args.exe, base_args, work, "unpaced")
+    rate = projection_rate(baseline)
+    runs = [("unpaced", 0, None), ("repeat", 0, [])]
+    runs += [(f"fps{fps}", fps, ["--fps", fps]) for fps in SELFDET_FPS]
     failed = False
-    for label, extra in runs:
-        run_ticks, digest, projection = run_replay(
-            args.exe, base_args + extra, work, label)
+    for label, fps, extra in runs:
+        if extra is not None:
+            run_ticks, digest, projection, frames = run_replay(
+                args.exe, base_args + extra, work, label)
+        else:
+            run_ticks, digest, projection = ticks, expected, baseline
+        want_frames = expected_frames(run_ticks, fps, rate)
         if run_ticks != ticks or digest != expected:
             failed = True
             print(f"FAIL: {label}: {run_ticks} ticks, hash {digest}; "
                   f"unpaced: {ticks} ticks, hash {expected}")
             print(first_difference(baseline, projection))
+        elif frames != want_frames:
+            failed = True
+            print(f"FAIL: {label}: {frames} frames rendered for {run_ticks} "
+                  f"ticks at {rate} Hz; the pacing gives {want_frames}")
         else:
-            print(f"ok: {label}: {run_ticks} ticks, hash {digest}")
+            print(f"ok: {label}: {run_ticks} ticks in {frames} frames, "
+                  f"hash {digest}")
     return 1 if failed else 0
 
 
@@ -128,10 +167,10 @@ def cmd_live_replay(args):
     scenario = ["--scenario", f"{args.scenario}.scenario.json"]
     recording = work / "live.seinput"
     work.mkdir(parents=True, exist_ok=True)
-    ticks, live_hash, live = run_replay(
+    ticks, live_hash, live, _ = run_replay(
         args.exe, scenario + ["--live", "--fps", args.fps, "--ticks", args.ticks,
                               "--record", recording], work, "live")
-    replay_ticks, replay_hash, replay = run_replay(
+    replay_ticks, replay_hash, replay, _ = run_replay(
         args.exe, scenario + ["--inputs", recording, "--ticks", ticks],
         work, "replay")
     if replay_ticks != ticks or replay_hash != live_hash:
@@ -186,7 +225,7 @@ def cmd_record_replay(args):
                   "mask; the round trip would not cover it")
             return 1
     recording = work / "recorded.seinput"
-    ticks, recorded_hash, recorded = run_replay(
+    ticks, recorded_hash, recorded, _ = run_replay(
         args.exe, scenario_args(args.scenario) + ["--record", recording],
         work, "record")
     expected = expand_seinput(source, ticks)
@@ -200,7 +239,7 @@ def cmd_record_replay(args):
                       f"replayed input was {want} (tick, held, pressed, "
                       f"released); {recording}")
                 return 1
-    replay_ticks, replay_hash, replay = run_replay(
+    replay_ticks, replay_hash, replay, _ = run_replay(
         args.exe, scenario + ["--inputs", recording], work, "replay")
     if replay_ticks != ticks or replay_hash != recorded_hash:
         print(f"FAIL: recording run {ticks} ticks, hash {recorded_hash}; "
@@ -256,7 +295,7 @@ def cmd_reference(args):
     name = pathlib.Path(args.scenario).name
     golden = pathlib.Path(f"{args.scenario}.sehash")
     golden_projection = pathlib.Path(f"{args.scenario}.seproj.gz")
-    ticks, run_hash, projection = run_replay(
+    ticks, run_hash, projection, _ = run_replay(
         args.exe, scenario_args(args.scenario), work, name)
     blocks = read_blocks(projection)
     if args.update or os.environ.get("SE_UPDATE_GOLDENS") == "1":

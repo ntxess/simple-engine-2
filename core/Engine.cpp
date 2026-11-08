@@ -21,6 +21,7 @@ Engine::Engine(const std::string& relativeConfigPath, std::unique_ptr<IScene> in
     , m_ok{false}
     , m_projectionEnabled{false}
     , m_maxTicks{0}
+    , m_framesRendered{0}
 {
     LOG_INFO(Logger::get()) << "Initializing system. Reading main configuration file...";
 
@@ -93,6 +94,11 @@ std::uint64_t Engine::ticksRun() const
 std::uint64_t Engine::projectionHash() const
 {
     return m_projection.runHash();
+}
+
+std::uint64_t Engine::framesRendered() const
+{
+    return m_framesRendered;
 }
 
 /**
@@ -358,6 +364,7 @@ void Engine::renderFrame()
     m_appContext->window.clear();
     m_appContext->sceneManager.getActiveScene()->render();
     m_appContext->window.display();
+    ++m_framesRendered;
 }
 
 /**

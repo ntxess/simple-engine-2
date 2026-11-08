@@ -50,6 +50,8 @@ public:
     std::uint64_t ticksRun() const;
     // Run hash of the semantic projection (util/SemanticProjection.hpp), over ticks 0..ticksRun().
     std::uint64_t projectionHash() const;
+    // Frames rendered by run(); with the synthetic clock it shows the pacing (ticks due, 8-step cap).
+    std::uint64_t framesRendered() const;
 
 private:
     void readSimulationSettings();
@@ -71,6 +73,7 @@ private:
     bool m_ok;
     bool m_projectionEnabled;
     std::uint64_t m_maxTicks;
+    std::uint64_t m_framesRendered;
     LegacyInputSampler m_sampler;
     LegacyInputRecorder m_recorder;
     std::unique_ptr<LegacyInputReader> m_reader;

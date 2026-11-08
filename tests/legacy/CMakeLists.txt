@@ -6,7 +6,9 @@
 #
 #   legacy.selfdet.NAME        two runs and runs at --fps 30/60/144/160 give
 #                              the same projection hash (docs/milestone-specs.md,
-#                              M1a exit)
+#                              M1a exit), and so does --fps 10, where every
+#                              frame hits the 8-tick cap; each run renders the
+#                              number of frames its pacing implies
 #   legacy.selfdet.live_replay a paced run in a visible window, recorded, then
 #                              replayed headless, gives the same hash. Label
 #                              "desktop" too: it needs an interactive desktop,

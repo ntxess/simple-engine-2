@@ -42,7 +42,8 @@ namespace
             "sampled unless --inputs is given. --fps sets the frame rate: headless, a synthetic\n"
             "frame clock; live, the frame-rate limit. --generate adds N entities from the editor's\n"
             "seeded stress generator; --scenario-out writes the resulting scenario. Prints\n"
-            "\"ticks <n>\" and \"projection-hash <hex>\" (the run hash over ticks 0..n).\n");
+            "\"ticks <n>\", \"frames <rendered frames>\" and \"projection-hash <hex>\" (the run\n"
+            "hash over ticks 0..n).\n");
     }
 
     bool parseUnsigned(const char* text, std::uint64_t& out)
@@ -144,6 +145,7 @@ int main(int argc, char** argv)
 
     engine.run();
 
-    std::printf("ticks %" PRIu64 "\nprojection-hash %016" PRIx64 "\n", engine.ticksRun(), engine.projectionHash());
+    std::printf("ticks %" PRIu64 "\nframes %" PRIu64 "\nprojection-hash %016" PRIx64 "\n",
+        engine.ticksRun(), engine.framesRendered(), engine.projectionHash());
     return 0;
 }
