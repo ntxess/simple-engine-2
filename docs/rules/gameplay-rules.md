@@ -118,3 +118,22 @@ never collided).
 
 Goldens: `effects` changed from tick 1 (its path with a duplicated first
 waypoint now moves); `stress` and `patrol` unchanged.
+
+## R7 OVERTIME applies one interval after contact, floor(duration / interval) times
+
+An OVERTIME effect with interval `i` ms and duration `d` ms applies its value
+`floor(d / i)` times: first exactly `ticks(i)` ticks after the contact, then
+every `ticks(i)` ticks (the comparison is `>=` in ticks). It ends with its last
+application, or earlier when the event watchdog ends it. An interval of 0
+applies once per tick for `ticks(d)` ticks, starting one tick after the
+contact; a duration shorter than the interval applies nothing.
+
+Before: an application came on the first tick with *more* than `ticks(i)`
+ticks since the previous one (`>`, core/system/EventSystem.cpp:98), and the
+effect ended once the accumulated ticks reached `ticks(d)`, so a 250 ms
+interval over 1100 ms applied 5 times, 31 ticks apart, instead of 4 times,
+30 ticks apart; a 1000 ms interval over 5000 ms applied 5 times, 121 ticks
+apart, instead of 120.
+
+Goldens: all three changed (`stress` from tick 560, 75 ticks; `effects` from
+tick 44; `patrol` from tick 121, 61 ticks).

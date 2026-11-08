@@ -1,5 +1,7 @@
 #include "EventSystem.hpp"
 
+#include <algorithm>
+
 #include "util/Logger.hpp"
 
 EventSystem::EventSystem(entt::registry& piplineReg, const LegacySimTime& simTime, std::uint64_t watchdogTicks)
@@ -99,16 +101,24 @@ EventSystem::EventStatus EventSystem::instantEvent(StatusModEvent& statusModEven
 EventSystem::EventStatus EventSystem::overTimeEvent(StatusModEvent& statusModEvent, EntityStatus& receiverStatus) const
 {
     // Durations are authored in milliseconds and compared in ticks (msToTicks rounds up).
+    // Rule R7: the first application comes exactly one interval after the contact, the next ones one
+    // interval apart, floor(duration / interval) times in all. An interval of 0 applies once per tick,
+    // for ticks(duration) ticks.
     const std::uint64_t nowTick = m_simTime.tick;
     const std::uint64_t currTicks = nowTick - statusModEvent.lastApplyTick;
-    const std::uint64_t intervalTicks = msToTicks(statusModEvent.effect.tickRate.count(), m_simTime.rate);
-    const std::uint64_t durationTicks = msToTicks(statusModEvent.effect.maxDuration.count(), m_simTime.rate);
+    const std::int64_t intervalMs = statusModEvent.effect.tickRate.count();
+    const std::int64_t durationMs = statusModEvent.effect.maxDuration.count();
+    const std::uint64_t intervalTicks = std::max<std::uint64_t>(msToTicks(intervalMs, m_simTime.rate), 1);
+    const std::uint64_t totalApplications = intervalMs > 0
+        ? static_cast<std::uint64_t>(std::max<std::int64_t>(durationMs, 0) / intervalMs)
+        : msToTicks(durationMs, m_simTime.rate);
 
     // TickRate controls the rate at which the effects applies its modification to the receivers stats
-    if (currTicks > intervalTicks)
+    if (statusModEvent.applications < totalApplications && currTicks >= intervalTicks)
     {
         statusModEvent.lastApplyTick = nowTick;
         statusModEvent.elapsedTicks += currTicks;
+        ++statusModEvent.applications;
 
         const auto it = receiverStatus.values.find(statusModEvent.effect.targetStat);
         if (it != receiverStatus.values.end())
@@ -122,7 +132,7 @@ EventSystem::EventStatus EventSystem::overTimeEvent(StatusModEvent& statusModEve
         }
     }
 
-    if (m_eventWatchdogTicks < currTicks || statusModEvent.elapsedTicks >= durationTicks)
+    if (m_eventWatchdogTicks < currTicks || statusModEvent.applications >= totalApplications)
     {
         const auto it = receiverStatus.values.find(statusModEvent.effect.targetStat);
         if (it != receiverStatus.values.end())
@@ -131,7 +141,7 @@ EventSystem::EventStatus EventSystem::overTimeEvent(StatusModEvent& statusModEve
                 << "Completed over-time event. \"" << statusModEvent.effect.targetStat
                 << "\" stat of entity [" << static_cast<unsigned int>(statusModEvent.receiverID)
                 << "] is " << it->second
-                << ". Ticks elapsed: " << statusModEvent.elapsedTicks << " >= " << durationTicks;
+                << ". Applications: " << statusModEvent.applications << " of " << totalApplications;
         }
 
         return EventStatus::COMPLETE;
