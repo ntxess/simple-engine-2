@@ -27,6 +27,12 @@ The legacy tree (core/, app/) keeps its own style (ADR-005).
   (`dynamic_cast`, `typeid`), `using namespace`, non-explicit single-argument
   constructors, `long`/`short` instead of fixed-width integers.
 - `auto` only where the type is obvious or unutterable.
+- Accessors are PascalCase like other methods (`Owner()`, `SetOwner()`),
+  because clang-tidy's identifier rule allows no snake_case methods besides
+  the container names above (ADR-017).
+- Catch2 tests use `REQUIRE(x == literal)` where a comparison has a literal
+  operand: cpplint's `readability/check` rule is written for glog's `CHECK`
+  and suggests `CHECK_EQ`, which Catch2 does not have.
 
 ## Exceptions (ADR-006)
 

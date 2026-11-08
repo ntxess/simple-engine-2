@@ -117,3 +117,41 @@ the WSL TSan and ASan presets. Nothing is committed with a failing gate.
 
 **Decision.** `/Z7` (CMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded) in every
 configuration, so parallel Ninja builds never contend for a shared PDB.
+
+## ADR-014 Stable component ids in every serialized form (2026-11-08)
+
+**Decision.** Session logs, replays and world hashes identify a component by
+the 32-bit FNV-1a hash of its registered name (`ComponentInfo::name_id`),
+never by `entt::type_hash`, which is computed from the compiler's pretty
+function name and differs between MSVC and clang. EnTT storages stay keyed
+by `entt::type_hash` (`ComponentInfo::id`), so ForkSite read and write sets
+use that id. With this, MSVC and clang-cl produce bit-identical per-tick
+hashes (tests/golden/windows-msvc and windows-clangcl match).
+
+## ADR-015 Replays are BEVE written by a first-party subset writer (2026-11-08)
+
+**Decision.** Replay files are BEVE as specified, written and read by
+se_sim/beve.h, a writer and reader for the subset replays use (objects with
+string keys, strings, unsigned integers, u8 and u64 typed arrays). glaze
+stays confined to reflect_glaze.h and `*_components.cc` (ADR-010);
+tests/kernel/replay_test.cc proves glaze's `beve_to_json` reads the files.
+
+## ADR-016 FrameClock times come from the vblank grid (2026-11-08)
+
+**Decision.** The pacer reports a frame's start on the vblank grid (one
+presentation interval before its target vblank, from present statistics)
+and counts elapsed intervals between targets; the wall-clock wake time goes
+only into `FrameClock::real_delta`. With planned late latching, B changes
+from frame to frame, so wake-time deltas are not near multiples of T and
+Free cadence could not snap them; the stepper scenarios in
+tests/support/virtual_display model exactly this contract for M6.
+
+## ADR-017 Accessors are PascalCase (2026-11-08)
+
+**Decision.** clang-tidy's identifier rule (MethodCase CamelCase, only
+`begin`, `end`, `size`, `empty`, `data` and `swap` exempt) rejects Google's
+optional snake_case accessors, so the milestone spec's `owner()`,
+`set_owner()`, `stats()`, `applied()`, `worlds` and `sim_running` are
+written `Owner()`, `SetOwner()`, `Stats()`, `Applied()`, `Worlds()` and
+`SimRunning()`, and the spec's public `World::clock` member is
+`Clock()`/`MutableClock()` (Google style keeps class data private).

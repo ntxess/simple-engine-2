@@ -30,11 +30,14 @@ set(SE_GOLDEN_PLATFORM "${_se_golden_os}-${_se_golden_cc}")
 se_add_module(se_test_support KIND STATIC
   SOURCES
     support/golden.cc
+    support/kernel_session.cc
     support/kernel_test_components.cc
+    support/kernel_test_module.cc
     support/null_wake_main.cc
     support/virtual_display.cc
   PUBLIC_DEPS
     se_core
+    se_sim
   DETERMINISTIC
   TEST)
 target_include_directories(se_test_support PUBLIC
@@ -48,19 +51,24 @@ se_add_module(se_tests KIND EXECUTABLE
   SOURCES
     smoke/smoke_test.cc
     kernel/detmath_test.cc
+    kernel/determinism_test.cc
     kernel/fixed_stepper_test.cc
+    kernel/game_state_stack_test.cc
     kernel/guid_test.cc
     kernel/hash_test.cc
     kernel/log_test.cc
     kernel/parallel_view_test.cc
+    kernel/replay_test.cc
     kernel/rng_test.cc
     kernel/schedule_test.cc
     kernel/serialization_test.cc
+    kernel/session_log_test.cc
     kernel/sim_clock_test.cc
     kernel/thread_role_test.cc
     kernel/world_test.cc
   PRIVATE_DEPS
     se_core
+    se_sim
     se_test_support
     Catch2::Catch2WithMain
   DETERMINISTIC
