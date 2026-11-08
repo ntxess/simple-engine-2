@@ -159,3 +159,21 @@ float sums near the stat's precision.
 Goldens: `effects` changed from tick 133 for the 95 ticks where its escort and
 charger both add to the player's Charge (1e7 + 1.5 + 0.75 rounds differently
 in the two orders); `stress` and `patrol` unchanged.
+
+## R9 System order: Input, WayPoint, Boundary, Collision, Event, GameRules, Cleanup
+
+Every tick runs, in this order: Input (the player's movement commands from the
+tick's input frame), WayPoint (path following), Boundary (the clamp of every
+sprite to the scene bounds, part of movement), Collision (contacts from the
+positions after all movement), Event (pending effects, including the ones the
+contacts just created), GameRules (HP <= 0) and Cleanup (destruction). So an
+entity collides where it is at the end of the tick's movement, and a moved
+entity's dirty flag is consumed in the tick that set it.
+
+Before: Sandbox registered Collision, Event, WayPoint in that order
+(app/scene/Sandbox.cpp:90-92), so contacts used the previous tick's path
+positions and the current tick's player position, and the clamp ran last, at
+the end of update(), after the HP check (since M1a; in render() before that).
+
+Goldens: all three changed around contacts (`stress` from tick 439, 19 ticks;
+`effects` from tick 13; `patrol` from tick 119, 14 ticks).

@@ -98,9 +98,12 @@ void Sandbox::init()
         });
     m_reg.get<EffectsList>(m_player).effectsList.push_back({ EffectType::TEMPTIMED, Effects{"HP", -10.f, std::chrono::milliseconds(5000)} });
 
+    // Rule R9: Input (processInput) -> WayPoint -> Boundary -> Collision -> Event -> GameRules and
+    // Cleanup (the HP check in update()). The systems run in the order they are added.
+    m_system.addSystem<WayPointSystem>(true, "Speed");
+    m_system.addSystem<BoundarySystem>(true, m_bounds);
     m_system.addSystem<CollisionSystem>(true, m_collisionEventReg, m_appContext->simTime, sf::Vector2f{ 0.f, 0.f }, m_bounds);
     m_system.addSystem<EventSystem>(true, m_collisionEventReg, m_appContext->simTime, msToTicks(36000, tickRate));
-    m_system.addSystem<WayPointSystem>(true, "Speed");
 }
 
 void Sandbox::processEvent(const sf::Event& event)
@@ -145,14 +148,6 @@ void Sandbox::update()
             m_system.getSystem<CollisionSystem>()->remove(m_reg, entity);
             m_reg.destroy(entity);
         }
-    }
-
-    // Keep every sprite inside the scene bounds. This used to run in render(), so the number of
-    // rendered frames moved entities; it is simulation state and belongs to the tick.
-    const auto& spriteView = m_reg.view<Sprite>();
-    for (const auto& entity : spriteView)
-    {
-        checkBoundary(m_bounds, spriteView.get<Sprite>(entity));
     }
 
     LOG_TRACE(Logger::get()) << "Leaving update()";
@@ -222,20 +217,3 @@ entt::entity Sandbox::getPlayer() const
     return m_player;
 }
 
-void Sandbox::checkBoundary(const sf::Vector2u& boundary, sf::Sprite& obj)
-{
-    sf::Vector2f position = obj.getPosition();
-    sf::FloatRect rect = obj.getGlobalBounds();
-
-    if (position.x < 0)
-        obj.setPosition(sf::Vector2f(0.f, position.y));
-
-    if (position.x + (rect.size.x) > boundary.x)
-        obj.setPosition(sf::Vector2f(boundary.x - (rect.size.x), position.y));
-
-    if (position.y < 0)
-        obj.setPosition(sf::Vector2f(position.x, 0.f));
-
-    if (position.y + rect.size.y > boundary.y)
-        obj.setPosition(sf::Vector2f(position.x, boundary.y - (rect.size.y)));
-}

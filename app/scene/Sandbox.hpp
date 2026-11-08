@@ -39,9 +39,6 @@ public:
     entt::entity getPlayer() const;
 
 private:
-    void checkBoundary(const sf::Vector2u& boundary, sf::Sprite& obj);
-
-private:
     ApplicationContext* m_appContext;
     entt::entity m_player;
     sf::Vector2u m_bounds;
