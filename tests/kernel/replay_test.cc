@@ -1,16 +1,20 @@
 // Copyright 2026 The simple-engine-2 Authors.
 //
 // Replays: the BEVE file is real BEVE (glaze converts it to JSON), frames,
-// hashes and the SessionLog round-trip, and a recorded kernel session
-// replays to the same per-tick hashes at another frame rate.
+// hashes and the SessionLog round-trip, corrupt files are errors, and a
+// recorded kernel session replays to the same per-tick hashes at another
+// frame rate.
 
 #include "se_sim/replay.h"
 
 #include <catch2/catch_test_macros.hpp>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <glaze/beve/beve_to_json.hpp>
+#include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "se_core/detmath.h"
@@ -103,6 +107,103 @@ TEST_CASE("Replay files are BEVE that glaze reads", "[replay]") {
   CHECK_FALSE(ReplayReader::Open({}).has_value());
 }
 
+// Re-encodes a parsed BEVE value.
+void Emit(const beve::Value& value, beve::Writer& out) {
+  switch (value.kind) {
+    case beve::Kind::kString:
+      out.String(value.text);
+      break;
+    case beve::Kind::kUnsigned:
+      out.U64(value.number);
+      break;
+    case beve::Kind::kObject:
+      out.BeginObject(value.fields.size());
+      for (const beve::Field& field : value.fields) {
+        out.Key(field.key);
+        Emit(field.value, out);
+      }
+      break;
+    case beve::Kind::kU8Array:
+      out.Bytes(value.raw);
+      break;
+    case beve::Kind::kU64Array:
+      out.U64Array(value.U64s());
+      break;
+  }
+}
+
+// |replay| with its top-level field |key| written by |write| instead: a
+// well-formed BEVE file whose replay content may be corrupt.
+std::vector<std::byte> WithField(
+    std::span<const std::byte> replay, std::string_view key,
+    const std::function<void(beve::Writer&)>& write) {
+  const auto root = beve::Parse(replay);
+  REQUIRE(root.has_value());
+  beve::Writer out;
+  out.BeginObject(root->fields.size());
+  for (const beve::Field& field : root->fields) {
+    out.Key(field.key);
+    if (field.key == key) {
+      write(out);
+    } else {
+      Emit(field.value, out);
+    }
+  }
+  return out.Take();
+}
+
+// Open() fails with a replay error and does not throw.
+void RequireRejected(const std::vector<std::byte>& file, std::string_view why) {
+  INFO(why);
+  bool opened = true;
+  std::string message;
+  CHECK_NOTHROW([&] {
+    const auto reader = ReplayReader::Open(file);
+    opened = reader.has_value();
+    if (!opened) message = reader.error().message;
+  }());
+  REQUIRE_FALSE(opened);
+  CHECK(message.starts_with("replay: "));
+}
+
+TEST_CASE("A corrupt replay is an error, not a throw", "[replay]") {
+  ReplayRecorder recorder;
+  recorder.Begin(MakeReplayHeader({}, 1, 120), {});
+  for (Tick t = 1; t <= 3; ++t) recorder.Record(SampleFrame(t));
+  const std::vector<std::byte> bytes = recorder.Finish();
+  const auto parsed = beve::Parse(bytes);
+  REQUIRE(parsed.has_value());
+  const std::span<const std::byte> frames = parsed->Find("frames")->raw;
+
+  auto with_count = [&bytes](std::uint64_t n) {
+    return WithField(bytes, "frame_count",
+                     [n](beve::Writer& out) { out.U64(n); });
+  };
+  auto with_frames = [&bytes](const std::vector<std::byte>& raw) {
+    return WithField(bytes, "frames",
+                     [&raw](beve::Writer& out) { out.Bytes(raw); });
+  };
+
+  // Rewriting keeps a good file good, so each failure below is the field's.
+  REQUIRE(ReplayReader::Open(with_count(3)).has_value());
+  REQUIRE(ReplayReader::Open(with_frames({frames.begin(), frames.end()}))
+              .has_value());
+
+  RequireRejected(with_count(1ULL << 62), "a count no allocation can hold");
+  RequireRejected(with_count(~0ULL), "the largest count");
+  RequireRejected(with_count(4), "one frame more than the bytes hold");
+  RequireRejected(with_count(2), "one frame fewer than the bytes hold");
+  RequireRejected(with_count(0), "no frames counted");
+  const std::vector<std::byte> cut(frames.begin(), frames.end() - 5);
+  RequireRejected(with_frames(cut), "a truncated last frame");
+  std::vector<std::byte> trailing(frames.begin(), frames.end());
+  trailing.insert(trailing.end(), 3, std::byte{0});
+  RequireRejected(with_frames(trailing), "bytes after the last frame");
+  std::vector<std::byte> doubled(frames.begin(), frames.end());
+  doubled.insert(doubled.end(), frames.begin(), frames.end());
+  RequireRejected(with_frames(doubled), "more frames than counted");
+}
+
 TEST_CASE("A recorded session replays to the same hashes at another rate",
           "[replay][determinism]") {
   testing::MainThreadScope main_thread;
@@ -134,6 +235,14 @@ TEST_CASE("A recorded session replays to the same hashes at another rate",
   CHECK(replayed.hashes == recorded.hashes);
   CHECK(replayed.session_applied == recorded.session_applied);
   REQUIRE(replayed.session_failures == 0);
+
+  // The replay's session log is the whole log: extra edits are refused,
+  // not silently dropped.
+  testing::KernelSessionOptions both = replay;
+  both.edits_path = testing::EditsFixturePath();
+  const testing::KernelSessionResult refused = testing::RunKernelSession(both);
+  CHECK(refused.error.find("edits") != std::string::npos);
+  CHECK(refused.hashes.empty());
 }
 
 }  // namespace

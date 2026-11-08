@@ -11,7 +11,9 @@
 // --inputs takes a replay written by --record (the module's session log
 // comes with it, and the recorded hashes are checked tick by tick) or a
 // legacy .seinput text file (lines "tick held pressed released" in hex,
-// bit i = action i). Without --fixed-frame-dt each frame runs one tick;
+// bit i = action i; no session log). The session log then comes from the
+// file, so --edits is rejected with --inputs rather than ignored. Without
+// --fixed-frame-dt each frame runs one tick;
 // with it, a synthetic clock at 1000/MS Hz drives the FixedStepper. The
 // rampage module arrives in M3. Exit status: 0 ok, 1 a check failed,
 // 2 bad arguments or input.
@@ -188,6 +190,12 @@ int Run(const Args& args) SE_REQUIRES(g_main) SE_EXCLUDES(g_sim_owner) {
   if (args.scene != "gameplay") {
     std::fprintf(stderr, "se_replay: kernel_test has no scene '%s'\n",
                  args.scene.c_str());
+    return 2;
+  }
+  if (!args.inputs.empty() && !args.edits.empty()) {
+    std::fprintf(stderr,
+                 "se_replay: --edits cannot be combined with --inputs: the "
+                 "replay carries its own session log\n");
     return 2;
   }
   if (args.jobs > 0) {

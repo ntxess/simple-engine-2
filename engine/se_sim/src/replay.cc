@@ -272,12 +272,17 @@ std::expected<ReplayReader, Error> ReplayReader::Open(
   }
   reader.start_.assign(start->raw.begin(), start->raw.end());
   reader.first_tick_ = first_tick->number;
+  // frame_count is untrusted: decode the frames the bytes hold, then compare
+  // the count, so a corrupt count never sizes an allocation.
   ByteReader in(frames->raw);
-  reader.frames_.resize(static_cast<std::size_t>(frame_count->number));
-  for (InputFrame& frame : reader.frames_) {
-    if (!DecodeFrame(in, &frame)) return Corrupt("bad frame");
+  while (!in.AtEnd()) {
+    InputFrame frame;
+    if (!DecodeFrame(in, &frame)) return Corrupt("bad or truncated frame");
+    reader.frames_.push_back(frame);
   }
-  if (!in.AtEnd()) return Corrupt("trailing frame bytes");
+  if (reader.frames_.size() != frame_count->number) {
+    return Corrupt("frame_count does not match the frames");
+  }
   for (std::size_t i = 0; i < reader.frames_.size(); ++i) {
     if (reader.frames_[i].tick != reader.first_tick_ + i) {
       return Corrupt("frames are not consecutive");

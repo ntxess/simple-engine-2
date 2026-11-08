@@ -97,6 +97,14 @@ KernelSessionResult RunKernelSession(const KernelSessionOptions& options) {
   env.seed = options.seed;
   GameStateStack states(module.Factory(), env);
 
+  // A replay carries its own session log; extra edits would silently not
+  // apply.
+  if (options.replay != nullptr && !options.edits_path.empty()) {
+    result.error =
+        "edits cannot be combined with a replay, which carries its own "
+        "session log";
+    return result;
+  }
   SessionLog log;
   if (options.replay != nullptr) {
     auto read = SessionLog::Read(options.replay->SessionBytes());

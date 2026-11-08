@@ -36,6 +36,14 @@ set_tests_properties(replay.kernel_record_144hz PROPERTIES
   FIXTURES_SETUP se_replay_recording)
 set_tests_properties(replay.kernel_replay_30hz PROPERTIES
   FIXTURES_REQUIRED se_replay_recording)
+# A replay carries its session log, so extra edits are rejected, not ignored.
+add_test(NAME replay.edits_with_inputs_rejected
+  COMMAND se_replay --module kernel_test
+          --inputs "${_se_replay_out}/kernel_144hz.sereplay"
+          --edits "${_se_edits}")
+set_tests_properties(replay.edits_with_inputs_rejected PROPERTIES
+  FIXTURES_REQUIRED se_replay_recording
+  PASS_REGULAR_EXPRESSION "--edits cannot be combined with --inputs")
 add_test(NAME replay.kernel_det_crosscheck
   COMMAND se_replay --module kernel_test --ticks 400 --edits "${_se_edits}"
           --fixed-frame-dt 6.25 --det-crosscheck 5 --jobs 3)
@@ -50,6 +58,7 @@ add_test(NAME replay.rampage_not_yet
 set_tests_properties(replay.rampage_not_yet PROPERTIES
   PASS_REGULAR_EXPRESSION "not available until M3")
 set_tests_properties(replay.kernel_golden_60hz replay.kernel_record_144hz
-  replay.kernel_replay_30hz replay.kernel_det_crosscheck
+  replay.kernel_replay_30hz replay.edits_with_inputs_rejected
+  replay.kernel_det_crosscheck
   replay.kernel_golden_detects_change replay.rampage_not_yet
   PROPERTIES LABELS "determinism;tools")
