@@ -304,3 +304,34 @@ SpawnIndex 10 at (400, 700) from tick 1393 and SpawnIndex 11 at (1840, 540)
 from tick 1600, where the old code took one more step to x = 1841 and stayed
 a moved source for that tick (the player's Charge differs from tick 1601).
 SpawnIndex 13 ends beyond the arena corner and stays clamped there (R11).
+
+## R13 Repeating paths close the loop
+
+A repeating path with two or more distinct points has one more segment, the
+closing segment from its last point back to its first, and after it starts
+over at segment 0. The entity therefore cycles the closed polygon, and a
+two-point path goes back and forth. The closing segment is a segment like any
+other (R12): its length is `sqrt(dx × dx + dy × dy)` with `dx = first.x -
+last.x` and `dy = first.y - last.y`, the heading along it is its own, and when
+the last point is the first its length is 0 and it is skipped (R6). A path
+whose points all coincide, a single point included, never moves.
+
+Before: at the last waypoint `repeat` reset the progress (`currentPath` and
+`distance`) but not the position, without moving in that tick
+(core/system/WayPointSystem.cpp:27-34), so the path replayed from where the
+entity stood, offset by the vector from the first point to the last, and
+repeating paths wandered off until the clamp held them at the arena edge.
+Since R12, which takes the position from the progress, the entity jumped back
+from its last point to its first.
+
+Goldens: all three changed from the first time a repeating path reached its
+end: `stress` from tick 104 (3497 ticks), `effects` from tick 48 (3097 ticks;
+SpawnIndex 6 turns back along its closing segment and skips its zero-length
+first segment) and `patrol` from tick 94 (3479 ticks).
+
+Coverage: two-point paths go back and forth in `effects` (SpawnIndex 2, 5 and
+9) and in both generated scenarios; the other generated paths cycle their
+polygons. `effects` SpawnIndex 14, whose last point is its first, has a
+zero-length closing segment and is unchanged by this rule; SpawnIndex 15
+(three coincident points) and the one-point paths in `stress` (SpawnIndex 11)
+and `patrol` (SpawnIndex 10 and 17) never move.

@@ -48,9 +48,10 @@ void WayPointSystem::update(entt::registry& reg, const float& dt)
         // Rule R12: the progress is the current segment (from waypoint `segment` to the next) and
         // the distance travelled along it, and the position is taken from the path instead of
         // being integrated. The float expressions are evaluated as written, in this order, as the
-        // engine does (docs/rules/gameplay-rules.md).
-        const std::size_t segments = waypointCount(head) - 1;
-        if (segments == 0 && wpc.repeat) continue; // a single repeating point never moves
+        // engine does (docs/rules/gameplay-rules.md). Rule R13: a repeating path has one more
+        // segment, which closes the loop from its last point back to its first.
+        const std::size_t count = waypointCount(head);
+        const std::size_t segments = wpc.repeat ? count : count - 1;
 
         std::size_t segment = wpc.segment;
         float u = wpc.segmentDistance;
@@ -84,11 +85,17 @@ void WayPointSystem::update(entt::registry& reg, const float& dt)
             }
 
             const WayPoint* to = from->next();
-            const float len = from->distanceToNext;
+            float len = from->distanceToNext;
+            if (to == nullptr)
+            {
+                // Rule R13: the closing segment of a repeating path.
+                to = head;
+                len = WayPoint::distanceBetween(from->coordinate, head->coordinate);
+            }
             if (len <= 0.f)
             {
                 // Rule R6: a zero-length segment is skipped without moving or turning. A repeating
-                // path whose segments all have length 0 never moves.
+                // path whose points all coincide (all its segments have length 0) never moves.
                 if (wpc.repeat && ++zeroRun == segments) break;
             }
             else
@@ -111,10 +118,8 @@ void WayPointSystem::update(entt::registry& reg, const float& dt)
             from = to;
             if (segment == segments && wpc.repeat)
             {
-                // Until rule R13, a repeating path continues with its first segment, so the entity
-                // jumps back to its first point.
+                // Past the closing segment (which ended on the first point): start over.
                 segment = 0;
-                from = head;
 
                 // A step so long that a whole round no longer shortens it in float would go round
                 // forever (or a NaN or infinite speed): it ends at the start of the path instead.
