@@ -124,8 +124,8 @@
         "rhs": "Linux"
       },
       "cacheVariables": {
-        "CMAKE_C_COMPILER": "clang",
-        "CMAKE_CXX_COMPILER": "clang++",
+        "CMAKE_C_COMPILER": "clang-20",
+        "CMAKE_CXX_COMPILER": "clang++-20",
         "SE_BUILD_PLATFORM": "OFF",
         "SE_CRASH": "OFF",
         "SE_THREAD_SAFETY_ERRORS": "ON"

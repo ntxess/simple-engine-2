@@ -8,7 +8,7 @@
 # shares the pinned dependency archives through a symlink to .deps/.
 #
 # One-time setup (needs sudo; see docs/gates.md):
-#   sudo apt install -y clang lld ninja-build python3-pip pipx glslang-tools
+#   sudo apt install -y clang-20 lld-20 libclang-rt-20-dev ninja-build \n#     python3-pip pipx glslang-tools   # clang 19+: libstdc++ std::expected
 #   pipx install cmake            # Ubuntu 24.04 ships CMake 3.28; 3.31+ needed
 set -euo pipefail
 

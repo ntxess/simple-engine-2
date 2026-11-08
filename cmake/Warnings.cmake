@@ -41,6 +41,14 @@ elseif(CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")  # clang-cl
   # overrides it.
   target_compile_options(se_determinism INTERFACE /clang:-ffp-contract=off)
 else()  # GCC and Clang
+  # Engine code returns std::expected. libstdc++ only declares it when
+  # __cpp_concepts >= 202002L, which clang reports from version 19.
+  if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND
+     CMAKE_CXX_COMPILER_VERSION VERSION_LESS 19)
+    message(FATAL_ERROR
+      "clang ${CMAKE_CXX_COMPILER_VERSION} cannot use libstdc++'s "
+      "std::expected; use clang 19 or newer (the Linux presets use clang-20)")
+  endif()
   target_compile_options(se_warnings INTERFACE
     -Wall -Wextra -Wpedantic -Wshadow)
   if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")

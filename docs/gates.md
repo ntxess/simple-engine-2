@@ -6,7 +6,7 @@ block a milestone; each lists the exact command to run once the setup exists.
 
 | Gate | Milestone | Needs | Command / procedure | Status |
 |---|---|---|---|---|
-| WSL Linux toolchain | M0 | One-time install in WSL Ubuntu 24.04 | `sudo apt install -y clang lld ninja-build python3-pip pipx glslang-tools && pipx install cmake` | done 2026-11-08 (clang 18.1.3, CMake 4.4.4, ninja 1.11.1, glslang 15.1) |
+| WSL Linux toolchain | M0 | One-time install in WSL Ubuntu 24.04 | `sudo apt install -y clang-20 lld-20 libclang-rt-20-dev ninja-build python3-pip pipx glslang-tools && pipx install cmake` (clang 18 cannot use libstdc++'s `std::expected`) | done 2026-11-08 (clang 20.1.2, CMake 4.4.4, ninja 1.11.1, glslang 15.1) |
 | Linux debug build and tests | M0 | WSL toolchain above | `wsl -d Ubuntu -- bash -lc "bash /mnt/d/Dev/simple-engine-2/scripts/wsl-build.sh linux-clang-debug"` | passing (M0) |
 | ThreadSanitizer | M0, M4, M14, M17 | WSL toolchain above | `... scripts/wsl-build.sh linux-clang-tsan` | passing (M0); re-run at every milestone |
 | ASan + UBSan on Linux | every milestone | WSL toolchain above | `... scripts/wsl-build.sh linux-clang-asan` | passing (M0) |
