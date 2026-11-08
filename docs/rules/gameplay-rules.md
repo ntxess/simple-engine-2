@@ -1,12 +1,13 @@
 # Gameplay rules
 
 Declared rules applied to the legacy reference (core/, app/) after
-`legacy-ref-v0`, one commit each (docs/milestone-specs.md, M1b). Each rule
-states the behaviour the new engine's gameplay (M3, game_rampage) implements,
-what the legacy code did before, and which golden projection hashes of the
-reference scenarios (tests/fixtures/reference/) it re-baselined. The reference
-at `legacy-ref-v1` follows all of them, and M3 compares the two trees through
-the projections of that state.
+`legacy-ref-v0`, one commit each (docs/milestone-specs.md: R1 to R10 in M1b,
+R11 to R13 in M3a). Each rule states the behaviour the new engine's gameplay
+(M3, game_rampage) implements, what the legacy code did before, and which
+golden projection hashes of the reference scenarios (tests/fixtures/reference/)
+it re-baselined. The reference at `legacy-ref-v1` follows R1 to R10, the one
+at `legacy-ref-v2` all thirteen, and M3 compares the two trees through the
+projections of `legacy-ref-v2`.
 
 Conventions: time is counted in ticks of the 120 Hz simulation clock
 (LegacySimTime). An authored duration of `ms` milliseconds is
@@ -207,3 +208,43 @@ destroying the current entity of an entt view is safe, so the deferred point
 produces the same projections; the rule fixes the single destroy point and
 its order, which the engine's Cleanup phase (World::DrainDestroyRequests)
 reproduces.
+
+## R11 The clamp keeps the collider inside the scene bounds
+
+Boundary (R9) keeps every sprite's collider, the unrotated texture box centred
+on its position (R4), inside the scene bounds `W` × `H`, the configured
+resolution (1920 × 1080). With the half extents `hw = width / 2` and
+`hh = height / 2` of the sprite's texture rectangle, the new position is
+
+    x' = W < 2·hw ? W / 2 : clamp(x, hw, W - hw)
+    y' = H < 2·hh ? H / 2 : clamp(y, hh, H - hh)
+
+evaluated in float as written (`W < 2.f * hw ? W * 0.5f :
+std::clamp(x, hw, W - hw)`, `hw = texture width / 2.f`, `W` the bound as a
+float). Both axes are computed from the position before the clamp and written
+once. A sprite larger than the bounds on an axis is centred on that axis. The
+clamp does not mark an entity as moved.
+
+Before: the clamp (app/scene/Sandbox.cpp:202-218, Sandbox::checkBoundary;
+core/system/BoundarySystem.cpp since R9) compared the centred position with 0
+on the left and top, but the position plus the size of the rotated global
+bounds with the bounds on the right and bottom, so half a sprite could leave on
+the left and top while a whole sprite's margin was kept on the right and
+bottom (48 px, or 67.9 px for a 48 px sprite turned 45 degrees). Each
+correction's `setPosition` took the other axis from before the clamp, so when
+both axes needed one the second undid the first, and a sprite pushed into a
+corner kept leaving the arena along the first axis.
+
+Goldens: all three changed from tick 1 on every tick (3600 of 3600):
+`stress` (SpawnIndex 10 starts at x = 1902; it was kept at 1852.1, now at
+1896), `effects` (SpawnIndex 9 on its path along the right edge at x = 1890,
+which the old clamp moved to 1872) and `patrol` (SpawnIndex 9 starts at
+y = 3, now 24). Path-following entities soon differ everywhere, because a
+repeating path drifted from its points (R12, R13) until the clamp held it.
+
+Coverage: `effects` SpawnIndex 13 is pushed diagonally into the bottom-left
+corner by its path, corrected on both axes in the same ticks from tick 43, and
+stops beyond the corner, held at (24, 1056); before, it left the arena to
+x = -50.3 with y held at 1012.1. In `patrol` the player walks along the left
+edge from tick 2877. No fixture has a sprite larger than the bounds (no
+texture is larger than the arena); the engine's boundary_test covers it.
