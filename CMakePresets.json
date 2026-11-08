@@ -226,14 +226,19 @@
       "configurePreset": "msvc-debug",
       "filter": {
         "exclude": {
-          "label": "slow|lint"
+          "label": "slow|lint|bench"
         }
       }
     },
     {
       "name": "msvc-dev",
       "inherits": "test-base",
-      "configurePreset": "msvc-dev"
+      "configurePreset": "msvc-dev",
+      "filter": {
+        "exclude": {
+          "label": "bench"
+        }
+      }
     },
     {
       "name": "msvc-release",
@@ -251,14 +256,19 @@
       "configurePreset": "msvc-asan",
       "filter": {
         "exclude": {
-          "label": "lint"
+          "label": "lint|bench"
         }
       }
     },
     {
       "name": "clangcl-dev",
       "inherits": "test-base",
-      "configurePreset": "clangcl-dev"
+      "configurePreset": "clangcl-dev",
+      "filter": {
+        "exclude": {
+          "label": "bench"
+        }
+      }
     },
     {
       "name": "legacy-msvc-debug",
@@ -302,7 +312,7 @@
       "configurePreset": "linux-clang-debug",
       "filter": {
         "exclude": {
-          "label": "slow|lint|desktop|gpu"
+          "label": "slow|lint|desktop|gpu|bench"
         }
       }
     },
@@ -312,7 +322,7 @@
       "configurePreset": "linux-clang-asan",
       "filter": {
         "exclude": {
-          "label": "lint|desktop|gpu"
+          "label": "lint|desktop|gpu|bench"
         }
       }
     },
@@ -322,7 +332,7 @@
       "configurePreset": "linux-clang-tsan",
       "filter": {
         "exclude": {
-          "label": "lint|desktop|gpu"
+          "label": "lint|desktop|gpu|bench"
         }
       }
     }

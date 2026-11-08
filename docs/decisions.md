@@ -226,3 +226,34 @@ packed arrays the chunks index. The signals see every structural path,
 typed or type-erased, and only the captured storages count, so unrelated
 structural changes (a DestroyRequest, a new Name) do not invalidate a view.
 Release builds connect nothing.
+
+## ADR-022 RenderList conventions: degrees, canvas pixels, texel UVs (2026-11-08)
+
+**Decision.** se_render_core (M3c) fixes the conventions the M3 spec leaves
+open, so game modules, the GPU backend (M7) and the editor (M10) agree:
+- `Transform::rot` and `PrevTransform::rot` are degrees, clockwise on screen
+  (y grows downwards), as in the legacy tree's sf::Sprite and in the
+  rotations game_rampage projects (R12's heading). The renderer converts
+  them to radians for `se::dm::SinCos`.
+- `SpriteQuad::pos` is in canvas pixels of the camera (0..virtual_size,
+  y down): `(world - center) * zoom + virtual_size / 2`. The backend maps the
+  canvas to the window (letterboxing, `Camera2D::integer_scale`).
+- `SpriteQuad::uv` is texel coordinates inside the texture
+  (`region.x .. region.x + region.w`); only the backend knows texture sizes.
+- Corners are ordered top-left, top-right, bottom-right, bottom-left of the
+  unrotated sprite. `SpriteRenderer::origin` is the pivot of position,
+  rotation and scale (sf::Sprite's origin), and `flip_x`/`flip_y` mirror the
+  sprite about it, keeping the corner order (the texture coordinates swap).
+- Culling keeps a sprite only when its rotated bounds overlap the canvas with
+  a positive area; touching an edge is culled.
+- Interpolation uses PrevTransform only when it is from the tick before the
+  World's current tick and `teleport_tick` is not the current tick; a half
+  turn between ticks goes the negative way.
+- `RenderList` carries a `scratch` member (sort items and unsorted quads)
+  beside the spec's `quads`, `batches` and `stats`, so `BuildRenderList` keeps
+  the spec's signature and still allocates nothing once warm.
+
+**Why.** The spec gives the types but not the units. Degrees match the
+reference the M3 comparison runs against and the `.seproj` rotations;
+canvas pixels and texel UVs keep the headless list free of GPU and asset
+knowledge until M7 and M9.

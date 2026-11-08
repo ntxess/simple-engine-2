@@ -23,13 +23,20 @@ else()
   set(_se_dev_flags "-O2 -g")
   set(_se_dev_link "")
 endif()
+# project() already created these cache entries, empty, for the configuration
+# named by CMAKE_BUILD_TYPE, so a plain set(... CACHE) would leave Dev
+# unoptimised. Empty entries are filled in; flags a user set are kept.
 foreach(_lang C CXX)
-  set(CMAKE_${_lang}_FLAGS_DEV "${_se_dev_flags}"
-      CACHE STRING "Flags for the Dev configuration")
+  if(NOT CMAKE_${_lang}_FLAGS_DEV)
+    set(CMAKE_${_lang}_FLAGS_DEV "${_se_dev_flags}"
+        CACHE STRING "Flags for the Dev configuration" FORCE)
+  endif()
 endforeach()
 foreach(_kind EXE SHARED MODULE)
-  set(CMAKE_${_kind}_LINKER_FLAGS_DEV "${_se_dev_link}"
-      CACHE STRING "Linker flags for the Dev configuration")
+  if(NOT CMAKE_${_kind}_LINKER_FLAGS_DEV)
+    set(CMAKE_${_kind}_LINKER_FLAGS_DEV "${_se_dev_link}"
+        CACHE STRING "Linker flags for the Dev configuration" FORCE)
+  endif()
 endforeach()
 set(CMAKE_STATIC_LINKER_FLAGS_DEV "" CACHE STRING
     "Archiver flags for the Dev configuration")
