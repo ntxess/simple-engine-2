@@ -1,9 +1,11 @@
 // Copyright 2026 The simple-engine-2 Authors.
 //
 // Death tests: each scenario breaks one kernel contract and must end in a
-// failed SE_ASSERT ("SE_ASSERT failed" on stderr, then abort). CTest runs
-// the executable once per scenario and matches that text; a scenario that
-// returns normally prints nothing to match, so the test fails.
+// failed SE_ASSERT ("SE_ASSERT failed: <expression> -- <message>" on
+// stderr, then abort). CTest runs the executable once per scenario and
+// matches the message of the assert the scenario is about
+// (tests/CMakeLists.txt); a scenario that returns normally, or trips a
+// different assert, does not match, so the test fails.
 //
 //   se_death_tests <scenario>
 

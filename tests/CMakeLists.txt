@@ -88,8 +88,10 @@ add_test(NAME checks.planted.glaze
           --planted "${CMAKE_SOURCE_DIR}/tools/checks/planted/glaze")
 set_tests_properties(checks.glaze checks.planted.glaze PROPERTIES LABELS checks)
 
-# Death tests: one executable, one CTest test per scenario; each must end in a
-# failed SE_ASSERT. Release builds compile the asserts out.
+# Death tests: one executable, one CTest test per scenario; each must end in
+# the failed SE_ASSERT it is about, matched by that assert's message, so a
+# scenario that trips another assert fails. Release builds compile the
+# asserts out. Entries are "scenario|message".
 se_add_module(se_death_tests KIND EXECUTABLE
   SOURCES
     death/death_main.cc
@@ -99,16 +101,27 @@ se_add_module(se_death_tests KIND EXECUTABLE
   DETERMINISTIC
   TEST)
 if(NOT CMAKE_BUILD_TYPE STREQUAL "Release")
-  foreach(_se_scenario
-      world_access_in_fork structural_call_in_fork create_in_fork
-      undeclared_read undeclared_write write_outside_chunk
-      view_after_structural_change play_mutation_gate_closed
-      access_from_another_thread duplicate_guid unsealed_registry)
+  set(_se_death_scenarios
+    "world_access_in_fork|not allowed inside a fork chunk"
+    "structural_call_in_fork|not allowed inside a fork chunk"
+    "create_in_fork|not allowed inside a fork chunk"
+    "undeclared_read|ParallelView read of a component the ForkSite does not declare"
+    "undeclared_write|ParallelView write of a component the ForkSite does not declare in writes"
+    "write_outside_chunk|ParallelView access outside the running chunk's range"
+    "view_after_structural_change|a structural change invalidated this ParallelView"
+    "play_mutation_gate_closed|Play World mutated while its MutationGate is closed"
+    "access_from_another_thread|World accessed from a thread that does not own it"
+    "duplicate_guid|Guid already in use in this World"
+    "unsealed_registry|seal the ComponentRegistry first")
+  foreach(_se_entry IN LISTS _se_death_scenarios)
+    string(REPLACE "|" ";" _se_pair "${_se_entry}")
+    list(GET _se_pair 0 _se_scenario)
+    list(GET _se_pair 1 _se_message)
     add_test(NAME death.${_se_scenario}
       COMMAND se_death_tests ${_se_scenario})
     set_tests_properties(death.${_se_scenario} PROPERTIES
       LABELS "unit;death"
-      PASS_REGULAR_EXPRESSION "SE_ASSERT failed")
+      PASS_REGULAR_EXPRESSION "SE_ASSERT failed: [^\n]* -- ${_se_message}")
   endforeach()
 endif()
 
