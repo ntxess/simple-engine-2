@@ -34,4 +34,6 @@ out/build/legacy-msvc-release/app/legacy_replay --scenario tests/fixtures/refere
 ```
 
 Re-baseline after a declared rule: `SE_UPDATE_GOLDENS=1 ctest --preset legacy-msvc-debug -R legacy.reference`
-(rewrites both goldens; an unchanged projection keeps its file).
+(rewrites the goldens instead of checking them and prints a warning; an
+unchanged golden keeps its file). `scripts/ci.ps1` clears `SE_UPDATE_GOLDENS`,
+so the commit gate always checks.

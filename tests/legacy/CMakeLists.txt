@@ -8,12 +8,17 @@
 #                              the same projection hash (docs/milestone-specs.md,
 #                              M1a exit)
 #   legacy.selfdet.live_replay a paced run in a visible window, recorded, then
-#                              replayed headless, gives the same hash
+#                              replayed headless, gives the same hash. Label
+#                              "desktop" too: it needs an interactive desktop,
+#                              so the legacy test presets exclude it; run it by
+#                              hand (docs/gates.md):
+#                              ctest --test-dir out/build/legacy-msvc-debug -L desktop
 #   legacy.reference.NAME      every tick's projection hash equals the golden
 #                              NAME.sehash and the projection equals the golden
 #                              NAME.seproj.gz (generated at legacy-ref-v1); a
 #                              declared rule (docs/rules/gameplay-rules.md)
-#                              re-baselines both:
+#                              re-baselines both (scripts/ci.ps1 clears the
+#                              variable, so the commit gate always checks):
 #                              SE_UPDATE_GOLDENS=1 ctest --preset legacy-msvc-debug -R reference
 
 set(_legacy_driver "${CMAKE_CURRENT_SOURCE_DIR}/legacy_test.py")
@@ -40,7 +45,8 @@ foreach(_scenario IN LISTS _legacy_scenarios)
 endforeach()
 
 # Opens a visible window for about five seconds; keys pressed meanwhile are
-# recorded and replayed, so the test holds either way.
+# recorded and replayed, so the test holds either way. Not run by the legacy
+# test presets (label "desktop"); see docs/gates.md.
 add_test(NAME legacy.selfdet.live_replay
   COMMAND "${Python3_EXECUTABLE}" "${_legacy_driver}" live-replay
           --exe "$<TARGET_FILE:legacy_replay>"

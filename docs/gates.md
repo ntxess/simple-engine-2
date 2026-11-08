@@ -10,6 +10,7 @@ block a milestone; each lists the exact command to run once the setup exists.
 | Linux debug build and tests | M0 | WSL toolchain above | `wsl -d Ubuntu -- bash /mnt/d/Dev/simple-engine-2/scripts/wsl-build.sh linux-clang-debug` | pending |
 | ThreadSanitizer | M0, M4, M14, M17 | WSL toolchain above | `... scripts/wsl-build.sh linux-clang-tsan` | pending |
 | ASan + UBSan on Linux | every milestone | WSL toolchain above | `... scripts/wsl-build.sh linux-clang-asan` | pending |
+| Legacy live recording replays headless (`legacy.selfdet.live_replay`) | M1 | an interactive desktop session (a visible window for about 5 s); the legacy test presets exclude label `desktop` | `scripts/ci.ps1 -Presets legacy-msvc-debug`, then `ctest --test-dir out/build/legacy-msvc-debug -L desktop` | passed by hand 2026-11-08; rerun after changes to core/Engine.cpp or core/util/LegacyInput.* |
 | SPIR-V shader compilation | M7 | glslang-tools in WSL, or a Vulkan SDK on Windows | rebuild the `se_shaders` target | pending |
 | Modal drag keeps ticking | M5 | an interactive desktop session | `ctest --preset msvc-dev -L desktop -R modal` | pending |
 | Paced presentation under 1% misses | M6 | PresentMon | `tools/presentmon/run.ps1 -Mode Paced` | pending |

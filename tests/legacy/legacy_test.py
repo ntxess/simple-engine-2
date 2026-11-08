@@ -11,12 +11,14 @@ usage:
   legacy_test.py live-replay --exe EXE --scenario DIR/NAME --work DIR
                  [--ticks N] [--fps HZ]
       A paced run in a visible window records its keyboard input; replaying
-      that recording headless must give the same projection run hash.
+      that recording headless must give the same projection run hash. Needs
+      an interactive desktop (label "desktop", docs/gates.md).
   legacy_test.py reference --exe EXE --scenario DIR/NAME --work DIR [--update]
       The per-tick projection hashes must equal the golden DIR/NAME.sehash,
       and the projection must equal the golden DIR/NAME.seproj.gz line for
       line. --update (or SE_UPDATE_GOLDENS=1) rewrites both goldens instead
-      (a golden whose content is unchanged is left as it is).
+      of checking them, with a warning (a golden whose content is unchanged
+      is left as it is). scripts/ci.ps1 clears SE_UPDATE_GOLDENS.
 
 Exit status 0 on success, 1 on a mismatch or a failed run.
 """
@@ -138,12 +140,18 @@ def cmd_live_replay(args):
 
 
 def write_hashes(path, blocks, run_hash, name):
-    with open(path, "w", encoding="ascii", newline="\n") as f:
-        f.write(f"# sehash v1 scenario={name} ticks={max(blocks)}\n")
-        f.write("# per tick: <tick> <fnv1a64 of the projection block>\n")
-        for tick in sorted(blocks):
-            f.write(f"{tick} {blocks[tick][0]}\n")
-        f.write(f"# run {len(blocks)} {run_hash}\n")
+    """Writes the .sehash golden; keeps an existing golden whose content is
+    the same (line endings aside, which git may have converted)."""
+    lines = [f"# sehash v1 scenario={name} ticks={max(blocks)}",
+             "# per tick: <tick> <fnv1a64 of the projection block>"]
+    lines += [f"{tick} {blocks[tick][0]}" for tick in sorted(blocks)]
+    lines.append(f"# run {len(blocks)} {run_hash}")
+    text = "\n".join(lines) + "\n"
+    if path.exists():
+        if path.read_bytes().replace(b"\r\n", b"\n") == text.encode("ascii"):
+            return False
+    path.write_bytes(text.encode("ascii"))
+    return True
 
 
 def read_hashes(path):
@@ -178,11 +186,18 @@ def cmd_reference(args):
         args.exe, scenario_args(args.scenario), work, name)
     blocks = read_blocks(projection)
     if args.update or os.environ.get("SE_UPDATE_GOLDENS") == "1":
-        write_hashes(golden, blocks, run_hash, name)
-        changed = write_projection_golden(golden_projection, projection)
-        print(f"updated {golden} and {golden_projection.name}"
-              f"{'' if changed else ' (unchanged)'}: {ticks} ticks, "
-              f"run hash {run_hash}")
+        # A re-baseline replaces the check, so say so loudly. scripts/ci.ps1
+        # clears SE_UPDATE_GOLDENS: the commit gate always checks.
+        written = [path.name for path, changed in (
+            (golden, write_hashes(golden, blocks, run_hash, name)),
+            (golden_projection,
+             write_projection_golden(golden_projection, projection)))
+            if changed]
+        trigger = "--update" if args.update else "SE_UPDATE_GOLDENS=1"
+        action = ("rewrote " + " and ".join(written) if written
+                  else "goldens unchanged")
+        print(f"WARNING: {trigger}: {name} was not checked; {action}: "
+              f"{ticks} ticks, run hash {run_hash}")
         return 0
     for path in (golden, golden_projection):
         if not path.exists():

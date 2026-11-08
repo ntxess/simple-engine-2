@@ -267,6 +267,9 @@
       "filter": {
         "include": {
           "label": "legacy"
+        },
+        "exclude": {
+          "label": "desktop"
         }
       },
       "execution": {
@@ -282,6 +285,9 @@
       "filter": {
         "include": {
           "label": "legacy"
+        },
+        "exclude": {
+          "label": "desktop"
         }
       },
       "execution": {

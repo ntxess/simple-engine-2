@@ -22,6 +22,12 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
+# The gate checks goldens and never rewrites them: with SE_UPDATE_GOLDENS=1 left
+# in the shell, every golden test would re-baseline its golden and pass.
+if (Test-Path Env:SE_UPDATE_GOLDENS) {
+  Write-Warning 'SE_UPDATE_GOLDENS is set; ci.ps1 clears it so that the golden tests check their goldens.'
+  Remove-Item Env:SE_UPDATE_GOLDENS
+}
 # powershell -File passes "a,b" as one string; accept both forms.
 $Presets = @($Presets | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
 if ($Milestone) {
