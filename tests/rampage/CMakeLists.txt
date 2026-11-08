@@ -1,8 +1,10 @@
 # game_rampage tests (docs/milestone-specs.md, M3b "Tests"); label rampage.
 #
 #   se_rampage_tests      Catch2: serialization, broadphase, effects, path,
-#                         boundary, JSON, scenes, the legacy scenarios and
-#                         the projection
+#                         boundary, JSON, scenes, the legacy scenarios, the
+#                         projection and determinism (golden
+#                         determinism_rampage)
+#   replay.rampage.*      se_replay runs the module (tools)
 #   ref.sandbox.NAME      label reference: se_replay runs the legacy scenario
 #                         NAME with its inputs for 3600 ticks, and
 #                         tools/refcmp/refcmp.py compares the projection with
@@ -46,6 +48,7 @@ se_add_module(se_rampage_tests KIND EXECUTABLE
   SOURCES
     boundary_test.cc
     broadphase_test.cc
+    determinism_test.cc
     effects_test.cc
     json_test.cc
     legacy_scenario_test.cc
@@ -121,3 +124,30 @@ set_tests_properties(refcmp.detects_difference PROPERTIES
   PASS_REGULAR_EXPRESSION "FIRST DIFFERENCE")
 set_tests_properties(refcmp.self refcmp.detects_difference PROPERTIES
   LABELS "tools;rampage")
+
+# se_replay runs the module (this replaces M2's replay.rampage_not_yet).
+add_test(NAME replay.rampage.sandbox_60hz
+  COMMAND se_replay --module rampage --ticks 3600
+          --fixed-frame-dt 16.6667 --jitter-ms 1.5
+          --expect-golden determinism_rampage
+          --hash-out "${_se_rampage_out}/sandbox_60hz.txt"
+          --projection-out "${_se_rampage_out}/sandbox_60hz.seproj")
+add_test(NAME replay.rampage.record_144hz
+  COMMAND se_replay --module rampage --ticks 900
+          --fixed-frame-dt 6.9444 --jitter-ms 1
+          --record "${_se_rampage_out}/sandbox_144hz.sereplay")
+add_test(NAME replay.rampage.replay_30hz
+  COMMAND se_replay --module rampage
+          --inputs "${_se_rampage_out}/sandbox_144hz.sereplay"
+          --fixed-frame-dt 33.3333)
+set_tests_properties(replay.rampage.record_144hz PROPERTIES
+  FIXTURES_SETUP se_rampage_recording)
+set_tests_properties(replay.rampage.replay_30hz PROPERTIES
+  FIXTURES_REQUIRED se_rampage_recording)
+add_test(NAME replay.rampage.bad_scene
+  COMMAND se_replay --module rampage --scene "${_se_ref}/stress.seinput")
+set_tests_properties(replay.rampage.bad_scene PROPERTIES
+  PASS_REGULAR_EXPRESSION "se_replay: .*stress.seinput")
+set_tests_properties(replay.rampage.sandbox_60hz replay.rampage.record_144hz
+  replay.rampage.replay_30hz replay.rampage.bad_scene
+  PROPERTIES LABELS "determinism;tools;rampage")
