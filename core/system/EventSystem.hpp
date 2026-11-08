@@ -31,6 +31,7 @@ public:
     EventStatus instantEvent(StatusModEvent& statusModEvent, EntityStatus& receiverStatus) const;
     EventStatus overTimeEvent(StatusModEvent& statusModEvent, EntityStatus& receiverStatus) const;
     EventStatus tempTimedEvent(StatusModEvent& statusModEvent, EntityStatus& receiverStatus) const;
+    void revertTempTimed(StatusModEvent& statusModEvent, EntityStatus& receiverStatus) const;
 
 private:
 	entt::registry& m_piplineReg;

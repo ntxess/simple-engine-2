@@ -146,9 +146,14 @@ EventSystem::EventStatus EventSystem::tempTimedEvent(StatusModEvent& statusModEv
     const std::uint64_t currTicks = nowTick - statusModEvent.lastApplyTick;
     const std::uint64_t durationTicks = msToTicks(statusModEvent.effect.maxDuration.count(), m_simTime.rate);
 
-    // If event some how lasts longer than it should, consider it complete and prep for destroy
+    // If event some how lasts longer than it should, consider it complete and prep for destroy.
+    // Rule R1 (docs/rules/gameplay-rules.md): the modification is reverted on this path too.
     if (m_eventWatchdogTicks < currTicks)
+    {
+        if (statusModEvent.elapsedTicks != 0)
+            revertTempTimed(statusModEvent, receiverStatus);
         return EventStatus::COMPLETE;
+    }
 
     // Only modify the receiverStatus once in this type of event. We can use the elapsedTicks variable as a bool to prevent reaccessing this logic
     if (statusModEvent.elapsedTicks == 0)
@@ -170,19 +175,23 @@ EventSystem::EventStatus EventSystem::tempTimedEvent(StatusModEvent& statusModEv
 
     if (currTicks >= durationTicks)
     {
-        const auto it = receiverStatus.values.find(statusModEvent.effect.targetStat);
-        if (it != receiverStatus.values.end())
-        {
-            it->second += statusModEvent.effect.modificationVal * -1.f;
-            LOG_DEBUG(Logger::get())
-                << "Completed temporary-timed event. Restoring \"" << statusModEvent.effect.targetStat
-                << "\" of entity [" << static_cast<unsigned int>(statusModEvent.receiverID)
-                << "] by " << statusModEvent.effect.modificationVal
-                << ". Current val: " << it->second;
-        }
-
+        revertTempTimed(statusModEvent, receiverStatus);
         return EventStatus::COMPLETE;
     }
 
     return EventStatus::INCOMPLETE;
+}
+
+void EventSystem::revertTempTimed(StatusModEvent& statusModEvent, EntityStatus& receiverStatus) const
+{
+    const auto it = receiverStatus.values.find(statusModEvent.effect.targetStat);
+    if (it != receiverStatus.values.end())
+    {
+        it->second += statusModEvent.effect.modificationVal * -1.f;
+        LOG_DEBUG(Logger::get())
+            << "Completed temporary-timed event. Restoring \"" << statusModEvent.effect.targetStat
+            << "\" of entity [" << static_cast<unsigned int>(statusModEvent.receiverID)
+            << "] by " << statusModEvent.effect.modificationVal
+            << ". Current val: " << it->second;
+    }
 }
