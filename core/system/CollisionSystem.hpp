@@ -23,6 +23,7 @@ public:
     CollisionSystem(entt::registry& piplineReg, const LegacySimTime& simTime, const sf::Vector2f& center, const sf::Vector2u& size);
 
     constexpr std::string_view name() const override final;
+    static sf::FloatRect colliderOf(const Sprite& sprite);
     void update(entt::registry& entityReg, const float& dt = 0.f) override final;
     void remove(entt::registry& entityReg, const entt::entity entityID);
     void clear();

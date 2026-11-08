@@ -21,6 +21,14 @@ constexpr std::string_view CollisionSystem::name() const
     return "CollisionSystem";
 }
 
+sf::FloatRect CollisionSystem::colliderOf(const Sprite& sprite)
+{
+    // Rule R4: the unrotated texture-size box centred on the sprite position (rotation, scale and
+    // origin do not change it).
+    const sf::Vector2f size{ static_cast<float>(sprite.getTextureRect().size.x), static_cast<float>(sprite.getTextureRect().size.y) };
+    return sf::FloatRect{ sprite.getPosition() - size / 2.f, size };
+}
+
 void CollisionSystem::update(entt::registry& entityReg, const float& dt)
 {
     LOG_TRACE(Logger::get()) << "Entering CollisionSystem::update()";
@@ -89,11 +97,11 @@ void CollisionSystem::collisionUpdate(entt::registry& entityReg)
 void CollisionSystem::collisionUpdateImpl(entt::registry& entityReg, const entt::entity sourceID)
 {
     // Test every candidate for collision (rule R3)
-    const sf::FloatRect sourceHitbox = entityReg.get<Sprite>(sourceID).getGlobalBounds();
+    const sf::FloatRect sourceHitbox = colliderOf(entityReg.get<Sprite>(sourceID));
 
     for (const auto& [receiverIndex, receiverID] : m_candidates)
     {
-        if (!sourceHitbox.findIntersection(entityReg.get<Sprite>(receiverID).getGlobalBounds()).has_value())
+        if (!sourceHitbox.findIntersection(colliderOf(entityReg.get<Sprite>(receiverID))).has_value())
             continue;
 
         if (sourceID == receiverID)

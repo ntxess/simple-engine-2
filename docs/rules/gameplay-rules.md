@@ -70,3 +70,18 @@ visualizer but no longer decides contacts.
 
 Goldens: `effects` changed from tick 213 (the stationary receiver at x = 500 is
 now hit), `patrol` from tick 1505 (111 ticks differ); `stress` unchanged.
+
+## R4 The collider is the unrotated texture box at the sprite position
+
+An entity's collider is the axis-aligned box of its texture rectangle's size,
+centred on the sprite position. Rotation, scale and the sprite origin do not
+change it.
+
+Before: the collider was the sprite's global bounds
+(core/system/CollisionSystem.cpp:73), the axis-aligned box around the rotated
+and scaled sprite, so a path-following entity's collider grew by up to 41% per
+side as its heading turned (67.9 px instead of 48 px at 45 degrees).
+
+Goldens: all three changed, each for a short stretch of ticks around contacts
+(`stress` from tick 438, 47 ticks; `effects` from tick 1303, 104 ticks;
+`patrol` from tick 118, 59 ticks).
