@@ -1,20 +1,28 @@
 # Simple Engine 2
 Fork of the original simple game engine with new additions and structural changes
 
-## Build x64-Debug
-```bash
-cmake -S . -B "build/cmake/x64-Debug" -DCMAKE_BUILD_TYPE=Debug
+## Redesign in progress
+
+The engine is being redesigned on the `redesign/engine-v2` branch: new targets
+under `engine/` grow beside the legacy SFML tree (`core/`, `app/`), which is
+kept as a deterministic behaviour reference. Start with
+[docs/README.md](docs/README.md).
+
+## Build (Windows, Visual Studio 18 / MSVC 14.51)
+
+```bat
+scripts\with-msvc.cmd cmake --workflow --preset msvc-dev
 ```
-```bash
-cmake --build "build/cmake/x64-Debug" --config Debug -j
+
+Local CI (build, tests, checks and lint on msvc-dev, msvc-asan and clangcl-dev):
+
+```bat
+powershell -File scripts\ci.ps1
 ```
-## Build x64-Release
-```bash
-cmake -S . -B "build/cmake/x64-Release" -DCMAKE_BUILD_TYPE=Release
-```
-```bash
-cmake --build "build/cmake/x64-Release" --config Release -j
-```
+
+The legacy editor builds with the `legacy-msvc-debug` and `legacy-msvc-release`
+presets and runs from the repository root (`out/build/legacy-msvc-debug/app/editor_app.exe`).
+
 # Running in Docker [WIP]
 ## Prerequisite:
 xhost is required for docker to gain access to X11.

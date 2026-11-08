@@ -8,6 +8,7 @@
 # Build trees and IDE state
 /build/
 /out/
+/.deps/
 /.vs/
 /.cache/
 /.vscode/*

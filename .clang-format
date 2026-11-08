@@ -1,0 +1,8 @@
+# Google C++ style (docs/style.md). Applies to new code only; the legacy tree
+# under core/ and app/ keeps its own style and is excluded from lint.
+BasedOnStyle: Google
+Language: Cpp
+Standard: Latest
+---
+Language: Json
+DisableFormat: true
