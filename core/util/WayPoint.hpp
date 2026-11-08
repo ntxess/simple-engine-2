@@ -18,6 +18,10 @@ public:
 	// distanceTotal; nullptr for no points.
 	static std::unique_ptr<WayPoint> makePath(const std::vector<sf::Vector2f>& points);
 
+	// The length of the segment from a to b, sqrt(dx * dx + dy * dy) in float with dx = b.x - a.x
+	// and dy = b.y - a.y (rules R12 and R13: every segment, the closing one included).
+	static float distanceBetween(const sf::Vector2f& a, const sf::Vector2f& b);
+
 public:
 	const sf::Vector2f coordinate;
 	float distanceToNext;

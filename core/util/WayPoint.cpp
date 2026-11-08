@@ -47,13 +47,13 @@ std::unique_ptr<WayPoint> WayPoint::makePath(const std::vector<sf::Vector2f>& po
 WayPoint* WayPoint::link(std::unique_ptr<WayPoint> waypoint)
 {
 	nextWP = std::move(waypoint);
-
-	distanceToNext = sqrt(
-		(nextWP->coordinate.x - coordinate.x) * 
-		(nextWP->coordinate.x - coordinate.x) +
-		(nextWP->coordinate.y - coordinate.y) *
-		(nextWP->coordinate.y - coordinate.y)
-	);
-
+	distanceToNext = distanceBetween(coordinate, nextWP->coordinate);
 	return nextWP.get();
+}
+
+float WayPoint::distanceBetween(const sf::Vector2f& a, const sf::Vector2f& b)
+{
+	const float dx = b.x - a.x;
+	const float dy = b.y - a.y;
+	return std::sqrt(dx * dx + dy * dy);
 }

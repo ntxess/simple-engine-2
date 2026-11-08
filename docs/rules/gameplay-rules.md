@@ -1,12 +1,13 @@
 # Gameplay rules
 
 Declared rules applied to the legacy reference (core/, app/) after
-`legacy-ref-v0`, one commit each (docs/milestone-specs.md, M1b). Each rule
-states the behaviour the new engine's gameplay (M3, game_rampage) implements,
-what the legacy code did before, and which golden projection hashes of the
-reference scenarios (tests/fixtures/reference/) it re-baselined. The reference
-at `legacy-ref-v1` follows all of them, and M3 compares the two trees through
-the projections of that state.
+`legacy-ref-v0`, one commit each (docs/milestone-specs.md: R1 to R10 in M1b,
+R11 to R13 in M3a). Each rule states the behaviour the new engine's gameplay
+(M3, game_rampage) implements, what the legacy code did before, and which
+golden projection hashes of the reference scenarios (tests/fixtures/reference/)
+it re-baselined. The reference at `legacy-ref-v1` follows R1 to R10, the one
+at `legacy-ref-v2` all thirteen, and M3 compares the two trees through the
+projections of `legacy-ref-v2`.
 
 Conventions: time is counted in ticks of the 120 Hz simulation clock
 (LegacySimTime). An authored duration of `ms` milliseconds is
@@ -207,3 +208,130 @@ destroying the current entity of an entt view is safe, so the deferred point
 produces the same projections; the rule fixes the single destroy point and
 its order, which the engine's Cleanup phase (World::DrainDestroyRequests)
 reproduces.
+
+## R11 The clamp keeps the collider inside the scene bounds
+
+Boundary (R9) keeps every sprite's collider, the unrotated texture box centred
+on its position (R4), inside the scene bounds `W` × `H`, the configured
+resolution (1920 × 1080). With the half extents `hw = width / 2` and
+`hh = height / 2` of the sprite's texture rectangle, the new position is
+
+    x' = W < 2·hw ? W / 2 : clamp(x, hw, W - hw)
+    y' = H < 2·hh ? H / 2 : clamp(y, hh, H - hh)
+
+evaluated in float as written (`W < 2.f * hw ? W * 0.5f :
+std::clamp(x, hw, W - hw)`, `hw = texture width / 2.f`, `W` the bound as a
+float). Both axes are computed from the position before the clamp and written
+once. A sprite larger than the bounds on an axis is centred on that axis. The
+clamp does not mark an entity as moved.
+
+Before: the clamp (app/scene/Sandbox.cpp:202-218, Sandbox::checkBoundary;
+core/system/BoundarySystem.cpp since R9) compared the centred position with 0
+on the left and top, but the position plus the size of the rotated global
+bounds with the bounds on the right and bottom, so half a sprite could leave on
+the left and top while a whole sprite's margin was kept on the right and
+bottom (48 px, or 67.9 px for a 48 px sprite turned 45 degrees). Each
+correction's `setPosition` took the other axis from before the clamp, so when
+both axes needed one the second undid the first, and a sprite pushed into a
+corner kept leaving the arena along the first axis.
+
+Goldens: all three changed from tick 1 on every tick (3600 of 3600):
+`stress` (SpawnIndex 10 starts at x = 1902; it was kept at 1852.1, now at
+1896), `effects` (SpawnIndex 9 on its path along the right edge at x = 1890,
+which the old clamp moved to 1872) and `patrol` (SpawnIndex 9 starts at
+y = 3, now 24). Path-following entities soon differ everywhere, because a
+repeating path drifted from its points (R12, R13) until the clamp held it.
+
+Coverage: `effects` SpawnIndex 13 is pushed diagonally into the bottom-left
+corner by its path, corrected on both axes in the same ticks from tick 43, and
+stops beyond the corner, held at (24, 1056); before, it left the arena to
+x = -50.3 with y held at 1012.1. In `patrol` the player walks along the left
+edge from tick 2877. No fixture has a sprite larger than the bounds (no
+texture is larger than the arena); the engine's boundary_test covers it.
+
+## R12 Path steps follow the polyline
+
+A path's progress is its current segment `i`, from waypoint `i` to the next,
+and the distance `u` travelled along it (a float). An entity starts on its
+first point with `u = 0` on segment 0. Each tick, an entity with the Speed
+stat (one without it does not move) takes the step `rem = speed × dt`
+(`dt = 1.f / 120.f`, which is the float of the tick length 1/120 s) and loops:
+
+1. a segment of length 0 is skipped (R6);
+2. with no segment left (the end of a non-repeating path), the entity is placed
+   exactly on the last point and stops moving for good;
+3. if `u + rem < len`, then `u = u + rem` and the loop ends;
+4. otherwise `rem = (u + rem) - len` and `u = 0`, and the loop goes on with the
+   next segment.
+
+So one tick's step can pass several waypoints. The position is taken from the
+progress: `a + (b - a) × (u / len)` per axis, with the segment's points `a`
+and `b` and its length `len = sqrt(dx × dx + dy × dy)` (`dx = b.x - a.x`,
+`dy = b.y - a.y`; WayPoint::distanceToNext, computed once per segment). The
+heading is the segment's, `atan2(dy, dx) × (180 / π) + 90` degrees, of the
+last segment of positive length the entity moved along in the tick (so the
+segment it ends the tick on, or the last one of a path it finished). All of
+these are float expressions, evaluated as written and in this order. An
+entity is moved (UpdateEntityEvent, the dirty flag of R2 and R8) on every tick
+its position changes, so never after it finished its path. Boundary (R11)
+clamps the sprite after this, without changing the progress, so a path that
+leaves the arena does not shift the rest of the path. A step that a whole
+round of a repeating path no longer shortens (a speed so large, or NaN or
+infinite, that the round vanishes in float rounding) would loop for ever; it
+ends at the start of the path instead. Until R13, a repeating path went on
+from its end with segment 0, so the entity jumped back to its first point.
+
+Before: MovementPattern kept the waypoint the entity was heading from and a
+running total `distance` (core/system/WayPointSystem.cpp:37-51). Each tick the
+whole step `speed × dt` was taken along the current segment's direction, even
+past its end, and the next segment began only once `distance` exceeded the
+next waypoint's running total (`distanceTotal`), so corners were overshot by
+up to one step and at most one waypoint was passed per tick. The position was
+integrated from these per-tick increments (`sprite.move`), so it drifted from
+the path, and every clamp at the arena edge shifted the rest of the path; the
+heading came from the step's vector, `atan2(velocity.y, velocity.x)`.
+
+Goldens: all three changed from tick 1 on every tick (3600 of 3600; at tick 1
+only in the last digits of the headings in `stress` and `patrol`, and in
+`effects` SpawnIndex 14, which passes three waypoints in its first step).
+
+Coverage: `effects` SpawnIndex 14 has segments of 1 px and 1.41 px, shorter
+than its 4.17 px step, and passes three waypoints in tick 1 and again in tick
+162, where its step crosses its last point (which is its first) and the next
+two.
+The non-repeating paths of `effects` end exactly on their last points:
+SpawnIndex 10 at (400, 700) from tick 1393 and SpawnIndex 11 at (1840, 540)
+from tick 1600, where the old code took one more step to x = 1841 and stayed
+a moved source for that tick (the player's Charge differs from tick 1601).
+SpawnIndex 13 ends beyond the arena corner and stays clamped there (R11).
+
+## R13 Repeating paths close the loop
+
+A repeating path with two or more distinct points has one more segment, the
+closing segment from its last point back to its first, and after it starts
+over at segment 0. The entity therefore cycles the closed polygon, and a
+two-point path goes back and forth. The closing segment is a segment like any
+other (R12): its length is `sqrt(dx × dx + dy × dy)` with `dx = first.x -
+last.x` and `dy = first.y - last.y`, the heading along it is its own, and when
+the last point is the first its length is 0 and it is skipped (R6). A path
+whose points all coincide, a single point included, never moves.
+
+Before: at the last waypoint `repeat` reset the progress (`currentPath` and
+`distance`) but not the position, without moving in that tick
+(core/system/WayPointSystem.cpp:27-34), so the path replayed from where the
+entity stood, offset by the vector from the first point to the last, and
+repeating paths wandered off until the clamp held them at the arena edge.
+Since R12, which takes the position from the progress, the entity jumped back
+from its last point to its first.
+
+Goldens: all three changed from the first time a repeating path reached its
+end: `stress` from tick 104 (3497 ticks), `effects` from tick 48 (3097 ticks;
+SpawnIndex 6 turns back along its closing segment and skips its zero-length
+first segment) and `patrol` from tick 94 (3479 ticks).
+
+Coverage: two-point paths go back and forth in `effects` (SpawnIndex 2, 5 and
+9) and in both generated scenarios; the other generated paths cycle their
+polygons. `effects` SpawnIndex 14, whose last point is its first, has a
+zero-length closing segment and is unchanged by this rule; SpawnIndex 15
+(three coincident points) and the one-point paths in `stress` (SpawnIndex 11)
+and `patrol` (SpawnIndex 10 and 17) never move.

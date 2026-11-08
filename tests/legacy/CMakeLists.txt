@@ -21,7 +21,7 @@
 #                              the recording gives the same hash
 #   legacy.reference.NAME      every tick's projection hash equals the golden
 #                              NAME.sehash and the projection equals the golden
-#                              NAME.seproj.gz (generated at legacy-ref-v1); a
+#                              NAME.seproj.gz (added at legacy-ref-v1); a
 #                              declared rule (docs/rules/gameplay-rules.md)
 #                              re-baselines both (scripts/ci.ps1 clears the
 #                              variable, so the commit gate always checks):
