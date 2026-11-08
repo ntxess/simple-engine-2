@@ -103,3 +103,18 @@ the player 1 px per input poll, a rate tied to the render loop
 Goldens: all three changed from tick 0, where the projection first prints the
 Speed stat in its new unit (path-following positions are now speed × dt in
 px/s × s, which may round differently in the last bit).
+
+## R6 Zero-length path segments are skipped
+
+A path segment whose two waypoints coincide (length 0) is skipped within the
+same tick: the path advances to the next waypoint without moving or turning
+the entity, and movement continues along the first segment of positive
+length. A path that ends after skipped segments ends (or repeats) as usual.
+
+Before: the direction of a segment was its vector divided by its length
+(core/system/WayPointSystem.cpp:42-43), so a zero-length segment gave a NaN
+direction and the entity's position and heading became NaN for good (it then
+never collided).
+
+Goldens: `effects` changed from tick 1 (its path with a duplicated first
+waypoint now moves); `stress` and `patrol` unchanged.

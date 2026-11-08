@@ -20,7 +20,7 @@ The legacy reference retires when nothing is left open
 | Repeating paths restart progress, not position | core/system/WayPointSystem.cpp:27-34 | open (M3) | Characterization: at the last waypoint `repeat` resets `currentPath` and `distance` but keeps the sprite where it is, so the path replays offset from there |
 | Semantic projection and hash | core/util/SemanticProjection.*, core/component/SpawnIndex.hpp | ported (M1a, reference only) | Per tick, per entity in SpawnIndex order: x, y, rotation, HP and sorted stats (%.9g), FNV-1a 64 per tick and per run; `.seproj` text. The engine's WorldHash (M2) is separate; refcmp (M3) compares the two trees through projections |
 | Quadtree broadphase | core/util/QuadTree.cpp | re-specified (M1b); open (M3, M10) | Rule R3: the reference tests all pairs in SpawnIndex order; the quadtree remains only for the editor's visualizer (M10 decides its fate); spatial hash in the engine (M3), checked against brute force |
-| Waypoint path following | core/system/WayPointSystem.cpp | open (M1b, M3) | Rule R6 zero-length segments |
+| Waypoint path following | core/system/WayPointSystem.cpp | open (M3) | Rule R6 applied to the reference (zero-length segments skipped); see also the repeat characterization below |
 | Scene stack push/replace/pop | core/manager/SceneManager.cpp:40-69 | open (M2) | GameStateStack keeps the semantics |
 | System ordering and profiler | core/manager/SystemManager.cpp, util/SystemProfiler.cpp | open (M2) | Phased Schedule with timing ring |
 | Resource cache semantics | core/manager/ResourceManager.hpp:64-120 | open (M9) | AssetRegistry; key checked before decode |
