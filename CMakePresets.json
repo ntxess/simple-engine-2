@@ -410,6 +410,23 @@
           "name": "linux-clang-asan"
         }
       ]
+    },
+    {
+      "name": "linux-clang-debug",
+      "steps": [
+        {
+          "type": "configure",
+          "name": "linux-clang-debug"
+        },
+        {
+          "type": "build",
+          "name": "linux-clang-debug"
+        },
+        {
+          "type": "test",
+          "name": "linux-clang-debug"
+        }
+      ]
     }
   ]
 }

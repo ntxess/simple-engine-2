@@ -20,6 +20,7 @@ branch="$(git -C "$win_repo" rev-parse --abbrev-ref HEAD)"
 if [ ! -d "$clone/.git" ]; then
   git clone --no-checkout "$win_repo" "$clone"
 fi
+export SE_DEPS_CACHE="${SE_DEPS_CACHE:-$win_repo/.deps}"
 git -C "$clone" fetch --force "$win_repo" "$branch:refs/remotes/win/$branch"
 git -C "$clone" checkout --force -B "$branch" "refs/remotes/win/$branch"
 if [ ! -e "$clone/.deps" ]; then
