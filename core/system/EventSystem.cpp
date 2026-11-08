@@ -13,6 +13,11 @@ constexpr std::string_view EventSystem::name() const
     return "EventSystem";
 }
 
+void EventSystem::setWatchdogTicks(std::uint64_t watchdogTicks)
+{
+    m_eventWatchdogTicks = watchdogTicks;
+}
+
 void EventSystem::update(entt::registry& entityReg, const float& dt)
 {
     LOG_TRACE(Logger::get()) << "Entering EventSystem::update()";

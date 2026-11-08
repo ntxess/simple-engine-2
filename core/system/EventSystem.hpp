@@ -24,6 +24,7 @@ public:
     EventSystem(entt::registry& piplineReg, const LegacySimTime& simTime, std::uint64_t watchdogTicks);
 
     constexpr std::string_view name() const override final;
+    void setWatchdogTicks(std::uint64_t watchdogTicks);
     void update(entt::registry& entityReg, const float& dt = 0.f) override final;
 
     EventStatus apply(const EffectType effectType, StatusModEvent& statusModEvent, EntityStatus& receiverStatus) const;
@@ -34,5 +35,5 @@ public:
 private:
 	entt::registry& m_piplineReg;
     const LegacySimTime& m_simTime;
-    const std::uint64_t m_eventWatchdogTicks;
+    std::uint64_t m_eventWatchdogTicks;
 };

@@ -52,6 +52,7 @@ void Sandbox::init()
 
     // Create the main player object
     m_player = m_reg.create();
+    assignSpawnIndex(m_reg, m_player);
     const auto& texture = m_appContext->textureManager.get("player");
     if (!texture)
     {
@@ -211,6 +212,11 @@ entt::registry& Sandbox::getRegistry()
 SystemManager* Sandbox::getSystemManager()
 {
     return &m_system;
+}
+
+entt::entity Sandbox::getPlayer() const
+{
+    return m_player;
 }
 
 void Sandbox::checkBoundary(const sf::Vector2u& boundary, sf::Sprite& obj)

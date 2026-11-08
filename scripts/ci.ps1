@@ -11,10 +11,14 @@
   scripts/ci.ps1                       # commit gate: msvc-dev, msvc-asan, clangcl-dev
   scripts/ci.ps1 -Milestone            # adds msvc-debug, msvc-release and WSL TSan/ASan
   scripts/ci.ps1 -Presets msvc-dev     # one preset
+  scripts/ci.ps1 -Presets legacy-msvc-debug,legacy-msvc-release
+                                       # the legacy reference (build + "legacy" tests)
+  scripts/ci.ps1 -Legacy               # appends both legacy presets to the selection
 #>
 param(
   [string[]]$Presets = @('msvc-dev', 'msvc-asan', 'clangcl-dev'),
-  [switch]$Milestone
+  [switch]$Milestone,
+  [switch]$Legacy
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
@@ -23,6 +27,9 @@ $Presets = @($Presets | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
 if ($Milestone) {
   $Presets = @('msvc-debug', 'msvc-dev', 'msvc-release', 'msvc-asan', 'clangcl-dev',
                'wsl:linux-clang-tsan', 'wsl:linux-clang-asan')
+}
+if ($Legacy) {
+  $Presets = @($Presets) + @('legacy-msvc-debug', 'legacy-msvc-release')
 }
 $failed = @()
 foreach ($preset in $Presets) {

@@ -36,6 +36,7 @@ public:
     entt::registry& getRegistry() override final;
 
     SystemManager* getSystemManager();
+    entt::entity getPlayer() const;
 
 private:
     void checkBoundary(const sf::Vector2u& boundary, sf::Sprite& obj);

@@ -940,30 +940,13 @@ void Editor::generateEntities(size_t numOfEntities)
 
     // Generate a ton of sprite for testing in random places within the boundary of the window.
     // Each press draws the next seeded stream, so a session with the same seed generates the same entities.
+    // The paths and their distributions come from util/StressGenerator (shared with legacy_replay --generate).
     std::mt19937 rng = makeLegacyRng(m_appContext->seed, RngStream::StressGenerator + m_generateCount++);
-    std::uniform_int_distribution<std::mt19937::result_type> dist6(0, static_cast<unsigned int>(width));
+    const std::vector<std::vector<sf::Vector2f>> paths = generateStressPaths(rng, width, height, numOfEntities);
 
-    for (size_t i = 0; i < numOfEntities; i++)
+    for (const auto& points : paths)
     {
-        std::unique_ptr<WayPoint> root = nullptr;
-        WayPoint* last = nullptr;
-
-        for (size_t j = 0; j <= size_t(dist6(rng)) % 10; j++)
-        {
-            std::unique_ptr<WayPoint> point = std::make_unique<WayPoint>(sf::Vector2f{ float(dist6(rng) % int(width)), float(dist6(rng) % int(height)) });
-
-            if (j != 0)
-            {
-                last->link(std::move(point));
-                last->nextWP->distanceTotal = last->distanceTotal + last->distanceToNext;
-                last = last->next();
-            }
-            else
-            {
-                root = std::move(point);
-                last = root.get();
-            }
-        }
+        std::unique_ptr<WayPoint> root = WayPoint::makePath(points);
 
         // Entity create and store into the scene's ENTT::entity registry
         entt::entity mob = m_selectedSceneData->createEntity();
@@ -973,6 +956,7 @@ void Editor::generateEntities(size_t numOfEntities)
             LOG_ERROR(Logger::get()) << "Failed to get texture for generated entity!";
             return;
         }
+        assignSpawnIndex(m_selectedSceneData->getRegistry(), mob);
         m_selectedSceneData->getRegistry().emplace<Sprite>(mob, texture.value().get());
         m_selectedSceneData->getRegistry().get<Sprite>(mob).setPosition({ root->coordinate.x, root->coordinate.y });
         m_selectedSceneData->getRegistry().emplace<EntityStatus>(mob);

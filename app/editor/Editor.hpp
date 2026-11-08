@@ -25,6 +25,7 @@
 #include "Systems.hpp"
 #include "interface/IScene.hpp"
 #include "util/Font.hpp"
+#include "util/StressGenerator.hpp"
 #include "util/Logger.hpp"
 #include "util/LogStream.hpp"
 #include "scene/Scenes.hpp"

@@ -14,7 +14,11 @@ The legacy reference retires when nothing is left open
 | Effect model INSTANT / OVERTIME / TEMPTIMED | core/system/EventSystem.cpp:54-176 | open (M1b, M3) | Rules R1, R7 |
 | Raw `Effects*` from a pending event into the source's EffectsList | core/component/StatusModEvent.hpp:26; core/system/CollisionSystem.cpp:104 | re-specified (M1a) | StatusModEvent copies the effect at contact; the pointer dangled when the inspector erased or the vector grew (app/editor/EditorComponentVisitor.cpp:67-70) |
 | Per-source collision cooldown | core/component/UpdateEntityPolling.cpp:18-24 | open (M1b, M3) | Rule R2: per (source, receiver) pair |
-| Self and same-team contact skips | core/system/CollisionSystem.cpp:78-87 | open (M3) | Characterization test |
+| Self and same-team contact skips | core/system/CollisionSystem.cpp:78-87 | open (M3) | Characterization test; the reference scenario `effects` has a friendly source next to the player |
+| Sprite clamp to the scene bounds in render() | app/scene/Sandbox.cpp:155 | re-specified (M1a) | Runs at the end of Sandbox::update over every sprite, against the configured resolution, so rendering never moves entities (`legacy.selfdet.*` at --fps 30/60/144/160) |
+| Clamp corrections read the position from before the first correction | app/scene/Sandbox.cpp:222-238 (checkBoundary) | open (M3) | Characterization: a corner correction on one axis is undone by the other axis's `setPosition`, and the clamp uses the rotated AABB size against the centred origin, so sprites can leave the arena (seen in the `stress` and `patrol` projections) |
+| Repeating paths restart progress, not position | core/system/WayPointSystem.cpp:27-34 | open (M3) | Characterization: at the last waypoint `repeat` resets `currentPath` and `distance` but keeps the sprite where it is, so the path replays offset from there |
+| Semantic projection and hash | core/util/SemanticProjection.*, core/component/SpawnIndex.hpp | ported (M1a, reference only) | Per tick, per entity in SpawnIndex order: x, y, rotation, HP and sorted stats (%.9g), FNV-1a 64 per tick and per run; `.seproj` text. The engine's WorldHash (M2) is separate; refcmp (M3) compares the two trees through projections |
 | Quadtree broadphase | core/util/QuadTree.cpp | open (M1b, M3) | Rule R3 brute force in the reference; spatial hash in the engine |
 | Waypoint path following | core/system/WayPointSystem.cpp | open (M1b, M3) | Rule R6 zero-length segments |
 | Scene stack push/replace/pop | core/manager/SceneManager.cpp:40-69 | open (M2) | GameStateStack keeps the semantics |

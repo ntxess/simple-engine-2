@@ -1,0 +1,39 @@
+# Tests of the legacy behaviour reference (label "legacy"), added by cmake/Legacy.cmake.
+#
+# legacy_test.py runs legacy_replay from the repository root, because the legacy
+# tree reads config/ and assets/ relative to the working directory. Scenarios
+# live in tests/fixtures/reference/ as NAME.scenario.json plus NAME.seinput.
+#
+#   legacy.selfdet.NAME        two runs and runs at --fps 30/60/144/160 give
+#                              the same projection hash (docs/milestone-specs.md,
+#                              M1a exit)
+#   legacy.selfdet.live_replay a paced run in a visible window, recorded, then
+#                              replayed headless, gives the same hash
+
+set(_legacy_driver "${CMAKE_CURRENT_SOURCE_DIR}/legacy_test.py")
+set(_legacy_fixtures "${CMAKE_SOURCE_DIR}/tests/fixtures/reference")
+set(_legacy_work "${CMAKE_CURRENT_BINARY_DIR}/work")
+set(_legacy_scenarios stress effects patrol)
+
+foreach(_scenario IN LISTS _legacy_scenarios)
+  add_test(NAME legacy.selfdet.${_scenario}
+    COMMAND "${Python3_EXECUTABLE}" "${_legacy_driver}" selfdet
+            --exe "$<TARGET_FILE:legacy_replay>"
+            --scenario "${_legacy_fixtures}/${_scenario}"
+            --work "${_legacy_work}/selfdet/${_scenario}"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+  set_tests_properties(legacy.selfdet.${_scenario} PROPERTIES LABELS legacy)
+endforeach()
+
+# Opens a visible window for about five seconds; keys pressed meanwhile are
+# recorded and replayed, so the test holds either way.
+add_test(NAME legacy.selfdet.live_replay
+  COMMAND "${Python3_EXECUTABLE}" "${_legacy_driver}" live-replay
+          --exe "$<TARGET_FILE:legacy_replay>"
+          --scenario "${_legacy_fixtures}/stress"
+          --work "${_legacy_work}/live_replay"
+          --ticks 600 --fps 60
+  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+set_tests_properties(legacy.selfdet.live_replay PROPERTIES
+  LABELS "legacy;desktop"
+  RUN_SERIAL TRUE)
