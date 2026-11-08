@@ -328,9 +328,10 @@ void Editor::renderDebugPanel(const ImVec2& pos, const ImVec2& size)
                 prevEntityAmount = 0;
             }
 
+            // The simulation ticks at a fixed rate (sim-tick-rate); this only limits presentation.
             static int frameRateTarget = 60;
             if (ImGui::SliderInt("Frame Rate", &frameRateTarget, 0, 255))
-                m_appContext->deltaTime = static_cast<float>(1000.f / frameRateTarget);
+                m_appContext->window.setFramerateLimit(static_cast<unsigned int>(frameRateTarget));
             ImGui::EndDisabled();
         }
     }

@@ -43,6 +43,7 @@ private:
 private:
     ApplicationContext* m_appContext;
     entt::entity m_player;
+    sf::Vector2u m_bounds;
     SystemManager m_system;
     entt::registry m_reg;
     entt::registry m_collisionEventReg;

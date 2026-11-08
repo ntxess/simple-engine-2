@@ -3,11 +3,13 @@
 Sandbox::Sandbox()
     : m_appContext{nullptr}
     , m_player{entt::null}
+    , m_bounds{0, 0}
 {}
 
 Sandbox::Sandbox(ApplicationContext* sysData)
     : m_appContext{sysData}
     , m_player{entt::null}
+    , m_bounds{0, 0}
 {}
 
 Sandbox::~Sandbox()
@@ -74,6 +76,10 @@ void Sandbox::init()
     float width = static_cast<float>(m_appContext->configData.get<int>("width").value());
     float height = static_cast<float>(m_appContext->configData.get<int>("height").value());
 
+    // The scene bounds come from the configured resolution, not from the window, so the
+    // simulation does not depend on the OS window size.
+    m_bounds = sf::Vector2u{ static_cast<unsigned int>(width), static_cast<unsigned int>(height) };
+
     m_reg.get<Sprite>(m_player).setPosition({200, 200});
 
     // Create event effect for collecting coins
@@ -87,7 +93,7 @@ void Sandbox::init()
         });
     m_reg.get<EffectsList>(m_player).effectsList.push_back({ EffectType::TEMPTIMED, Effects{"HP", -10.f, std::chrono::milliseconds(5000)} });
 
-    m_system.addSystem<CollisionSystem>(true, m_collisionEventReg, sf::Vector2f{ 0.f, 0.f }, m_appContext->window.getSize());
+    m_system.addSystem<CollisionSystem>(true, m_collisionEventReg, sf::Vector2f{ 0.f, 0.f }, m_bounds);
     m_system.addSystem<EventSystem>(true, m_collisionEventReg, std::chrono::milliseconds(36000));
     m_system.addSystem<WayPointSystem>(true, "Speed");
 }
@@ -135,6 +141,14 @@ void Sandbox::update()
         }
     }
 
+    // Keep every sprite inside the scene bounds. This used to run in render(), so the number of
+    // rendered frames moved entities; it is simulation state and belongs to the tick.
+    const auto& spriteView = m_reg.view<Sprite>();
+    for (const auto& entity : spriteView)
+    {
+        checkBoundary(m_bounds, spriteView.get<Sprite>(entity));
+    }
+
     LOG_TRACE(Logger::get()) << "Leaving update()";
 }
 
@@ -151,8 +165,6 @@ void Sandbox::render()
             if (m_reg.valid(entity))
             {
                 auto& sceneRenderTexture = m_reg.get<SceneViewRenderer>(sceneTextureID);
-                auto& spriteEntity = view.get<Sprite>(entity);
-                checkBoundary(sceneRenderTexture.getSize(), spriteEntity);
                 sceneRenderTexture.draw(view.get<Sprite>(entity));
             }
         }
