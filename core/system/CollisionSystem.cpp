@@ -76,67 +76,90 @@ void CollisionSystem::collisionUpdate(entt::registry& entityReg)
     }
     std::sort(m_candidates.begin(), m_candidates.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
 
-    // Event-driven collision update
+    // Rule R8: collect this tick's contacts, the distinct overlapping (source, receiver) pairs, and
+    // apply them sorted by (source, receiver) SpawnIndex.
+    m_contacts.clear();
+
+    // Event-driven collision sources
     const auto& eventView = entityReg.view<Sprite, TeamTag, EffectsList, UpdateEntityEvent>();
     for (const auto& sourceID : eventView)
     {
-        collisionUpdateImpl(entityReg, sourceID);
+        collectContacts(entityReg, sourceID);
 
-        // QuadTree update completed, delete dirty flags
+        // Contacts collected, delete dirty flags
         entityReg.remove<UpdateEntityEvent>(sourceID);
     }
 
-    // Polling collision update
+    // Polling collision sources
     const auto& pollingView = entityReg.view<Sprite, TeamTag, EffectsList, UpdateEntityPolling>();
     for (const auto& sourceID : pollingView)
     {
-        collisionUpdateImpl(entityReg, sourceID);
+        collectContacts(entityReg, sourceID);
+    }
+
+    std::sort(m_contacts.begin(), m_contacts.end(), [](const Contact& a, const Contact& b) {
+        return a.sourceIndex != b.sourceIndex ? a.sourceIndex < b.sourceIndex : a.receiverIndex < b.receiverIndex;
+    });
+    m_contacts.erase(std::unique(m_contacts.begin(), m_contacts.end(), [](const Contact& a, const Contact& b) {
+        return a.sourceID == b.sourceID && a.receiverID == b.receiverID;
+    }), m_contacts.end());
+
+    for (const Contact& contact : m_contacts)
+    {
+        applyContact(entityReg, contact.sourceID, contact.receiverID);
     }
 }
 
-void CollisionSystem::collisionUpdateImpl(entt::registry& entityReg, const entt::entity sourceID)
+void CollisionSystem::collectContacts(entt::registry& entityReg, const entt::entity sourceID)
 {
     // Test every candidate for collision (rule R3)
     const sf::FloatRect sourceHitbox = colliderOf(entityReg.get<Sprite>(sourceID));
+    const SpawnIndex* sourceIndex = entityReg.try_get<SpawnIndex>(sourceID);
 
     for (const auto& [receiverIndex, receiverID] : m_candidates)
     {
-        if (!sourceHitbox.findIntersection(colliderOf(entityReg.get<Sprite>(receiverID))).has_value())
-            continue;
+        if (sourceHitbox.findIntersection(colliderOf(entityReg.get<Sprite>(receiverID))).has_value())
+        {
+            m_contacts.push_back(Contact{ sourceIndex ? sourceIndex->value : UINT32_MAX, receiverIndex, sourceID, receiverID });
+        }
+    }
+}
 
-        if (sourceID == receiverID)
-        {
-            LOG_TRACE(Logger::get()) << "Entity [" << static_cast<unsigned int>(sourceID) << "] collided with self";
-            continue;
-        }
-        else if (entityReg.get<TeamTag>(sourceID).tag == entityReg.get<TeamTag>(receiverID).tag)
-        {
-            LOG_TRACE(Logger::get()) << "Entity [" << static_cast<unsigned int>(sourceID) << "] collided with same team";
-            continue;
-        }
-        else if (entityReg.all_of<UpdateEntityPolling>(sourceID) && !entityReg.get<UpdateEntityPolling>(sourceID).isReadyFor(receiverID, m_simTime.tick))
-        {
-            LOG_TRACE(Logger::get()) << "Entity [" << static_cast<unsigned int>(sourceID) << "] is not ready to collide";
-            continue;
-        }
+void CollisionSystem::applyContact(entt::registry& entityReg, const entt::entity sourceID, const entt::entity receiverID)
+{
+    if (sourceID == receiverID)
+    {
+        LOG_TRACE(Logger::get()) << "Entity [" << static_cast<unsigned int>(sourceID) << "] collided with self";
+        return;
+    }
+    else if (entityReg.get<TeamTag>(sourceID).tag == entityReg.get<TeamTag>(receiverID).tag)
+    {
+        LOG_TRACE(Logger::get()) << "Entity [" << static_cast<unsigned int>(sourceID) << "] collided with same team";
+        return;
+    }
+    else if (entityReg.all_of<UpdateEntityPolling>(sourceID) && !entityReg.get<UpdateEntityPolling>(sourceID).isReadyFor(receiverID, m_simTime.tick))
+    {
+        LOG_TRACE(Logger::get()) << "Entity [" << static_cast<unsigned int>(sourceID) << "] is not ready to collide";
+        return;
+    }
 
-        // For all of the source entity modifiers, apply effects to receiver
-        if (entityReg.all_of<EffectsList>(sourceID))
+    // For all of the source entity modifiers, apply effects to receiver
+    if (entityReg.all_of<EffectsList>(sourceID))
+    {
+        for (const auto& [effectType, effect] : entityReg.get<EffectsList>(sourceID).effectsList)
         {
-            for (const auto& [effectType, effect] : entityReg.get<EffectsList>(sourceID).effectsList)
+            // Get the receiver status and apply effects
+            if (entityReg.all_of<EntityStatus>(receiverID))
             {
-                // Get the receiver status and apply effects
-                if (entityReg.all_of<EntityStatus>(receiverID))
-                {
-                    entt::entity statusModEventID = m_piplineReg.create();
+                entt::entity statusModEventID = m_piplineReg.create();
 
-                    m_piplineReg.emplace_or_replace<StatusModEvent>(statusModEventID, sourceID, receiverID, effectType, effect, m_simTime.tick);
+                StatusModEvent& event = m_piplineReg.emplace_or_replace<StatusModEvent>(statusModEventID, sourceID, receiverID, effectType, effect, m_simTime.tick);
+                event.sequence = m_nextEventSequence++;
 
-                    LOG_INFO(Logger::get())
-                        << "Collision Event ID [" << static_cast<unsigned int>(statusModEventID)
-                        << "]: Entity [" << static_cast<unsigned int>(sourceID)
-                        << "] collided with entity [" << static_cast<unsigned int>(receiverID) << "]";
-                }
+                LOG_INFO(Logger::get())
+                    << "Collision Event ID [" << static_cast<unsigned int>(statusModEventID)
+                    << "]: Entity [" << static_cast<unsigned int>(sourceID)
+                    << "] collided with entity [" << static_cast<unsigned int>(receiverID) << "]";
             }
         }
     }

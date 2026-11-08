@@ -29,4 +29,5 @@ public:
     std::uint64_t lastApplyTick; // Tick the timing of the next application counts from (starts at startTick)
     std::uint64_t elapsedTicks;  // Ticks accumulated by the applications so far
     std::uint64_t applications;  // OVERTIME applications so far (rule R7)
+    std::uint64_t sequence;      // Creation order; events are processed in this order (rule R8)
 };

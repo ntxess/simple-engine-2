@@ -9,6 +9,7 @@ StatusModEvent::StatusModEvent()
     , lastApplyTick{0}
     , elapsedTicks{0}
     , applications{0}
+    , sequence{0}
 {}
 
 StatusModEvent::StatusModEvent(const entt::entity source, const entt::entity receiver, const EffectType type, const Effects& effect, std::uint64_t nowTick)
@@ -20,6 +21,7 @@ StatusModEvent::StatusModEvent(const entt::entity source, const entt::entity rec
     , lastApplyTick{nowTick}
     , elapsedTicks{0}
     , applications{0}
+    , sequence{0}
 {}
 
 void StatusModEvent::accept(IComponentVisitor* visitor, entt::entity entityID)

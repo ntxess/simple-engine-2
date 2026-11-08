@@ -2,6 +2,8 @@
 
 #include <cstdint>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 #include <entt/entity/entity.hpp>
 #include <entt/entity/registry.hpp>
@@ -37,4 +39,5 @@ private:
 	entt::registry& m_piplineReg;
     const LegacySimTime& m_simTime;
     std::uint64_t m_eventWatchdogTicks;
+    std::vector<std::pair<std::uint64_t, entt::entity>> m_order; // Pending events, by sequence
 };

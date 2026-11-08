@@ -24,8 +24,16 @@ void EventSystem::update(entt::registry& entityReg, const float& dt)
 {
     LOG_TRACE(Logger::get()) << "Entering EventSystem::update()";
 
+    // Rule R8: events are processed in creation order, which follows the sorted contacts.
+    m_order.clear();
     const auto& statusModView = m_piplineReg.view<StatusModEvent>();
     for (const auto& eventID : statusModView)
+    {
+        m_order.emplace_back(statusModView.get<StatusModEvent>(eventID).sequence, eventID);
+    }
+    std::sort(m_order.begin(), m_order.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+
+    for (const auto& [sequence, eventID] : m_order)
     {
         const entt::entity receiverID = m_piplineReg.get<StatusModEvent>(eventID).receiverID;
 

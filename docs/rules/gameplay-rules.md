@@ -137,3 +137,25 @@ apart, instead of 120.
 
 Goldens: all three changed (`stress` from tick 560, 75 ticks; `effects` from
 tick 44; `patrol` from tick 121, 61 ticks).
+
+## R8 Contacts are sorted before their effects apply
+
+Each tick, the contacts are the distinct overlapping (source, receiver) pairs
+over all sources (moved and polled). They are sorted by source SpawnIndex,
+then receiver SpawnIndex, and handled in that order: the self, same-team and
+cooldown (R2) checks, then one event per effect of the source's EffectsList, in
+list order. Pending events are processed in the order they were created, so
+effects of earlier ticks come first and, within a tick, effects follow the
+sorted contacts.
+
+Before: contacts were handled source by source in entt's view order, moved
+sources before polled ones (core/system/CollisionSystem.cpp:52-71), and the
+pending events in the order of the event registry's storage, which entt
+iterates newest first and reorders when an event is destroyed
+(core/system/EventSystem.cpp:20-21). A source with both flags was handled
+twice in a tick. The order is invisible for whole-number effects but not for
+float sums near the stat's precision.
+
+Goldens: `effects` changed from tick 133 for the 95 ticks where its escort and
+charger both add to the player's Charge (1e7 + 1.5 + 0.75 rounds differently
+in the two orders); `stress` and `patrol` unchanged.
