@@ -36,8 +36,10 @@ elseif(CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")  # clang-cl
   if(SE_WARNINGS_AS_ERRORS)
     target_compile_options(se_warnings INTERFACE /WX)
   endif()
-  target_compile_options(se_determinism INTERFACE
-    /fp:precise /clang:-ffp-contract=off)
+  # clang's default floating-point model is already "precise"; adding
+  # /fp:precise as well only makes clang warn that -ffp-contract=off
+  # overrides it.
+  target_compile_options(se_determinism INTERFACE /clang:-ffp-contract=off)
 else()  # GCC and Clang
   target_compile_options(se_warnings INTERFACE
     -Wall -Wextra -Wpedantic -Wshadow)

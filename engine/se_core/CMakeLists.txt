@@ -3,6 +3,15 @@
 se_add_module(se_core KIND STATIC
   SOURCES
     src/assert.cc
+    src/breadcrumb.cc
+    src/detmath.cc
+    src/fp.cc
+    src/guid.cc
+    src/hash.cc
+    src/log.cc
+    src/profile_clock.cc
+    src/sim_clock.cc
+    src/thread_role.cc
   PUBLIC_DEPS
     se::entt
   FORBID
