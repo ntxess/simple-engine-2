@@ -54,6 +54,7 @@ se_add_module(se_tests KIND EXECUTABLE
     kernel/log_test.cc
     kernel/parallel_view_test.cc
     kernel/rng_test.cc
+    kernel/schedule_test.cc
     kernel/serialization_test.cc
     kernel/sim_clock_test.cc
     kernel/thread_role_test.cc
