@@ -6,11 +6,11 @@ block a milestone; each lists the exact command to run once the setup exists.
 
 | Gate | Milestone | Needs | Command / procedure | Status |
 |---|---|---|---|---|
-| WSL Linux toolchain | M0 | One-time install in WSL Ubuntu 24.04 (sudo password) | `sudo apt install -y clang lld ninja-build python3-pip pipx glslang-tools && pipx install cmake` | **pending (owner)** |
-| Linux debug build and tests | M0 | WSL toolchain above | `wsl -d Ubuntu -- bash /mnt/d/Dev/simple-engine-2/scripts/wsl-build.sh linux-clang-debug` | pending |
-| ThreadSanitizer | M0, M4, M14, M17 | WSL toolchain above | `... scripts/wsl-build.sh linux-clang-tsan` | pending |
-| ASan + UBSan on Linux | every milestone | WSL toolchain above | `... scripts/wsl-build.sh linux-clang-asan` | pending |
-| SPIR-V shader compilation | M7 | glslang-tools in WSL, or a Vulkan SDK on Windows | rebuild the `se_shaders` target | pending |
+| WSL Linux toolchain | M0 | One-time install in WSL Ubuntu 24.04 | `sudo apt install -y clang lld ninja-build python3-pip pipx glslang-tools && pipx install cmake` | done 2026-11-08 (clang 18.1.3, CMake 4.4.4, ninja 1.11.1, glslang 15.1) |
+| Linux debug build and tests | M0 | WSL toolchain above | `wsl -d Ubuntu -- bash -lc "bash /mnt/d/Dev/simple-engine-2/scripts/wsl-build.sh linux-clang-debug"` | passing (M0) |
+| ThreadSanitizer | M0, M4, M14, M17 | WSL toolchain above | `... scripts/wsl-build.sh linux-clang-tsan` | passing (M0); re-run at every milestone |
+| ASan + UBSan on Linux | every milestone | WSL toolchain above | `... scripts/wsl-build.sh linux-clang-asan` | passing (M0) |
+| SPIR-V shader compilation | M7 | glslang-tools in WSL (installed) | rebuild the `se_shaders` target | ready for M7 |
 | Modal drag keeps ticking | M5 | an interactive desktop session | `ctest --preset msvc-dev -L desktop -R modal` | pending |
 | Paced presentation under 1% misses | M6 | PresentMon | `tools/presentmon/run.ps1 -Mode Paced` | pending |
 | VRR runs 120 Hz Locked | M6 | a VRR display | `tools/presentmon/run.ps1 -Mode Vrr` | pending |

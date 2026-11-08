@@ -29,7 +29,7 @@ foreach ($preset in $Presets) {
   Write-Host "=== $preset ===" -ForegroundColor Cyan
   if ($preset.StartsWith('wsl:')) {
     $name = $preset.Substring(4)
-    wsl.exe -- bash -lc "~/se-wsl/scripts/wsl-build.sh $name"
+    wsl.exe -d Ubuntu -- bash -lc "bash /mnt/d/Dev/simple-engine-2/scripts/wsl-build.sh $name"
   } else {
     & cmd.exe /c "`"$repo\scripts\with-msvc.cmd`" cmake --workflow --preset $preset"
   }
