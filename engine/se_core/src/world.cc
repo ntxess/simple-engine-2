@@ -8,6 +8,7 @@
 #include <entt/entity/registry.hpp>
 #include <memory>
 #include <optional>
+#include <span>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -50,6 +51,7 @@ MutationGate::~MutationGate() {
 World::World(const ComponentRegistry& registry, WorldDesc desc)
     : registry_(&registry),
       desc_(std::move(desc)),
+      structure_generations_(registry.All().size(), 0),
       owner_(std::this_thread::get_id()) {
   SE_ASSERT_MSG(registry.Sealed(), "seal the ComponentRegistry first");
   SE_ASSERT_MSG(registry.Find(entt::type_hash<IdComponent>::value()) != nullptr,
@@ -59,6 +61,17 @@ World::World(const ComponentRegistry& registry, WorldDesc desc)
   for (const ComponentInfo& info : registry.All()) {
     info.precreate(reg_);
   }
+#if SE_ASSERTS
+  // The ParallelView structural-change check: a listener per storage. A
+  // remove and an emplace (or a destroy and a create) keep the sizes but
+  // still move entities in the packed arrays.
+  const std::span<const ComponentInfo> infos = registry.All();
+  for (std::size_t i = 0; i < infos.size(); ++i) {
+    if (infos[i].watch_structure != nullptr) {
+      infos[i].watch_structure(reg_, structure_generations_[i]);
+    }
+  }
+#endif
   for (const ComponentInfo& info : registry.All()) {
     if (HasFlag(info.flags, ComponentFlags::kHashed)) {
       hashed_.emplace_back(&info, std::as_const(reg_).storage(info.id));
@@ -164,6 +177,19 @@ std::optional<entt::entity> World::Find(Guid guid) const {
 }
 
 std::size_t World::EntityCount() const noexcept { return guids_.size(); }
+
+const std::uint64_t* World::StructureGeneration(
+    entt::id_type id) const noexcept {
+#if SE_ASSERTS
+  const ComponentInfo* info = registry_->Find(id);
+  if (info == nullptr || info->watch_structure == nullptr) return nullptr;
+  const auto index = static_cast<std::size_t>(info - registry_->All().data());
+  return &structure_generations_[index];
+#else
+  static_cast<void>(id);
+  return nullptr;
+#endif
+}
 
 std::uint64_t World::EntityDigestOf(entt::entity entity,
                                     const Guid& guid) const {

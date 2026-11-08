@@ -192,6 +192,24 @@ void ViewAfterStructuralChange() {
   });
 }
 
+// A remove and an emplace keep the storage's size but move entities in its
+// packed array.
+void ViewAfterRemoveAndEmplace() {
+  const testing::MainThreadScope main_thread;
+  const InlineOwnerScope owner(OnMainThread());
+  World world(CoreRegistry(), {});
+  Fill(world, 4);
+  const entt::entity spare = world.Create(Guid{2, 2});  // no Transform
+  jobs::ForkSite site{.name = "death", .grain = 4, .writes = kTransformOnly};
+  auto view = world.Parallel<Transform>(site);
+  world.Reg().remove<Transform>(*world.Find(Guid{1, 1}));
+  world.Reg().emplace<Transform>(spare);
+  jobs::ForkJoinPool pool;
+  pool.ParallelFor(site, view.size(), [&](jobs::ChunkRange r) {
+    view.ForChunk(r, [](entt::entity) {});
+  });
+}
+
 void PlayMutationWithGateClosed() {
   const testing::MainThreadScope main_thread;
   const InlineOwnerScope owner(OnMainThread());
@@ -243,6 +261,7 @@ const std::map<std::string, std::function<void()>>& Scenarios() {
       {"undeclared_write", UndeclaredWrite},
       {"write_outside_chunk", WriteOutsideChunk},
       {"view_after_structural_change", ViewAfterStructuralChange},
+      {"view_after_remove_and_emplace", ViewAfterRemoveAndEmplace},
       {"play_mutation_gate_closed", PlayMutationWithGateClosed},
       {"access_from_another_thread", AccessFromAnotherThread},
       {"inline_owner_off_main", InlineOwnerOffMain},

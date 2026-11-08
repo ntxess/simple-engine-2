@@ -94,6 +94,20 @@ void HashValue(Hasher& hasher, const T& value) {
   }
 }
 
+// Counts one structural change (a signal listener with |generation| as its
+// payload).
+inline void BumpGeneration(std::uint64_t& generation,
+                           entt::registry& /*registry*/,
+                           entt::entity /*entity*/) noexcept {
+  ++generation;
+}
+
+template <class T>
+void WatchStructure(entt::registry& registry, std::uint64_t& generation) {
+  registry.on_construct<T>().template connect<&BumpGeneration>(generation);
+  registry.on_destroy<T>().template connect<&BumpGeneration>(generation);
+}
+
 template <class T>
 void Precreate(entt::registry& registry) {
   static_cast<void>(registry.storage<T>());
@@ -213,6 +227,7 @@ void ComponentRegistry::Add(std::string_view name, std::uint32_t version,
   info.flags = flags;
   info.empty = std::is_empty_v<T>;
   info.precreate = &reflect::Precreate<T>;
+  info.watch_structure = &reflect::WatchStructure<T>;
   info.read_json = &reflect::ReadJson<T>;
   info.write_json = &reflect::WriteJson<T>;
   info.read_beve = &reflect::ReadBeve<T>;

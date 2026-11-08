@@ -26,6 +26,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <entt/core/type_info.hpp>
 #include <entt/entity/registry.hpp>
 #include <memory>
 #include <optional>
@@ -137,12 +138,20 @@ class World {
   [[nodiscard]] std::optional<entt::entity> Find(Guid guid) const;
   [[nodiscard]] std::size_t EntityCount() const noexcept;
 
-  // Captures the storages of C... for fork chunks (owner thread).
+  // Captures the storages of C... for fork chunks (owner thread). Debug
+  // builds assert at each use that none of them changed structurally since.
   template <class... C>
   [[nodiscard]] ParallelView<C...> Parallel(const jobs::ForkSite& site)
       SE_REQUIRES(g_sim_owner) {
-    return ParallelView<C...>(Reg(), site);
+    entt::registry& reg = Reg();
+    return ParallelView<C...>(
+        reg, site, {StructureGeneration(entt::type_hash<C>::value())...});
   }
+  // The number of constructions and destructions so far in the storage
+  // |id| (debug builds, from EnTT's storage signals); nullptr when nothing
+  // counts them (release builds, or no watch_structure hook).
+  [[nodiscard]] const std::uint64_t* StructureGeneration(
+      entt::id_type id) const noexcept;
 
   // The hash of the current state.
   [[nodiscard]] WorldHash Hash() const;
@@ -187,6 +196,10 @@ class World {
 
   const ComponentRegistry* registry_;
   WorldDesc desc_;
+  // Per registered component, in registration order: StructureGeneration().
+  // Sized once, so the signal listeners' addresses stay valid, and declared
+  // before reg_ so it outlives the registry.
+  std::vector<std::uint64_t> structure_generations_;
   entt::registry reg_;
   SimClock clock_;
   std::unordered_map<Guid, entt::entity, GuidHash> guids_;

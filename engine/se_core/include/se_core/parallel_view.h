@@ -18,7 +18,10 @@
 // that every Read is of a type the ForkSite declares, every Write of a
 // declared written type, that writes (and reads of written types) stay
 // inside the running chunk's range, and that no structural change happened
-// since the view was built.
+// to a captured storage since the view was built: no construction or
+// destruction counted by the World's structure generations (so a remove
+// plus an emplace is caught although the size is the same), and the same
+// sizes for storages nothing counts.
 
 #ifndef SE_CORE_PARALLEL_VIEW_H_
 #define SE_CORE_PARALLEL_VIEW_H_
@@ -76,10 +79,18 @@ class ParallelView {
 
  public:
   // Captures the storages; call on the owner thread (World::Parallel).
-  ParallelView(entt::registry& registry, const jobs::ForkSite& site)
+  // |generations| holds each storage's structure counter, or nullptr.
+  ParallelView(
+      entt::registry& registry, const jobs::ForkSite& site,
+      const std::array<const std::uint64_t*, sizeof...(C)>& generations)
       : storages_(&registry.storage<C>()...),
         site_(&site),
-        sizes_{registry.storage<C>().size()...} {}
+        sizes_{registry.storage<C>().size()...},
+        generations_(generations) {
+    for (std::size_t i = 0; i < generations_.size(); ++i) {
+      captured_[i] = generations_[i] != nullptr ? *generations_[i] : 0;
+    }
+  }
 
   // Entities in the first component's storage: the count for ParallelFor.
   [[nodiscard]] std::uint32_t size() const noexcept {
@@ -161,10 +172,13 @@ class ParallelView {
   void CheckUnchanged() const {
 #if SE_ASSERTS
     std::size_t i = 0;
-    const bool unchanged =
-        ((std::get<entt::storage_for_t<C>*>(storages_)->size() ==
-          sizes_[i++]) &&
-         ...);
+    bool unchanged = ((std::get<entt::storage_for_t<C>*>(storages_)->size() ==
+                       sizes_[i++]) &&
+                      ...);
+    for (std::size_t g = 0; g < generations_.size(); ++g) {
+      unchanged = unchanged && (generations_[g] == nullptr ||
+                                *generations_[g] == captured_[g]);
+    }
     SE_ASSERT_MSG(unchanged,
                   "a structural change invalidated this ParallelView");
 #endif
@@ -172,8 +186,11 @@ class ParallelView {
 
   std::tuple<entt::storage_for_t<C>*...> storages_;
   [[maybe_unused]] const jobs::ForkSite* site_;
-  // Storage sizes at capture, to detect structural changes (debug checks).
+  // At capture, to detect structural changes (debug checks): the storage
+  // sizes, and each storage's structure counter and its value.
   [[maybe_unused]] std::array<std::size_t, sizeof...(C)> sizes_;
+  [[maybe_unused]] std::array<const std::uint64_t*, sizeof...(C)> generations_;
+  [[maybe_unused]] std::array<std::uint64_t, sizeof...(C)> captured_{};
 };
 
 }  // namespace se

@@ -111,6 +111,7 @@ if(NOT CMAKE_BUILD_TYPE STREQUAL "Release")
     "undeclared_write|ParallelView write of a component the ForkSite does not declare in writes"
     "write_outside_chunk|ParallelView access outside the running chunk's range"
     "view_after_structural_change|a structural change invalidated this ParallelView"
+    "view_after_remove_and_emplace|a structural change invalidated this ParallelView"
     "play_mutation_gate_closed|Play World mutated while its MutationGate is closed"
     "access_from_another_thread|World accessed from a thread that does not own it"
     "inline_owner_off_main|InlineOwnerScope outside the main thread"

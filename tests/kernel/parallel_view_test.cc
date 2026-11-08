@@ -3,8 +3,9 @@
 // The inline ForkJoinPool and ParallelView: chunk boundaries depend only on
 // (count, grain), chunks run in order with t_in_fork set, nested forks run
 // inline through NestedParallelFor (checked by the analysis, no opt-out),
-// breadcrumbs return to the outer chunk, exceptions propagate, and
-// ParallelView writes match a serial loop.
+// breadcrumbs return to the outer chunk, exceptions propagate, ParallelView
+// writes match a serial loop, and only structural changes to a captured
+// storage invalidate a view.
 
 #include "se_core/parallel_view.h"
 
@@ -17,6 +18,7 @@
 #include <utility>
 #include <vector>
 
+#include "se_core/assert.h"
 #include "se_core/breadcrumb.h"
 #include "se_core/component_registry.h"
 #include "se_core/core_components.h"
@@ -188,6 +190,56 @@ TEST_CASE("ParallelView writes match a serial loop", "[parallel_view]") {
     CHECK(t.pos.y == (named ? t.pos.x * 2.0F + 5.0F : 0.0F));
   }
   REQUIRE(site.stats.chunks == 16);
+}
+
+// The structural-change check counts constructions and destructions per
+// storage (death.view_after_remove_and_emplace is the failing side).
+TEST_CASE("Only structural changes to a captured storage invalidate a view",
+          "[parallel_view]") {
+  const testing::MainThreadScope main_thread;
+  const InlineOwnerScope owner(OnMainThread());
+  World world(CoreRegistry(), {});
+  const std::uint64_t* transforms =
+      world.StructureGeneration(entt::type_hash<Transform>::value());
+#if SE_ASSERTS
+  REQUIRE(transforms != nullptr);
+  const entt::entity a = world.Create(Guid{0, 1});
+  const entt::entity b = world.Create(Guid{0, 2});
+  const std::uint64_t start = *transforms;
+  world.Reg().emplace<Transform>(a);
+  CHECK(*transforms == start + 1);
+  // Writes to existing components are not structural.
+  world.Reg().replace<Transform>(a, Transform{});
+  world.Reg().patch<Transform>(a, [](Transform& t) { t.rot = 2.0F; });
+  world.Reg().get<Transform>(a).rot = 3.0F;
+  world.Reg().emplace_or_replace<Transform>(a);
+  CHECK(*transforms == start + 1);
+  world.Reg().remove<Transform>(a);
+  CHECK(*transforms == start + 2);
+  world.Reg().emplace<Transform>(a);
+  world.Reg().emplace<Transform>(b);
+
+  static const std::array<entt::id_type, 1> kWrites = {
+      entt::type_hash<Transform>::value()};
+  jobs::ForkSite site{.name = "check", .grain = 1, .writes = kWrites};
+  jobs::ForkJoinPool pool;
+  const auto view = world.Parallel<Transform>(site);
+  // Between capture and fork: value writes, and a structural change to a
+  // storage the view did not capture.
+  world.Reg().get<Transform>(b).rot = 4.0F;
+  world.Reg().emplace<Name>(b, "other storage");
+  int visited = 0;
+  pool.ParallelFor(site, view.size(), [&](jobs::ChunkRange r) {
+    view.ForChunk(r, [&](entt::entity e) {
+      view.Write<Transform>(e).scale = Vec2{2.0F, 2.0F};
+      ++visited;
+    });
+  });
+  REQUIRE(visited == 2);
+#else
+  // Release builds count nothing.
+  CHECK(transforms == nullptr);
+#endif
 }
 
 }  // namespace

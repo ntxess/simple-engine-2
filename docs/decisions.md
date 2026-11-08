@@ -211,3 +211,18 @@ as adopting the capability, so the scope then released `g_main` at its end,
 or the analysis rejected the paths joining after it (clang 21, checked with
 clang-cl). A proof value made by a function that requires `g_main` gives
 the same static check without that reading.
+
+## ADR-021 ParallelView detects structural changes per storage (2026-11-08)
+
+**Decision.** `ComponentInfo` gains `watch_structure`, which connects a
+counter to the component's EnTT construction and destruction signals.
+Worlds connect one counter per registered storage in assert builds
+(`World::StructureGeneration`), and a ParallelView compares the counters of
+its captured storages, as well as their sizes, at every use.
+
+**Why.** Comparing sizes alone missed a remove plus an emplace (or a
+destroy plus a create) between capture and fork, which moves entities in the
+packed arrays the chunks index. The signals see every structural path,
+typed or type-erased, and only the captured storages count, so unrelated
+structural changes (a DestroyRequest, a new Name) do not invalidate a view.
+Release builds connect nothing.

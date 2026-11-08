@@ -71,6 +71,12 @@ struct ComponentInfo {
 
   // Creates the type's storage, so later access never creates one lazily.
   void (*precreate)(entt::registry& registry) = nullptr;
+  // Makes |generation| count every construction and destruction of the
+  // component in |registry| (EnTT's storage signals). Worlds use it in debug
+  // builds to detect structural changes under a ParallelView; null leaves
+  // the storage unwatched.
+  void (*watch_structure)(entt::registry& registry,
+                          std::uint64_t& generation) = nullptr;
   // Adds or replaces the component on |entity| from JSON.
   std::expected<void, Error> (*read_json)(entt::registry& registry,
                                           entt::entity entity,
