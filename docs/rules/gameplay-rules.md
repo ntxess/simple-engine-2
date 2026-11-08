@@ -12,8 +12,11 @@ Conventions: time is counted in ticks of the 120 Hz simulation clock
 (LegacySimTime). An authored duration of `ms` milliseconds is
 `ticks(ms) = ceil(ms × 120 / 1000)` ticks. "Contact" is one overlapping
 (source, receiver) pair in one tick; a source is an entity with a Sprite,
-TeamTag, EffectsList and UpdateEntityEvent or UpdateEntityPolling, a receiver
-any other entity with a Sprite, TeamTag and EntityStatus.
+TeamTag, EffectsList and UpdateEntityEvent (moved this tick) or
+UpdateEntityPolling (polled), and a receiver any other entity with a
+SpawnIndex, Sprite and TeamTag (effects need its EntityStatus). Goldens are the
+per-tick projection hashes (`NAME.sehash`), re-baselined by every rule; the
+full projections (`NAME.seproj.gz`) were added at `legacy-ref-v1`.
 
 ## R1 TEMPTIMED always reverts
 
@@ -35,11 +38,13 @@ Goldens: `effects` changed from tick 302 (its TEMPTIMED of 40 s outlives the
 
 A polled source (UpdateEntityPolling) keeps its cooldown separately for every
 receiver. In a tick it affects an overlapping receiver if it has not already
-affected that receiver in this tick and either more than `ticks(cooldown)`
-ticks have passed since it last affected that receiver, or it has never
-affected it and `readyOnStart` is set, or more than `ticks(cooldown)` ticks
-have passed since the source was created. The decision is made once per pair
-and tick, and a positive decision records the contact. Self and same-team
+affected that receiver in this tick and either
+- it affected that receiver before, more than `ticks(cooldown)` ticks ago, or
+- it never affected that receiver, and `readyOnStart` is set or more than
+  `ticks(cooldown)` ticks have passed since the source was created.
+
+The decision is made once per pair and tick, and a positive decision records
+the contact. Self and same-team
 pairs are skipped before the decision and do not use it. Event-driven sources
 (UpdateEntityEvent only) have no cooldown.
 

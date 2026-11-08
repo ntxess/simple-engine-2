@@ -158,7 +158,9 @@ void Sandbox::update()
         const SpawnIndex* spawnIndex = m_reg.try_get<SpawnIndex>(entity);
         doomed.emplace_back(spawnIndex ? spawnIndex->value : UINT32_MAX, entity);
     }
-    std::sort(doomed.begin(), doomed.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+    std::sort(doomed.begin(), doomed.end(), [](const auto& a, const auto& b) {
+        return a.first != b.first ? a.first < b.first : entt::to_integral(a.second) < entt::to_integral(b.second);
+    });
     for (const auto& [spawnIndex, entity] : doomed)
     {
         LOG_INFO(Logger::get()) << "Destroying entity [" << static_cast<unsigned int>(entity) << "]";

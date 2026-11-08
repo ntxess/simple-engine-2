@@ -97,8 +97,11 @@ void CollisionSystem::collisionUpdate(entt::registry& entityReg)
         collectContacts(entityReg, sourceID);
     }
 
+    // Entity ids only break ties between sources without a SpawnIndex, so equal pairs end up adjacent.
     std::sort(m_contacts.begin(), m_contacts.end(), [](const Contact& a, const Contact& b) {
-        return a.sourceIndex != b.sourceIndex ? a.sourceIndex < b.sourceIndex : a.receiverIndex < b.receiverIndex;
+        if (a.sourceIndex != b.sourceIndex) return a.sourceIndex < b.sourceIndex;
+        if (a.sourceID != b.sourceID) return entt::to_integral(a.sourceID) < entt::to_integral(b.sourceID);
+        return a.receiverIndex < b.receiverIndex;
     });
     m_contacts.erase(std::unique(m_contacts.begin(), m_contacts.end(), [](const Contact& a, const Contact& b) {
         return a.sourceID == b.sourceID && a.receiverID == b.receiverID;
