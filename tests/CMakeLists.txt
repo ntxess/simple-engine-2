@@ -137,3 +137,8 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   set_tests_properties(compile_fail.control_compiles PROPERTIES
     FIXTURES_REQUIRED se_compile_fail LABELS checks)
 endif()
+
+# tools/se_replay links the kernel test module from tests/support, so it is
+# built with the tests.
+add_subdirectory("${CMAKE_SOURCE_DIR}/tools/se_replay"
+                 "${CMAKE_BINARY_DIR}/tools/se_replay")

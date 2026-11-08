@@ -18,6 +18,7 @@
 #include "se_core/thread_role.h"
 #include "se_core/thread_safety.h"
 #include "se_core/types.h"
+#include "se_core/world.h"
 #include "se_sim/game_state.h"
 #include "se_sim/replay.h"
 
@@ -55,6 +56,10 @@ struct KernelSessionResult {
   std::uint32_t crosschecks_skipped = 0;
   bool crosscheck_ok = true;
   std::string crosscheck_report;
+  // At the first divergence: the serial clone's and the real World's
+  // per-entity digests, sorted by Guid.
+  std::vector<EntityDigest> crosscheck_expected;
+  std::vector<EntityDigest> crosscheck_actual;
   std::string error;
 };
 

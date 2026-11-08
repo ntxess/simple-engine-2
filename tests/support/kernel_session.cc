@@ -79,6 +79,8 @@ TickResult CrossCheckedTick(SimDriver& driver, Schedule& schedule,
       result.crosscheck_ok = false;
       result.crosscheck_report = std::format("tick {}: {}", frame.tick,
                                              FirstDifference(expected, actual));
+      result.crosscheck_expected = expected;
+      result.crosscheck_actual = actual;
     }
   }
   ++result.crosschecks;
