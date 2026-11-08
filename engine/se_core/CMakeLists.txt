@@ -12,6 +12,7 @@ se_add_module(se_core KIND STATIC
     src/profile_clock.cc
     src/sim_clock.cc
     src/thread_role.cc
+    src/time.cc
   PUBLIC_DEPS
     se::entt
   FORBID

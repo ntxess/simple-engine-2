@@ -31,6 +31,7 @@ se_add_module(se_test_support KIND STATIC
   SOURCES
     support/golden.cc
     support/null_wake_main.cc
+    support/virtual_display.cc
   PUBLIC_DEPS
     se_core
   DETERMINISTIC
@@ -46,6 +47,7 @@ se_add_module(se_tests KIND EXECUTABLE
   SOURCES
     smoke/smoke_test.cc
     kernel/detmath_test.cc
+    kernel/fixed_stepper_test.cc
     kernel/guid_test.cc
     kernel/hash_test.cc
     kernel/log_test.cc
