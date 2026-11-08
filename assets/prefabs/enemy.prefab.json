@@ -1,0 +1,11 @@
+{
+  "format": "se-prefab-v1",
+  "name": "enemy",
+  "components": {
+    "Transform": {},
+    "Collider": {"half_extents": {"x": 24, "y": 24}},
+    "Team": {"id": "enemy"},
+    "Stats": {"HP": 100, "Speed": 500},
+    "Path": {"points": [], "loop": true}
+  }
+}

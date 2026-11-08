@@ -5,7 +5,15 @@
 
 se_add_module(game_rampage KIND STATIC
   SOURCES
+    src/broadphase.cc
+    src/collision.cc
+    src/effects.cc
+    src/json.cc
+    src/legacy_scenario.cc
+    src/module.cc
+    src/movement.cc
     src/rampage_components.cc
+    src/scene.cc
     src/stats.cc
   PUBLIC_DEPS
     se_core
