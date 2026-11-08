@@ -10,6 +10,7 @@
 //   se_death_tests <scenario>
 
 #include <array>
+#include <csignal>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -271,7 +272,15 @@ const std::map<std::string, std::function<void()>>& Scenarios() {
   return kScenarios;
 }
 
+// The exit status of abort() on Windows. CTest fails a test that a signal
+// ended, whatever its output, so on Linux the SIGABRT after a failed
+// SE_ASSERT becomes this plain exit and the message regex decides.
+constexpr int kAbortExitStatus = 3;
+
+void ExitOnAbort(int /*signal*/) { std::_Exit(kAbortExitStatus); }
+
 int RunScenario(int argc, char** argv) {
+  std::signal(SIGABRT, &ExitOnAbort);
 #if defined(_MSC_VER)
   // No "abort() has been called" or debug-CRT dialogs: report to stderr.
   _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);

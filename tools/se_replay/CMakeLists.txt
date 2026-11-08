@@ -51,8 +51,11 @@ add_test(NAME replay.kernel_det_crosscheck
 add_test(NAME replay.kernel_golden_detects_change
   COMMAND se_replay --module kernel_test --ticks 600 --edits "${_se_edits}"
           --seed 43 --expect-golden determinism_kernel)
+# It must check even when goldens are being rewritten: with
+# SE_UPDATE_GOLDENS=1 it would store the seed-43 run as the golden.
 set_tests_properties(replay.kernel_golden_detects_change PROPERTIES
-  WILL_FAIL TRUE)
+  WILL_FAIL TRUE
+  ENVIRONMENT_MODIFICATION "SE_UPDATE_GOLDENS=unset:")
 add_test(NAME replay.rampage_not_yet
   COMMAND se_replay --module rampage)
 set_tests_properties(replay.rampage_not_yet PROPERTIES
