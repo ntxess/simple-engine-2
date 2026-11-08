@@ -1,0 +1,7 @@
+# Logged SetComponent edits for the kernel test module (support/
+# kernel_test_module.h): <tick> <target Guid> <component> <JSON value>.
+# Each applies at the boundary before its tick.
+100 00005e5e-0000-0000-0000-000000000003 Mover {"center":{"x":0,"y":0},"radius":90,"angular_speed":2.5,"phase":0}
+100 00005e5e-0000-0000-0000-000000000001 Name {"value":"edited at 100"}
+250 00005e5e-0000-0000-0000-000000000007 Mover {"center":{"x":-60,"y":40},"radius":15,"angular_speed":-4,"phase":1}
+250 00005e5e-0000-0000-0000-0000000003e8 Player {"speed":300,"inputs":0}

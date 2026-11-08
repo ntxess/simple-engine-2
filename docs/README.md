@@ -28,6 +28,13 @@ Windows, from the repository root (needs Visual Studio 18 with MSVC 14.51):
 scripts\with-msvc.cmd cmake --workflow --preset msvc-dev
 ```
 
+Headless runs of a game module, with per-tick hashes, replays and the
+determinism cross-check:
+
+```bat
+out\build\msvc-dev\bin\se_replay --module kernel_test --ticks 600 --fixed-frame-dt 16.6667 --hash-out hashes.txt
+```
+
 `scripts/ci.ps1` runs the commit gate (msvc-dev, msvc-asan, clangcl-dev,
 including the `lint` and `checks` test labels); `scripts/ci.ps1 -Milestone`
 adds Debug, Release and the WSL Linux sanitizer presets. The legacy tree

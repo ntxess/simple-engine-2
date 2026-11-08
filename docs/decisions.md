@@ -117,3 +117,112 @@ the WSL TSan and ASan presets. Nothing is committed with a failing gate.
 
 **Decision.** `/Z7` (CMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded) in every
 configuration, so parallel Ninja builds never contend for a shared PDB.
+
+## ADR-014 Stable component ids in every serialized form (2026-11-08)
+
+**Decision.** Session logs, replays and world hashes identify a component by
+the 32-bit FNV-1a hash of its registered name (`ComponentInfo::name_id`),
+never by `entt::type_hash`, which is computed from the compiler's pretty
+function name and differs between MSVC and clang. EnTT storages stay keyed
+by `entt::type_hash` (`ComponentInfo::id`), so ForkSite read and write sets
+use that id. With this, MSVC and clang-cl produce bit-identical per-tick
+hashes (tests/golden/windows-msvc and windows-clangcl match).
+
+## ADR-015 Replays are BEVE written by a first-party subset writer (2026-11-08)
+
+**Decision.** Replay files are BEVE as specified, written and read by
+se_sim/beve.h, a writer and reader for the subset replays use (objects with
+string keys, strings, unsigned integers, u8 and u64 typed arrays). glaze
+stays confined to reflect_glaze.h and `*_components.cc` (ADR-010);
+tests/kernel/replay_test.cc proves glaze's `beve_to_json` reads the files.
+
+## ADR-016 FrameClock times come from the vblank grid (2026-11-08)
+
+**Decision.** The pacer reports a frame's start on the vblank grid (one
+presentation interval before its target vblank, from present statistics)
+and counts elapsed intervals between targets; the wall-clock wake time goes
+only into `FrameClock::real_delta`. With planned late latching, B changes
+from frame to frame, so wake-time deltas are not near multiples of T and
+Free cadence could not snap them; the stepper scenarios in
+tests/support/virtual_display model exactly this contract for M6.
+
+## ADR-017 Accessors are PascalCase (2026-11-08)
+
+**Decision.** clang-tidy's identifier rule (MethodCase CamelCase, only
+`begin`, `end`, `size`, `empty`, `data` and `swap` exempt) rejects Google's
+optional snake_case accessors, so the milestone spec's `owner()`,
+`set_owner()`, `stats()`, `applied()`, `worlds` and `sim_running` are
+written `Owner()`, `SetOwner()`, `Stats()`, `Applied()`, `Worlds()` and
+`SimRunning()`, and the spec's public `World::clock` member is
+`Clock()`/`MutableClock()` (Google style keeps class data private).
+
+## ADR-018 SessionLog entries are logged where a replay applies them (2026-11-08)
+
+**Decision.** `SessionLog::Enqueue(entry, next_tick, states)` takes the tick
+the session runs next and stamps `apply_before` itself. While running, an
+entry is queued against `max(apply_before, next_tick)`, so a stale tick
+cannot make a replay apply it earlier than the live session did. While
+paused, the session waits at the boundary before `next_tick`: Enqueue first
+completes that boundary's pending work in RunTick's order
+(`GameStateStack::ApplyPending`, then the entries due by `next_tick`), then
+applies the entry and logs it against `next_tick`.
+
+**Why.** The spec says paused entries apply at once and are logged against
+the next tick, but the caller's `apply_before` was kept, so a replay applied
+the entry at another boundary. Applying it at once while earlier work for
+the same boundary was still pending also put it ahead of that work, while a
+replay applies the boundary as ApplyPending, then (apply_before, seq). The
+boundary is completed first so the live order and the replay order are the
+same by construction. The visible effect: a GameState change the last tick
+requested, or an entry already queued for the next tick, takes effect when
+the first edit is made in a pause instead of at resume, before any tick runs
+either way. tests/kernel/session_log_test.cc replays a paused session's
+written log and compares every hash.
+
+## ADR-019 Nested forks go through NestedParallelFor under g_fork_chunk (2026-11-08)
+
+**Decision.** A third capability, `jobs::g_fork_chunk`, is held while a
+thread runs fork chunks (`ForkScope`, taken by `ParallelFor`). Nested forks
+call `jobs::NestedParallelFor(const ForkSite&, count, body)`, which requires
+`g_fork_chunk`, runs inline with ParallelFor's chunking, leaves the site's
+stats alone and restores the breadcrumb's outer chunk. A chunk lambda that
+forks again declares `SE_REQUIRES(jobs::g_fork_chunk)`. `ParallelFor`
+asserts it is not called from a chunk.
+
+**Why.** The spec's "nested forks run inline" could only be written with
+`SE_NO_THREAD_SAFETY_ANALYSIS` on the chunk lambda, because `ParallelFor`
+requires `g_sim_owner`, which a chunk must not hold (that is what keeps
+World calls out of chunks). The fork capability gives nested forks an
+analysable path without granting chunks World access, and the const site
+keeps M14's workers from racing on owner-thread stats. Checked by
+tests/compile_fail/nested_fork.cc and death.owner_fork_inside_chunk.
+
+## ADR-020 InlineOwnerScope takes a MainThreadProof (2026-11-08)
+
+**Decision.** `InlineOwnerScope` is built as
+`InlineOwnerScope owner(OnMainThread())`. `OnMainThread()` requires `g_main`
+and asserts the main thread; the scope acquires `g_sim_owner`, releases only
+`g_sim_owner`, and asserts the main thread again at run time.
+
+**Why.** The spec's scope ("main takes g_sim_owner in inline mode") was
+claimable from any thread. `SE_REQUIRES(g_main)` cannot go on the scope's
+constructor: clang reads a requirement on a scoped capability's constructor
+as adopting the capability, so the scope then released `g_main` at its end,
+or the analysis rejected the paths joining after it (clang 21, checked with
+clang-cl). A proof value made by a function that requires `g_main` gives
+the same static check without that reading.
+
+## ADR-021 ParallelView detects structural changes per storage (2026-11-08)
+
+**Decision.** `ComponentInfo` gains `watch_structure`, which connects a
+counter to the component's EnTT construction and destruction signals.
+Worlds connect one counter per registered storage in assert builds
+(`World::StructureGeneration`), and a ParallelView compares the counters of
+its captured storages, as well as their sizes, at every use.
+
+**Why.** Comparing sizes alone missed a remove plus an emplace (or a
+destroy plus a create) between capture and fork, which moves entities in the
+packed arrays the chunks index. The signals see every structural path,
+typed or type-erased, and only the captured storages count, so unrelated
+structural changes (a DestroyRequest, a new Name) do not invalidate a view.
+Release builds connect nothing.

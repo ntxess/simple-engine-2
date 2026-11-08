@@ -1,10 +1,29 @@
-# se_core: the headless kernel. std, EnTT, glaze and spdlog only.
+# se_core: the headless kernel. std, EnTT, glaze and spdlog only. glaze is
+# public because game modules' *_components.cc include reflect_glaze.h.
+
+se_use_deps(glaze)
 
 se_add_module(se_core KIND STATIC
   SOURCES
     src/assert.cc
+    src/breadcrumb.cc
+    src/component_registry.cc
+    src/core_components.cc
+    src/detmath.cc
+    src/fp.cc
+    src/guid.cc
+    src/hash.cc
+    src/jobs.cc
+    src/log.cc
+    src/profile_clock.cc
+    src/schedule.cc
+    src/sim_clock.cc
+    src/thread_role.cc
+    src/time.cc
+    src/world.cc
   PUBLIC_DEPS
     se::entt
+    glaze::glaze
   FORBID
     SDL3::SDL3-static se_imgui miniaudio sentry lz4_static
   BANNED_INCLUDES
