@@ -149,7 +149,7 @@ effects of earlier ticks come first and, within a tick, effects follow the
 sorted contacts.
 
 Before: contacts were handled source by source in entt's view order, moved
-sources before polled ones (core/system/CollisionSystem.cpp:52-71), and the
+sources before polled ones (core/system/CollisionSystem.cpp:53-67), and the
 pending events in the order of the event registry's storage, which entt
 iterates newest first and reorders when an event is destroyed
 (core/system/EventSystem.cpp:20-21). A source with both flags was handled

@@ -13,13 +13,16 @@ usage:
       A paced run in a visible window records its keyboard input; replaying
       that recording headless must give the same projection run hash.
   legacy_test.py reference --exe EXE --scenario DIR/NAME --work DIR [--update]
-      The per-tick projection hashes must equal the golden DIR/NAME.sehash.
-      --update (or SE_UPDATE_GOLDENS=1) rewrites the golden instead.
+      The per-tick projection hashes must equal the golden DIR/NAME.sehash,
+      and the projection must equal the golden DIR/NAME.seproj.gz line for
+      line. --update (or SE_UPDATE_GOLDENS=1) rewrites both goldens instead
+      (a golden whose content is unchanged is left as it is).
 
 Exit status 0 on success, 1 on a mismatch or a failed run.
 """
 
 import argparse
+import gzip
 import os
 import pathlib
 import subprocess
@@ -51,10 +54,11 @@ def run_replay(exe, args, work, label):
 
 
 def read_blocks(path):
-    """Reads a .seproj into {tick: (hash, [entity lines])}, in tick order."""
+    """Reads a .seproj (or .seproj.gz) into {tick: (hash, [entity lines])}."""
     blocks = {}
     current = None
-    with open(path, encoding="ascii") as f:
+    opener = gzip.open if str(path).endswith(".gz") else open
+    with opener(path, "rt", encoding="ascii") as f:
         for line in f:
             line = line.rstrip("\n")
             if line.startswith("#"):
@@ -153,20 +157,37 @@ def read_hashes(path):
     return hashes
 
 
+def write_projection_golden(path, projection):
+    """Gzips the projection deterministically (no name, mtime 0); keeps an
+    existing golden whose content is the same."""
+    data = projection.read_bytes()
+    if path.exists():
+        with gzip.open(path, "rb") as f:
+            if f.read() == data:
+                return False
+    path.write_bytes(gzip.compress(data, compresslevel=9, mtime=0))
+    return True
+
+
 def cmd_reference(args):
     work = pathlib.Path(args.work)
     name = pathlib.Path(args.scenario).name
     golden = pathlib.Path(f"{args.scenario}.sehash")
+    golden_projection = pathlib.Path(f"{args.scenario}.seproj.gz")
     ticks, run_hash, projection = run_replay(
         args.exe, scenario_args(args.scenario), work, name)
     blocks = read_blocks(projection)
     if args.update or os.environ.get("SE_UPDATE_GOLDENS") == "1":
         write_hashes(golden, blocks, run_hash, name)
-        print(f"updated {golden}: {ticks} ticks, run hash {run_hash}")
+        changed = write_projection_golden(golden_projection, projection)
+        print(f"updated {golden} and {golden_projection.name}"
+              f"{'' if changed else ' (unchanged)'}: {ticks} ticks, "
+              f"run hash {run_hash}")
         return 0
-    if not golden.exists():
-        print(f"FAIL: no golden {golden}; run with SE_UPDATE_GOLDENS=1")
-        return 1
+    for path in (golden, golden_projection):
+        if not path.exists():
+            print(f"FAIL: no golden {path}; run with SE_UPDATE_GOLDENS=1")
+            return 1
     expected = read_hashes(golden)
     for tick in sorted(set(expected) | set(blocks)):
         produced = blocks.get(tick, (None, []))
@@ -176,7 +197,12 @@ def cmd_reference(args):
             print(f"  produced block ({projection}):")
             print("\n".join(f"    {line}" for line in produced[1][:40]))
             return 1
-    print(f"ok: {name}: {ticks} ticks match {golden.name}, run hash {run_hash}")
+    if read_blocks(golden_projection) != blocks:
+        print(f"FAIL: {name}: projection differs from {golden_projection}")
+        print(first_difference(golden_projection, projection))
+        return 1
+    print(f"ok: {name}: {ticks} ticks match {golden.name} and "
+          f"{golden_projection.name}, run hash {run_hash}")
     return 0
 
 

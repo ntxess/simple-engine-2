@@ -10,8 +10,10 @@
 #   legacy.selfdet.live_replay a paced run in a visible window, recorded, then
 #                              replayed headless, gives the same hash
 #   legacy.reference.NAME      every tick's projection hash equals the golden
-#                              NAME.sehash; each declared rule
-#                              (docs/rules/gameplay-rules.md) re-baselines it:
+#                              NAME.sehash and the projection equals the golden
+#                              NAME.seproj.gz (generated at legacy-ref-v1); a
+#                              declared rule (docs/rules/gameplay-rules.md)
+#                              re-baselines both:
 #                              SE_UPDATE_GOLDENS=1 ctest --preset legacy-msvc-debug -R reference
 
 set(_legacy_driver "${CMAKE_CURRENT_SOURCE_DIR}/legacy_test.py")
