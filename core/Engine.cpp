@@ -73,6 +73,8 @@ void Engine::run()
         const auto now = Clock::now();
         const auto elapsedUs = std::chrono::duration_cast<std::chrono::microseconds>(now - previous).count();
         previous = now;
+        // ImGui needs a positive frame time; the simulation never reads it.
+        m_appContext->realFrameSeconds = std::max(static_cast<double>(elapsedUs) * 1e-6, 1e-6);
 
         accumulator = std::min(accumulator + static_cast<std::uint64_t>(std::max<long long>(elapsedUs, 0)) * rate, maxUnits);
 
@@ -245,8 +247,6 @@ void Engine::configureWindow(std::unique_ptr<IScene> initialScene)
     // Scenes seed their random streams from this during init (util/LegacyRandom.hpp).
     m_appContext->seed = m_options.seed.value_or(static_cast<std::uint64_t>(m_appContext->configData.get<int>("seed").value_or(0)));
     m_appContext->aspectRatio = static_cast<float>(width) / static_cast<float>(height);
-    // Milliseconds per simulation tick (the scenes' systems still take dt in ms).
-    m_appContext->deltaTime = static_cast<float>(m_appContext->simTime.dt * 1000.0);
     m_appContext->window.create(sf::VideoMode({width, height}), name, sf::Style::Default, (fullscreenEnabled ? sf::State::Fullscreen : sf::State::Windowed), settings);
     m_appContext->window.setFramerateLimit(static_cast<unsigned int>(m_appContext->configData.get<double>("frame-rate").value_or(60.f)));
     m_appContext->sceneManager.addScene(std::move(initialScene), true, m_appContext.get());
@@ -257,8 +257,7 @@ void Engine::configureWindow(std::unique_ptr<IScene> initialScene)
         << "\tWindow width: " << width << "\n"
         << "\tWindow height: " << height << "\n"
         << "\tSimulation tick rate: " << m_appContext->simTime.rate << "\n"
-        << "\tSeed: " << m_appContext->seed << "\n"
-        << "\tDelta time: " << m_appContext->deltaTime;
+        << "\tSeed: " << m_appContext->seed;
 
     LOG_DEBUG(Logger::get()) << "Configuration data: \n" << m_appContext->configData;
 }

@@ -134,7 +134,8 @@ void Editor::update()
 
 void Editor::render()
 {
-    ImGui::SFML::Update(m_appContext->window, sf::seconds(m_appContext->deltaTime));
+    // ImGui takes the real frame time in seconds (deltaTime used to pass milliseconds as seconds).
+    ImGui::SFML::Update(m_appContext->window, sf::seconds(static_cast<float>(m_appContext->realFrameSeconds)));
 
     // Setup dockspace IDs
     m_dockspaceId1 = ImGui::GetID("Dockspace1");

@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cstdint>
 
+#include <misc/cpp/imgui_stdlib.h>
+
 void EditorComponentVisitor::visit(Effects* effects, entt::entity entityID)
 {
     // Implemented in the EffectsList visitor
@@ -39,9 +41,9 @@ void EditorComponentVisitor::visit(EffectsList* effectsList, entt::entity entity
 
         ImGui::SameLine(elDivider1Pos + 10.f);
 
-        char* targetStat = const_cast<char*>(effect.targetStat.c_str());
-        if (ImGui::InputText(("##EffectName" + std::to_string(index) + ID).c_str(), targetStat, 64, 0))
-            effect.targetStat = targetStat;
+        // Edits the std::string in place (imgui_stdlib resizes it); the old code wrote up to 64 bytes
+        // through const_cast into the string's own buffer.
+        ImGui::InputText(("##EffectName" + std::to_string(index) + ID).c_str(), &effect.targetStat);
 
         ImGui::SameLine(elDivider1Pos * 2 + 20.f);
 

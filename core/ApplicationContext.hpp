@@ -24,7 +24,7 @@ struct ApplicationContext
 	sf::RenderWindow window;
 	sf::View viewport;
 	float aspectRatio;
-	float deltaTime;
+	double realFrameSeconds = 0.0; // Wall-clock duration of the last frame, for the UI only
 	LegacySimTime simTime;
 	std::uint64_t seed = 0;
 	const LegacyInputFrame* input = nullptr; // Input of the tick being simulated (set by Engine)
