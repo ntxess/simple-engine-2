@@ -2,7 +2,9 @@
 //
 // The inline ForkJoinPool and ParallelView: chunk boundaries depend only on
 // (count, grain), chunks run in order with t_in_fork set, nested forks run
-// inline, exceptions propagate, and ParallelView writes match a serial loop.
+// inline through NestedParallelFor (checked by the analysis, no opt-out),
+// breadcrumbs return to the outer chunk, exceptions propagate, and
+// ParallelView writes match a serial loop.
 
 #include "se_core/parallel_view.h"
 
@@ -15,11 +17,13 @@
 #include <utility>
 #include <vector>
 
+#include "se_core/breadcrumb.h"
 #include "se_core/component_registry.h"
 #include "se_core/core_components.h"
 #include "se_core/jobs.h"
 #include "se_core/thread_role.h"
 #include "se_core/world.h"
+#include "support/test_roles.h"
 
 namespace se {
 namespace {
@@ -64,7 +68,8 @@ TEST_CASE("Chunk boundaries depend only on count and grain", "[jobs]") {
 }
 
 TEST_CASE("ParallelFor runs every chunk in order inside a fork", "[jobs]") {
-  InlineOwnerScope owner;
+  const testing::MainThreadScope main_thread;
+  const InlineOwnerScope owner(OnMainThread());
   jobs::ForkJoinPool pool;
   REQUIRE(pool.ActiveWorkers() == 0);
   jobs::ForkSite site{.name = "test", .grain = 10};
@@ -88,32 +93,51 @@ TEST_CASE("ParallelFor runs every chunk in order inside a fork", "[jobs]") {
   REQUIRE(site.stats.chunks == 4);
 }
 
-void NestedFork(jobs::ForkJoinPool& pool, jobs::ForkSite& inner,
-                std::vector<int>& order, int outer) SE_REQUIRES(g_sim_owner) {
-  pool.ParallelFor(inner, 2, [&](jobs::ChunkRange r) {
+// Runs inside a chunk: forks again, recording each inner chunk and the
+// breadcrumb chunk it runs under.
+void NestedFork(const jobs::ForkSite& inner, std::vector<int>& order,
+                std::vector<int>& crumbs, int outer)
+    SE_REQUIRES(jobs::g_fork_chunk) {
+  jobs::NestedParallelFor(inner, 2, [&](jobs::ChunkRange r) {
     order.push_back(outer * 10 + static_cast<int>(r.chunk));
+    crumbs.push_back(ThreadBreadcrumb().Fields().chunk);
   });
 }
 
 TEST_CASE("Nested forks run inline", "[jobs]") {
-  InlineOwnerScope owner;
+  const testing::MainThreadScope main_thread;
+  const InlineOwnerScope owner(OnMainThread());
   jobs::ForkJoinPool pool;
   jobs::ForkSite outer{.name = "outer", .grain = 1};
   jobs::ForkSite inner{.name = "inner", .grain = 1};
   std::vector<int> order;
-  pool.ParallelFor(outer, 3,
-                   [&](jobs::ChunkRange r) SE_NO_THREAD_SAFETY_ANALYSIS {
-                     // Nested: the analysis cannot see the owner through the
-                     // lambda.
-                     NestedFork(pool, inner, order, static_cast<int>(r.chunk));
-                     CHECK(jobs::t_in_fork);
-                   });
+  std::vector<int> inner_crumbs;
+  std::vector<int> outer_crumbs;
+  ThreadBreadcrumb().SetChunk(7);  // what the thread showed before the fork
+  // The chunk lambda declares the fork capability it runs under; the
+  // analysis checks both the declaration and the nested call.
+  pool.ParallelFor(
+      outer, 3, [&](jobs::ChunkRange r) SE_REQUIRES(jobs::g_fork_chunk) {
+        NestedFork(inner, order, inner_crumbs, static_cast<int>(r.chunk));
+        CHECK(jobs::t_in_fork);
+        // The nested fork gave the breadcrumb back to this chunk.
+        outer_crumbs.push_back(ThreadBreadcrumb().Fields().chunk);
+      });
   CHECK_FALSE(jobs::t_in_fork);
   CHECK(order == std::vector<int>{0, 1, 10, 11, 20, 21});
+  CHECK(inner_crumbs == std::vector<int>{0, 1, 0, 1, 0, 1});
+  CHECK(outer_crumbs == std::vector<int>{0, 1, 2});
+  REQUIRE(ThreadBreadcrumb().Fields().chunk == 7);
+  // Stats belong to the owner thread: the nested site's stay untouched.
+  REQUIRE(outer.stats.forks == 1);
+  REQUIRE(outer.stats.chunks == 3);
+  REQUIRE(inner.stats.forks == 0);
+  ThreadBreadcrumb().SetChunk(0);
 }
 
 TEST_CASE("An exception from a chunk propagates to the caller", "[jobs]") {
-  InlineOwnerScope owner;
+  const testing::MainThreadScope main_thread;
+  const InlineOwnerScope owner(OnMainThread());
   jobs::ForkJoinPool pool;
   jobs::ForkSite site{.name = "throws", .grain = 1};
   int ran = 0;
@@ -130,7 +154,8 @@ TEST_CASE("An exception from a chunk propagates to the caller", "[jobs]") {
 }
 
 TEST_CASE("ParallelView writes match a serial loop", "[parallel_view]") {
-  InlineOwnerScope owner;
+  const testing::MainThreadScope main_thread;
+  const InlineOwnerScope owner(OnMainThread());
   World world(CoreRegistry(), {});
   for (std::uint64_t i = 0; i < 1000; ++i) {
     const entt::entity e = world.Create(Guid{0, i + 1});

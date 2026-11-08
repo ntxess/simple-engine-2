@@ -47,9 +47,12 @@ TEST_CASE("Role names are short and distinct", "[thread_role]") {
 }
 
 TEST_CASE("InlineOwnerScope and WakeMain are callable", "[thread_role]") {
+  // The main thread takes the Worlds in inline mode, so the scope needs its
+  // proof (death.inline_owner_off_main checks the run-time assert).
+  const testing::MainThreadScope main_thread;
   CHECK_FALSE(InlineOwnerScope::HeldOnThisThread());
   {
-    InlineOwnerScope owner;
+    const InlineOwnerScope owner(OnMainThread());
     CHECK(InlineOwnerScope::HeldOnThisThread());
   }
   CHECK_FALSE(InlineOwnerScope::HeldOnThisThread());

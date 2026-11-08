@@ -46,7 +46,7 @@ void SimDriver::TickInline(GameStateStack& states, const StepPlan& plan,
   SE_ASSERT_MSG(plan.steps >= 0 && plan.steps <= kMaxStepsPerFrame,
                 "a frame runs at most kMaxStepsPerFrame ticks");
   // Inline mode: the main thread owns the Worlds while it steps them.
-  const InlineOwnerScope owner;
+  const InlineOwnerScope owner(OnMainThread());
   frame_results_.clear();
   for (int i = 0; i < plan.steps; ++i) {
     const std::uint64_t window_end =

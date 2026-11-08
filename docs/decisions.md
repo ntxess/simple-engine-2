@@ -178,3 +178,36 @@ requested, or an entry already queued for the next tick, takes effect when
 the first edit is made in a pause instead of at resume, before any tick runs
 either way. tests/kernel/session_log_test.cc replays a paused session's
 written log and compares every hash.
+
+## ADR-019 Nested forks go through NestedParallelFor under g_fork_chunk (2026-11-08)
+
+**Decision.** A third capability, `jobs::g_fork_chunk`, is held while a
+thread runs fork chunks (`ForkScope`, taken by `ParallelFor`). Nested forks
+call `jobs::NestedParallelFor(const ForkSite&, count, body)`, which requires
+`g_fork_chunk`, runs inline with ParallelFor's chunking, leaves the site's
+stats alone and restores the breadcrumb's outer chunk. A chunk lambda that
+forks again declares `SE_REQUIRES(jobs::g_fork_chunk)`. `ParallelFor`
+asserts it is not called from a chunk.
+
+**Why.** The spec's "nested forks run inline" could only be written with
+`SE_NO_THREAD_SAFETY_ANALYSIS` on the chunk lambda, because `ParallelFor`
+requires `g_sim_owner`, which a chunk must not hold (that is what keeps
+World calls out of chunks). The fork capability gives nested forks an
+analysable path without granting chunks World access, and the const site
+keeps M14's workers from racing on owner-thread stats. Checked by
+tests/compile_fail/nested_fork.cc and death.owner_fork_inside_chunk.
+
+## ADR-020 InlineOwnerScope takes a MainThreadProof (2026-11-08)
+
+**Decision.** `InlineOwnerScope` is built as
+`InlineOwnerScope owner(OnMainThread())`. `OnMainThread()` requires `g_main`
+and asserts the main thread; the scope acquires `g_sim_owner`, releases only
+`g_sim_owner`, and asserts the main thread again at run time.
+
+**Why.** The spec's scope ("main takes g_sim_owner in inline mode") was
+claimable from any thread. `SE_REQUIRES(g_main)` cannot go on the scope's
+constructor: clang reads a requirement on a scoped capability's constructor
+as adopting the capability, so the scope then released `g_main` at its end,
+or the analysis rejected the paths joining after it (clang 21, checked with
+clang-cl). A proof value made by a function that requires `g_main` gives
+the same static check without that reading.

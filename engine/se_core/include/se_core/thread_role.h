@@ -71,13 +71,32 @@ void AssertMainThread() noexcept SE_ASSERT_CAPABILITY(g_main);
 // se_platform (an SDL user event); test binaries link a null definition.
 void WakeMain() noexcept;
 
-// Holds g_sim_owner while the main thread steps Worlds in inline mode. The
-// run-time cost is a thread-local counter: the Worlds check their owner
-// thread themselves.
+// Proof, for the analysis, that the caller holds g_main: only
+// OnMainThread() makes one. InlineOwnerScope takes it instead of requiring
+// g_main itself, because clang reads a requirement on a scoped capability's
+// constructor as adopting that capability: the scope would then release
+// g_main when it ends, or the analysis would reject the paths that join
+// after it.
+class MainThreadProof {
+ private:
+  MainThreadProof() = default;
+  friend MainThreadProof OnMainThread() noexcept;
+};
+
+// Asserts the main thread and returns the proof of it.
+[[nodiscard]] MainThreadProof OnMainThread() noexcept SE_REQUIRES(g_main);
+
+// Holds g_sim_owner while the main thread steps Worlds in inline mode:
+//   const InlineOwnerScope owner(OnMainThread());
+// so the analysis requires g_main where the scope is made, and the
+// constructor asserts the main thread at run time. The M17 sim thread takes
+// g_sim_owner through its own scope. Besides that check the cost is a
+// thread-local counter: the Worlds check their owner thread themselves.
 class SE_SCOPED_CAPABILITY InlineOwnerScope {
  public:
-  InlineOwnerScope() noexcept SE_ACQUIRE(g_sim_owner);
-  ~InlineOwnerScope() SE_RELEASE();
+  explicit InlineOwnerScope(MainThreadProof on_main) noexcept
+      SE_ACQUIRE(g_sim_owner);
+  ~InlineOwnerScope() SE_RELEASE(g_sim_owner);
 
   // True while the calling thread is inside an InlineOwnerScope.
   [[nodiscard]] static bool HeldOnThisThread() noexcept;

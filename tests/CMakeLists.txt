@@ -105,12 +105,15 @@ if(NOT CMAKE_BUILD_TYPE STREQUAL "Release")
     "world_access_in_fork|not allowed inside a fork chunk"
     "structural_call_in_fork|not allowed inside a fork chunk"
     "create_in_fork|not allowed inside a fork chunk"
+    "owner_fork_inside_chunk|ParallelFor inside a fork chunk: use jobs::NestedParallelFor"
+    "nested_fork_outside_chunk|NestedParallelFor outside a fork chunk"
     "undeclared_read|ParallelView read of a component the ForkSite does not declare"
     "undeclared_write|ParallelView write of a component the ForkSite does not declare in writes"
     "write_outside_chunk|ParallelView access outside the running chunk's range"
     "view_after_structural_change|a structural change invalidated this ParallelView"
     "play_mutation_gate_closed|Play World mutated while its MutationGate is closed"
     "access_from_another_thread|World accessed from a thread that does not own it"
+    "inline_owner_off_main|InlineOwnerScope outside the main thread"
     "duplicate_guid|Guid already in use in this World"
     "unsealed_registry|seal the ComponentRegistry first")
   foreach(_se_entry IN LISTS _se_death_scenarios)
@@ -148,6 +151,18 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     COMMAND "${CMAKE_COMMAND}" --build "${_se_cf_dir}"
             --target chunk_create_control)
   set_tests_properties(compile_fail.control_compiles PROPERTIES
+    FIXTURES_REQUIRED se_compile_fail LABELS checks)
+  # A nested fork from a chunk lambda that does not declare g_fork_chunk.
+  add_test(NAME compile_fail.nested_fork_undeclared
+    COMMAND "${CMAKE_COMMAND}" --build "${_se_cf_dir}"
+            --target nested_fork_fails)
+  set_tests_properties(compile_fail.nested_fork_undeclared PROPERTIES
+    FIXTURES_REQUIRED se_compile_fail LABELS checks
+    PASS_REGULAR_EXPRESSION "requires holding role '(jobs::)?g_fork_chunk'")
+  add_test(NAME compile_fail.nested_fork_control_compiles
+    COMMAND "${CMAKE_COMMAND}" --build "${_se_cf_dir}"
+            --target nested_fork_control)
+  set_tests_properties(compile_fail.nested_fork_control_compiles PROPERTIES
     FIXTURES_REQUIRED se_compile_fail LABELS checks)
 endif()
 

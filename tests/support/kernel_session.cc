@@ -138,7 +138,7 @@ KernelSessionResult RunKernelSession(const KernelSessionOptions& options) {
                            ? static_cast<InputSource&>(*options.replay)
                            : static_cast<InputSource&>(scripted);
   {
-    const InlineOwnerScope owner;
+    const InlineOwnerScope owner(OnMainThread());
     states.Request(StackOp::kPush, module.Module().start_state);
     states.ApplyPending();
   }
@@ -167,7 +167,7 @@ KernelSessionResult RunKernelSession(const KernelSessionOptions& options) {
 
     std::vector<TickResult> ticks;
     if (options.det_crosscheck > 0) {
-      const InlineOwnerScope owner;
+      const InlineOwnerScope owner(OnMainThread());
       for (int i = 0; i < plan.steps; ++i) {
         const std::uint64_t window_end =
             plan.tick_window_end_ns[static_cast<std::size_t>(i)];
@@ -195,7 +195,7 @@ KernelSessionResult RunKernelSession(const KernelSessionOptions& options) {
     result.replay = recorder.Finish();
   }
   {
-    const InlineOwnerScope owner;
+    const InlineOwnerScope owner(OnMainThread());
     states.Clear();
   }
   return result;

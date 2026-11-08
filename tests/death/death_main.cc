@@ -31,6 +31,7 @@
 #include "se_core/thread_role.h"
 #include "se_core/thread_safety.h"
 #include "se_core/world.h"
+#include "support/test_roles.h"
 
 namespace se {
 namespace {
@@ -57,6 +58,17 @@ void DestroyFromChunk(World& world,
 void CreateFromChunk(World& world) SE_NO_THREAD_SAFETY_ANALYSIS {
   static_cast<void>(world.Create(Guid{9, 9}));
 }
+void OwnerForkFromChunk(jobs::ForkJoinPool& pool,
+                        jobs::ForkSite& site) SE_NO_THREAD_SAFETY_ANALYSIS {
+  pool.ParallelFor(site, 1, [](jobs::ChunkRange) {});
+}
+void NestedForkFromOwner(const jobs::ForkSite& site)
+    SE_NO_THREAD_SAFETY_ANALYSIS {
+  jobs::NestedParallelFor(site, 1, [](jobs::ChunkRange) {});
+}
+void TakeInlineOwner(MainThreadProof proof) {
+  const InlineOwnerScope owner(proof);
+}
 
 // A World with |count| entities that have Transform and Name.
 void Fill(World& world, int count) SE_REQUIRES(g_sim_owner) {
@@ -72,7 +84,8 @@ const std::array<entt::id_type, 1> kTransformOnly = {
     entt::type_hash<Transform>::value()};
 
 void WorldAccessInFork() {
-  InlineOwnerScope owner;
+  const testing::MainThreadScope main_thread;
+  const InlineOwnerScope owner(OnMainThread());
   World world(CoreRegistry(), {});
   jobs::ForkJoinPool pool;
   jobs::ForkSite site{.name = "death", .grain = 1};
@@ -80,7 +93,8 @@ void WorldAccessInFork() {
 }
 
 void StructuralCallInFork() {
-  InlineOwnerScope owner;
+  const testing::MainThreadScope main_thread;
+  const InlineOwnerScope owner(OnMainThread());
   World world(CoreRegistry(), {});
   Fill(world, 4);
   const entt::entity victim = *world.Find(Guid{1, 1});
@@ -93,15 +107,34 @@ void StructuralCallInFork() {
 }
 
 void CreateInFork() {
-  InlineOwnerScope owner;
+  const testing::MainThreadScope main_thread;
+  const InlineOwnerScope owner(OnMainThread());
   World world(CoreRegistry(), {});
   jobs::ForkJoinPool pool;
   jobs::ForkSite site{.name = "death", .grain = 1};
   pool.ParallelFor(site, 1, [&](jobs::ChunkRange) { CreateFromChunk(world); });
 }
 
+// A chunk forking through the owner's ParallelFor instead of
+// NestedParallelFor.
+void OwnerForkInsideChunk() {
+  const testing::MainThreadScope main_thread;
+  const InlineOwnerScope owner(OnMainThread());
+  jobs::ForkJoinPool pool;
+  jobs::ForkSite outer{.name = "death", .grain = 1};
+  jobs::ForkSite inner{.name = "inner", .grain = 1};
+  pool.ParallelFor(outer, 1,
+                   [&](jobs::ChunkRange) { OwnerForkFromChunk(pool, inner); });
+}
+
+void NestedForkOutsideChunk() {
+  const jobs::ForkSite site{.name = "death", .grain = 1};
+  NestedForkFromOwner(site);
+}
+
 void UndeclaredRead() {
-  InlineOwnerScope owner;
+  const testing::MainThreadScope main_thread;
+  const InlineOwnerScope owner(OnMainThread());
   World world(CoreRegistry(), {});
   Fill(world, 4);
   jobs::ForkSite site{.name = "death", .grain = 4, .writes = kTransformOnly};
@@ -115,7 +148,8 @@ void UndeclaredRead() {
 }
 
 void UndeclaredWrite() {
-  InlineOwnerScope owner;
+  const testing::MainThreadScope main_thread;
+  const InlineOwnerScope owner(OnMainThread());
   World world(CoreRegistry(), {});
   Fill(world, 4);
   jobs::ForkSite site{.name = "death", .grain = 4, .reads = kTransformOnly};
@@ -127,7 +161,8 @@ void UndeclaredWrite() {
 }
 
 void WriteOutsideChunk() {
-  InlineOwnerScope owner;
+  const testing::MainThreadScope main_thread;
+  const InlineOwnerScope owner(OnMainThread());
   World world(CoreRegistry(), {});
   Fill(world, 8);
   jobs::ForkSite site{.name = "death", .grain = 4, .writes = kTransformOnly};
@@ -143,7 +178,8 @@ void WriteOutsideChunk() {
 }
 
 void ViewAfterStructuralChange() {
-  InlineOwnerScope owner;
+  const testing::MainThreadScope main_thread;
+  const InlineOwnerScope owner(OnMainThread());
   World world(CoreRegistry(), {});
   Fill(world, 4);
   jobs::ForkSite site{.name = "death", .grain = 4, .writes = kTransformOnly};
@@ -157,7 +193,8 @@ void ViewAfterStructuralChange() {
 }
 
 void PlayMutationWithGateClosed() {
-  InlineOwnerScope owner;
+  const testing::MainThreadScope main_thread;
+  const InlineOwnerScope owner(OnMainThread());
   World play(CoreRegistry(), {.kind = WorldKind::kPlay});
   {
     MutationGate gate = play.OpenGate(GateReason::kTest);
@@ -172,8 +209,18 @@ void AccessFromAnotherThread() {
   other.join();
 }
 
+// Only the main thread owns the Worlds in inline mode: a proof made on main
+// and used on another thread is caught at run time.
+void InlineOwnerOffMain() {
+  const testing::MainThreadScope main_thread;
+  const MainThreadProof proof = OnMainThread();
+  std::thread other([proof] { TakeInlineOwner(proof); });
+  other.join();
+}
+
 void DuplicateGuid() {
-  InlineOwnerScope owner;
+  const testing::MainThreadScope main_thread;
+  const InlineOwnerScope owner(OnMainThread());
   World world(CoreRegistry(), {});
   static_cast<void>(world.Create(Guid{0, 5}));
   static_cast<void>(world.Create(Guid{0, 5}));
@@ -190,12 +237,15 @@ const std::map<std::string, std::function<void()>>& Scenarios() {
       {"world_access_in_fork", WorldAccessInFork},
       {"structural_call_in_fork", StructuralCallInFork},
       {"create_in_fork", CreateInFork},
+      {"owner_fork_inside_chunk", OwnerForkInsideChunk},
+      {"nested_fork_outside_chunk", NestedForkOutsideChunk},
       {"undeclared_read", UndeclaredRead},
       {"undeclared_write", UndeclaredWrite},
       {"write_outside_chunk", WriteOutsideChunk},
       {"view_after_structural_change", ViewAfterStructuralChange},
       {"play_mutation_gate_closed", PlayMutationWithGateClosed},
       {"access_from_another_thread", AccessFromAnotherThread},
+      {"inline_owner_off_main", InlineOwnerOffMain},
       {"duplicate_guid", DuplicateGuid},
       {"unsealed_registry", UnsealedRegistry},
   };

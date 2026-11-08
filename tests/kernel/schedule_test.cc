@@ -16,6 +16,7 @@
 #include "se_core/jobs.h"
 #include "se_core/thread_role.h"
 #include "se_core/world.h"
+#include "support/test_roles.h"
 
 namespace se {
 namespace {
@@ -93,7 +94,8 @@ static_assert(!System<Stateful>, "systems hold no state");
 static_assert(!System<Nameless>, "systems have a static name");
 
 TEST_CASE("Phases run in order, systems in registration order", "[schedule]") {
-  InlineOwnerScope owner;
+  const testing::MainThreadScope main_thread;
+  const InlineOwnerScope owner(OnMainThread());
   Trace().clear();
   Schedule schedule;
   // Registered out of phase order on purpose.
@@ -112,7 +114,8 @@ TEST_CASE("Phases run in order, systems in registration order", "[schedule]") {
 }
 
 TEST_CASE("Step advances the clock and sets the breadcrumb", "[schedule]") {
-  InlineOwnerScope owner;
+  const testing::MainThreadScope main_thread;
+  const InlineOwnerScope owner(OnMainThread());
   Trace().clear();
   Schedule schedule;
   schedule.Add<InputSystem>(Phase::kInput);
@@ -134,7 +137,8 @@ TEST_CASE("Step advances the clock and sets the breadcrumb", "[schedule]") {
 
 TEST_CASE("PrevTransformCopy heads Movement; Cleanup drains and hashes",
           "[schedule]") {
-  InlineOwnerScope owner;
+  const testing::MainThreadScope main_thread;
+  const InlineOwnerScope owner(OnMainThread());
   Trace().clear();
   Schedule schedule;
   schedule.Add<MoveSystem>(Phase::kMovement);
@@ -166,7 +170,8 @@ TEST_CASE("PrevTransformCopy heads Movement; Cleanup drains and hashes",
 }
 
 TEST_CASE("Every system is timed into its ring", "[schedule]") {
-  InlineOwnerScope owner;
+  const testing::MainThreadScope main_thread;
+  const InlineOwnerScope owner(OnMainThread());
   Schedule schedule;
   const SystemId move = schedule.Add<MoveSystem>(Phase::kMovement);
   schedule.Seal();
@@ -189,7 +194,8 @@ TEST_CASE("Every system is timed into its ring", "[schedule]") {
 }
 
 TEST_CASE("A Play World steps inside its MutationGate", "[schedule]") {
-  InlineOwnerScope owner;
+  const testing::MainThreadScope main_thread;
+  const InlineOwnerScope owner(OnMainThread());
   Schedule schedule;
   schedule.Add<MoveSystem>(Phase::kMovement);
   schedule.Seal();

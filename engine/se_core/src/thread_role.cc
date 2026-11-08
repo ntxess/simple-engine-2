@@ -69,8 +69,16 @@ std::string_view RoleName(ThreadRole role) noexcept {
   return "?";
 }
 
-// The capability is a static token, so there is nothing to lock.
-InlineOwnerScope::InlineOwnerScope() noexcept SE_NO_THREAD_SAFETY_ANALYSIS {
+MainThreadProof OnMainThread() noexcept {
+  SE_ASSERT_MAIN_THREAD();
+  return MainThreadProof();
+}
+
+// The capability is a static token, so there is nothing to lock. The proof
+// was made on the main thread; check it is still used there.
+InlineOwnerScope::InlineOwnerScope(MainThreadProof /*on_main*/) noexcept
+    SE_NO_THREAD_SAFETY_ANALYSIS {
+  SE_ASSERT_MSG(IsMainThread(), "InlineOwnerScope outside the main thread");
   ++t_inline_owner_depth;
 }
 

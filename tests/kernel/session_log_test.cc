@@ -68,7 +68,7 @@ float MoverRadius(const World& world) {
 
 TEST_CASE("Entries apply at the boundary before their tick", "[session_log]") {
   const testing::MainThreadScope main_thread;
-  const InlineOwnerScope owner;
+  const InlineOwnerScope owner(OnMainThread());
   Fixture f;
   f.Start();
   SessionLog log;
@@ -86,7 +86,7 @@ TEST_CASE("Entries apply at the boundary before their tick", "[session_log]") {
 
 TEST_CASE("Entries apply in (tick, seq) order", "[session_log]") {
   const testing::MainThreadScope main_thread;
-  const InlineOwnerScope owner;
+  const InlineOwnerScope owner(OnMainThread());
   Fixture f;
   f.Start();
   SessionLog log;
@@ -104,7 +104,7 @@ TEST_CASE("Entries apply in (tick, seq) order", "[session_log]") {
 TEST_CASE("A live entry for a past tick is logged against the next tick",
           "[session_log]") {
   const testing::MainThreadScope main_thread;
-  const InlineOwnerScope owner;
+  const InlineOwnerScope owner(OnMainThread());
   Fixture f;
   f.Start();
   SessionLog log;
@@ -210,7 +210,7 @@ class PlaySession {
 TEST_CASE("While paused, entries apply at once against the next tick",
           "[session_log]") {
   const testing::MainThreadScope main_thread;
-  const InlineOwnerScope owner;
+  const InlineOwnerScope owner(OnMainThread());
   g_play_running = true;
   PlaySession live;
   live.Start();
@@ -260,7 +260,7 @@ TEST_CASE("While paused, entries apply at once against the next tick",
 
 TEST_CASE("Every op applies to the top state's Worlds", "[session_log]") {
   const testing::MainThreadScope main_thread;
-  const InlineOwnerScope owner;
+  const InlineOwnerScope owner(OnMainThread());
   Fixture f;
   f.Start();
   const ComponentRegistry& registry = f.module.Registry();
@@ -319,7 +319,7 @@ TEST_CASE("Every op applies to the top state's Worlds", "[session_log]") {
 TEST_CASE("Play Worlds take session edits through their gate",
           "[session_log]") {
   const testing::MainThreadScope main_thread;
-  const InlineOwnerScope owner;
+  const InlineOwnerScope owner(OnMainThread());
   Fixture f(WorldKind::kPlay);
   f.Start();
   CHECK(f.Top().Desc().kind == WorldKind::kPlay);
@@ -333,7 +333,7 @@ TEST_CASE("Play Worlds take session edits through their gate",
 
 TEST_CASE("Write and Read round-trip every entry", "[session_log]") {
   const testing::MainThreadScope main_thread;
-  const InlineOwnerScope owner;
+  const InlineOwnerScope owner(OnMainThread());
   Fixture f;
   f.Start();
   const ComponentRegistry& registry = f.module.Registry();

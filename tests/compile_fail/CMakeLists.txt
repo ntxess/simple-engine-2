@@ -15,8 +15,8 @@ if(NOT SE_REPO_ROOT)
   message(FATAL_ERROR "pass -DSE_REPO_ROOT=<repository root>")
 endif()
 
-function(se_compile_fail_target name fails)
-  add_library(${name} OBJECT chunk_create.cc)
+function(se_compile_fail_target name source fails)
+  add_library(${name} OBJECT ${source})
   target_include_directories(${name} PRIVATE
     "${SE_REPO_ROOT}/engine/se_core/include")
   target_include_directories(${name} SYSTEM PRIVATE
@@ -32,5 +32,7 @@ function(se_compile_fail_target name fails)
   endif()
 endfunction()
 
-se_compile_fail_target(chunk_create_fails 1)
-se_compile_fail_target(chunk_create_control 0)
+se_compile_fail_target(chunk_create_fails chunk_create.cc 1)
+se_compile_fail_target(chunk_create_control chunk_create.cc 0)
+se_compile_fail_target(nested_fork_fails nested_fork.cc 1)
+se_compile_fail_target(nested_fork_control nested_fork.cc 0)

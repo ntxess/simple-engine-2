@@ -7,11 +7,25 @@
 // many threads run them.
 //
 // M2 ships the inline pool only (W = 0): the chunks run in order on the
-// calling thread with t_in_fork set, nested forks run inline, and an
-// exception thrown by a chunk (a third-party throw such as bad_alloc)
-// propagates to the caller's fault boundary; the pool itself has no catch.
-// M14's threaded pool keeps this interface and chunking, catches on the
-// workers at its fault boundary and rethrows on the owner thread.
+// calling thread with t_in_fork set, and an exception thrown by a chunk (a
+// third-party throw such as bad_alloc) propagates to the caller's fault
+// boundary; the pool itself has no catch. M14's threaded pool keeps this
+// interface and chunking, catches on the workers at its fault boundary and
+// rethrows on the owner thread.
+//
+// Nested forks run inline (ADR-019). A chunk does not hold g_sim_owner, so
+// it cannot call ParallelFor; it holds g_fork_chunk instead, and a chunk
+// lambda that forks again says so and calls NestedParallelFor:
+//
+//   pool.ParallelFor(site, n, [&](jobs::ChunkRange r)
+//                                 SE_REQUIRES(jobs::g_fork_chunk) {
+//     jobs::NestedParallelFor(inner, m, [&](jobs::ChunkRange s) { ... });
+//   });
+//
+// A nested fork leaves its site's stats alone (they belong to the owner
+// thread, and in M14 several workers may run the same nested site at once).
+// The breadcrumb shows the innermost running chunk and returns to the outer
+// one when the nested fork ends.
 
 #ifndef SE_CORE_JOBS_H_
 #define SE_CORE_JOBS_H_
@@ -33,6 +47,11 @@ namespace se::jobs {
 // True while the calling thread runs a fork chunk. World structural calls
 // and World-level sinks assert it is false (SE_ASSERT_NOT_IN_FORK).
 inline thread_local bool t_in_fork = false;
+
+// The capability of code running inside a fork chunk (ADR-019): ParallelFor
+// holds it while it runs the chunks, and NestedParallelFor requires it.
+struct SE_CAPABILITY("role") ForkChunkRole {};
+extern ForkChunkRole g_fork_chunk;
 
 // One chunk: items [begin, end).
 struct ChunkRange {
@@ -94,16 +113,35 @@ struct ForkSite {
           static_cast<std::uint32_t>(end)};
 }
 
-// Marks the calling thread as running fork chunks; nests.
-class ForkScope {
+// Marks the calling thread as running fork chunks and holds g_fork_chunk.
+// Taken once per fork by the thread that runs its chunks (the caller in M2,
+// each worker in M14); a nested fork does not take it again.
+class SE_SCOPED_CAPABILITY ForkScope {
  public:
-  ForkScope() noexcept : previous_(t_in_fork) { t_in_fork = true; }
-  ~ForkScope() { t_in_fork = previous_; }
+  ForkScope() noexcept SE_ACQUIRE(g_fork_chunk);
+  ~ForkScope() SE_RELEASE(g_fork_chunk);
   ForkScope(const ForkScope&) = delete;
   ForkScope& operator=(const ForkScope&) = delete;
 
  private:
-  bool previous_;
+  bool previous_ = t_in_fork;
+};
+
+// Shows fork chunks in the calling thread's breadcrumb and restores the
+// chunk it showed before (an outer fork's chunk, or 0) when it ends.
+class ChunkCrumbScope {
+ public:
+  ChunkCrumbScope() noexcept
+      : crumb_(ThreadBreadcrumb()), previous_(crumb_.Fields().chunk) {}
+  ~ChunkCrumbScope() { crumb_.SetChunk(previous_); }
+  ChunkCrumbScope(const ChunkCrumbScope&) = delete;
+  ChunkCrumbScope& operator=(const ChunkCrumbScope&) = delete;
+
+  void Set(std::uint32_t chunk) const noexcept { crumb_.SetChunk(chunk); }
+
+ private:
+  Breadcrumb& crumb_;
+  std::uint16_t previous_;
 };
 
 class ForkJoinPool {
@@ -122,7 +160,8 @@ class ForkJoinPool {
   explicit ForkJoinPool(const Config& config) noexcept;
 
   // Runs body(ChunkRange) for every chunk of [0, count), in chunk order on
-  // the calling thread (M2). Chunks must not make structural World calls.
+  // the calling thread (M2). Chunks must not make structural World calls;
+  // they hold g_fork_chunk, and fork again only through NestedParallelFor.
   template <class F>
   void ParallelFor(ForkSite& site, std::uint32_t count, F&& body)
       SE_REQUIRES(g_sim_owner);
@@ -138,18 +177,38 @@ class ForkJoinPool {
 template <class F>
 void ForkJoinPool::ParallelFor(ForkSite& site, std::uint32_t count, F&& body) {
   SE_ASSERT_MSG(site.grain > 0, "a fork site needs a grain");
+  SE_ASSERT_MSG(!t_in_fork,
+                "ParallelFor inside a fork chunk: use jobs::NestedParallelFor");
   auto&& run_chunk = std::forward<F>(body);
   const std::uint32_t chunks = ChunkCount(count, site.grain);
   ++site.stats.forks;
   ++site.stats.inline_forks;
   site.stats.chunks += chunks;
-  Breadcrumb& crumb = ThreadBreadcrumb();
+  const ChunkCrumbScope crumb;
   const ForkScope scope;
   for (std::uint32_t chunk = 0; chunk < chunks; ++chunk) {
-    crumb.SetChunk(chunk);
+    crumb.Set(chunk);
     run_chunk(ChunkAt(count, site.grain, chunk));
   }
-  crumb.SetChunk(0);
+}
+
+// A fork inside a fork chunk: body(ChunkRange) for every chunk of
+// [0, count), inline on the calling thread in chunk order, with the same
+// chunking as ParallelFor. The site's stats are not touched.
+template <class F>
+void NestedParallelFor(const ForkSite& site, std::uint32_t count, F&& body)
+    SE_REQUIRES(g_fork_chunk) {
+  SE_ASSERT_MSG(site.grain > 0, "a fork site needs a grain");
+  SE_ASSERT_MSG(t_in_fork,
+                "NestedParallelFor outside a fork chunk: use "
+                "ForkJoinPool::ParallelFor");
+  auto&& run_chunk = std::forward<F>(body);
+  const std::uint32_t chunks = ChunkCount(count, site.grain);
+  const ChunkCrumbScope crumb;
+  for (std::uint32_t chunk = 0; chunk < chunks; ++chunk) {
+    crumb.Set(chunk);
+    run_chunk(ChunkAt(count, site.grain, chunk));
+  }
 }
 
 }  // namespace se::jobs

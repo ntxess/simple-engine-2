@@ -99,7 +99,7 @@ GameStateFactory TraceFactory() {
 
 TEST_CASE("Push pauses, replace destroys, pop resumes", "[game_state]") {
   const testing::MainThreadScope main_thread;
-  const InlineOwnerScope owner;
+  const InlineOwnerScope owner(OnMainThread());
   Trace().clear();
   const GameStateFactory factory = TraceFactory();
   GameStateStack stack(factory, {});
@@ -127,7 +127,7 @@ TEST_CASE("Push pauses, replace destroys, pop resumes", "[game_state]") {
 
 TEST_CASE("Commands apply in FIFO order at one boundary", "[game_state]") {
   const testing::MainThreadScope main_thread;
-  const InlineOwnerScope owner;
+  const InlineOwnerScope owner(OnMainThread());
   Trace().clear();
   const GameStateFactory factory = TraceFactory();
   GameStateStack stack(factory, {});
@@ -149,7 +149,7 @@ TEST_CASE("Commands apply in FIFO order at one boundary", "[game_state]") {
 TEST_CASE("Unknown states and pops of an empty stack are rejected",
           "[game_state]") {
   const testing::MainThreadScope main_thread;
-  const InlineOwnerScope owner;
+  const InlineOwnerScope owner(OnMainThread());
   const GameStateFactory factory = TraceFactory();
   GameStateStack stack(factory, {});
   stack.Request(StackOp::kPop);
@@ -161,7 +161,7 @@ TEST_CASE("Unknown states and pops of an empty stack are rejected",
 
 TEST_CASE("Only a running top state steps; render alphas", "[game_state]") {
   const testing::MainThreadScope main_thread;
-  const InlineOwnerScope owner;
+  const InlineOwnerScope owner(OnMainThread());
   const GameStateFactory factory = TraceFactory();
   GameStateStack stack(factory, {});
   CHECK_FALSE(stack.SimRunning());
@@ -191,7 +191,7 @@ TEST_CASE("Only a running top state steps; render alphas", "[game_state]") {
 TEST_CASE("Systems request state changes for the next boundary",
           "[game_state]") {
   const testing::MainThreadScope main_thread;
-  const InlineOwnerScope owner;
+  const InlineOwnerScope owner(OnMainThread());
   Trace().clear();
   const GameStateFactory factory = TraceFactory();
   GameStateStack stack(factory, {});
@@ -211,7 +211,7 @@ TEST_CASE("Systems request state changes for the next boundary",
 TEST_CASE("Play Worlds hand their GameState requests over at the boundary",
           "[game_state]") {
   const testing::MainThreadScope main_thread;
-  const InlineOwnerScope owner;
+  const InlineOwnerScope owner(OnMainThread());
   Trace().clear();
   const GameStateFactory factory = TraceFactory();
   GameStateStack stack(factory, {});
@@ -278,7 +278,7 @@ TEST_CASE(
   env.seed = 42;
   GameStateStack states(module.Factory(), env);
   {
-    const InlineOwnerScope owner;
+    const InlineOwnerScope owner(OnMainThread());
     states.Request(StackOp::kPush, testing::kGameplayState);
     states.ApplyPending();
   }
@@ -309,7 +309,7 @@ TEST_CASE(
   // The new World stepped once: its clock is at 1, not at 301.
   REQUIRE(states.RunningWorlds().size() == 1);
   REQUIRE(states.RunningWorlds().front()->Clock().tick == 1);
-  const InlineOwnerScope owner;
+  const InlineOwnerScope owner(OnMainThread());
   states.Clear();
 }
 

@@ -16,6 +16,7 @@
 #include "se_core/core_components.h"
 #include "se_core/guid.h"
 #include "se_core/thread_role.h"
+#include "support/test_roles.h"
 
 namespace se {
 namespace {
@@ -45,7 +46,8 @@ TEST_CASE("ENTT_USE_ATOMIC is defined everywhere", "[world]") {
 }
 
 TEST_CASE("The constructor pre-creates every registered storage", "[world]") {
-  InlineOwnerScope owner;
+  const testing::MainThreadScope main_thread;
+  const InlineOwnerScope owner(OnMainThread());
   World world(CoreRegistry(), {.name = "test"});
   for (const ComponentInfo& info : CoreRegistry().All()) {
     INFO(info.name);
@@ -64,7 +66,8 @@ TEST_CASE("The constructor pre-creates every registered storage", "[world]") {
 }
 
 TEST_CASE("Create, Find and Spawn", "[world]") {
-  InlineOwnerScope owner;
+  const testing::MainThreadScope main_thread;
+  const InlineOwnerScope owner(OnMainThread());
   World world(CoreRegistry(), {});
   const entt::entity a = world.Create(Guid{0, 10});
   REQUIRE(world.Find(Guid{0, 10}) == a);
@@ -83,7 +86,8 @@ TEST_CASE("Create, Find and Spawn", "[world]") {
 }
 
 TEST_CASE("Destroys are requested, then drained", "[world]") {
-  InlineOwnerScope owner;
+  const testing::MainThreadScope main_thread;
+  const InlineOwnerScope owner(OnMainThread());
   World world(CoreRegistry(), {});
   const entt::entity a = world.Create(Guid{0, 1});
   const entt::entity b = world.Create(Guid{0, 2});
@@ -102,7 +106,8 @@ TEST_CASE("Destroys are requested, then drained", "[world]") {
 
 TEST_CASE("FinalizeSpawns sets prev = current and the teleport tick",
           "[world]") {
-  InlineOwnerScope owner;
+  const testing::MainThreadScope main_thread;
+  const InlineOwnerScope owner(OnMainThread());
   World world(CoreRegistry(), {});
   world.MutableClock().tick = 7;
   const entt::entity e = world.Create(Guid{0, 1});
@@ -137,7 +142,8 @@ void Populate(World& world, bool reverse) SE_REQUIRES(g_sim_owner) {
 }
 
 TEST_CASE("The world hash is independent of storage order", "[world]") {
-  InlineOwnerScope owner;
+  const testing::MainThreadScope main_thread;
+  const InlineOwnerScope owner(OnMainThread());
   World forward(CoreRegistry(), {});
   World backward(CoreRegistry(), {});
   Populate(forward, false);
@@ -165,7 +171,8 @@ TEST_CASE("The world hash is independent of storage order", "[world]") {
 }
 
 TEST_CASE("Clone copies ids, order, Guids and clock", "[world]") {
-  InlineOwnerScope owner;
+  const testing::MainThreadScope main_thread;
+  const InlineOwnerScope owner(OnMainThread());
   World world(CoreRegistry(), {.name = "original", .seed = 9});
   Populate(world, false);
   world.MutableClock().tick = 42;
@@ -194,7 +201,8 @@ TEST_CASE("Clone copies ids, order, Guids and clock", "[world]") {
 }
 
 TEST_CASE("Play Worlds take mutations through a MutationGate", "[world]") {
-  InlineOwnerScope owner;
+  const testing::MainThreadScope main_thread;
+  const InlineOwnerScope owner(OnMainThread());
   World play(CoreRegistry(), {.kind = WorldKind::kPlay});
   CHECK_FALSE(play.GateOpen());
   {
@@ -221,7 +229,8 @@ TEST_CASE("The owner is the constructing thread", "[world]") {
 }
 
 TEST_CASE("EntityRef resolves by Guid and revalidates its cache", "[world]") {
-  InlineOwnerScope owner;
+  const testing::MainThreadScope main_thread;
+  const InlineOwnerScope owner(OnMainThread());
   World world(CoreRegistry(), {});
   const entt::entity target = world.Create(Guid{0, 77});
   const EntityRef ref{Guid{0, 77}};
@@ -238,7 +247,8 @@ TEST_CASE("EntityRef resolves by Guid and revalidates its cache", "[world]") {
 }
 
 TEST_CASE("Mutations mark the hash dirty until recorded", "[world]") {
-  InlineOwnerScope owner;
+  const testing::MainThreadScope main_thread;
+  const InlineOwnerScope owner(OnMainThread());
   World world(CoreRegistry(), {});
   CHECK(world.HashDirty());
   static_cast<void>(world.Create(Guid{0, 1}));
