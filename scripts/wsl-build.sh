@@ -11,6 +11,8 @@
 #   sudo apt install -y clang-20 lld-20 libclang-rt-20-dev ninja-build \n#     python3-pip pipx glslang-tools   # clang 19+: libstdc++ std::expected
 #   pipx install cmake            # Ubuntu 24.04 ships CMake 3.28; 3.31+ needed
 set -euo pipefail
+# pipx installs CMake into ~/.local/bin, which only login shells put on PATH.
+export PATH="$HOME/.local/bin:$PATH"
 
 preset="${1:?usage: wsl-build.sh <workflow-preset>}"
 win_repo="${SE_WIN_REPO:-/mnt/d/Dev/simple-engine-2}"
