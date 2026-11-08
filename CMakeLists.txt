@@ -11,6 +11,9 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+# The engine does not use C++20 modules; skip dependency scanning (it needs
+# clang-scan-deps on Linux and slows every build).
+set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 
 option(SE_BUILD_ENGINE "Build the engine targets" ON)
 option(SE_BUILD_PLATFORM "Build the SDL3 platform, renderer, runtime and editor" ON)
