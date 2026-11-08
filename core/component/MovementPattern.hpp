@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <memory>
 
 #include <entt/entity/entity.hpp>
@@ -16,8 +17,14 @@ public:
 
     void accept(IComponentVisitor* visitor, entt::entity entityID) override;
 
+    // Starts the path over at its first point: segment 0, nothing travelled, not finished.
+    void restart();
+
     std::unique_ptr<WayPoint> movePattern;
-    WayPoint* currentPath;
-    float distance;
+    // Progress (rule R12): the current segment, from waypoint `segment` to the next one, and the
+    // distance travelled along it; `finished` once a non-repeating path has reached its end.
+    std::size_t segment;
+    float segmentDistance;
+    bool finished;
     bool repeat;
 };

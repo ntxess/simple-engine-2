@@ -248,3 +248,59 @@ stops beyond the corner, held at (24, 1056); before, it left the arena to
 x = -50.3 with y held at 1012.1. In `patrol` the player walks along the left
 edge from tick 2877. No fixture has a sprite larger than the bounds (no
 texture is larger than the arena); the engine's boundary_test covers it.
+
+## R12 Path steps follow the polyline
+
+A path's progress is its current segment `i`, from waypoint `i` to the next,
+and the distance `u` travelled along it (a float). An entity starts on its
+first point with `u = 0` on segment 0. Each tick, an entity with the Speed
+stat (one without it does not move) takes the step `rem = speed × dt`
+(`dt = 1.f / 120.f`, which is the float of the tick length 1/120 s) and loops:
+
+1. a segment of length 0 is skipped (R6);
+2. with no segment left (the end of a non-repeating path), the entity is placed
+   exactly on the last point and stops moving for good;
+3. if `u + rem < len`, then `u = u + rem` and the loop ends;
+4. otherwise `rem = (u + rem) - len` and `u = 0`, and the loop goes on with the
+   next segment.
+
+So one tick's step can pass several waypoints. The position is taken from the
+progress: `a + (b - a) × (u / len)` per axis, with the segment's points `a`
+and `b` and its length `len = sqrt(dx × dx + dy × dy)` (`dx = b.x - a.x`,
+`dy = b.y - a.y`; WayPoint::distanceToNext, computed once per segment). The
+heading is the segment's, `atan2(dy, dx) × (180 / π) + 90` degrees, of the
+last segment of positive length the entity moved along in the tick (so the
+segment it ends the tick on, or the last one of a path it finished). All of
+these are float expressions, evaluated as written and in this order. An
+entity is moved (UpdateEntityEvent, the dirty flag of R2 and R8) on every tick
+its position changes, so never after it finished its path. Boundary (R11)
+clamps the sprite after this, without changing the progress, so a path that
+leaves the arena does not shift the rest of the path. A step that a whole
+round of a repeating path no longer shortens (a speed so large, or NaN or
+infinite, that the round vanishes in float rounding) would loop for ever; it
+ends at the start of the path instead. Until R13, a repeating path went on
+from its end with segment 0, so the entity jumped back to its first point.
+
+Before: MovementPattern kept the waypoint the entity was heading from and a
+running total `distance` (core/system/WayPointSystem.cpp:37-51). Each tick the
+whole step `speed × dt` was taken along the current segment's direction, even
+past its end, and the next segment began only once `distance` exceeded the
+next waypoint's running total (`distanceTotal`), so corners were overshot by
+up to one step and at most one waypoint was passed per tick. The position was
+integrated from these per-tick increments (`sprite.move`), so it drifted from
+the path, and every clamp at the arena edge shifted the rest of the path; the
+heading came from the step's vector, `atan2(velocity.y, velocity.x)`.
+
+Goldens: all three changed from tick 1 on every tick (3600 of 3600; at tick 1
+only in the last digits of the headings in `stress` and `patrol`, and in
+`effects` SpawnIndex 14, which passes three waypoints in its first step).
+
+Coverage: `effects` SpawnIndex 14 has segments of 1 px and 1.41 px, shorter
+than its 4.17 px step, and passes three waypoints in tick 1 and again in tick
+162, where its step crosses its last point (which is its first) and the next
+two.
+The non-repeating paths of `effects` end exactly on their last points:
+SpawnIndex 10 at (400, 700) from tick 1393 and SpawnIndex 11 at (1840, 540)
+from tick 1600, where the old code took one more step to x = 1841 and stayed
+a moved source for that tick (the player's Charge differs from tick 1601).
+SpawnIndex 13 ends beyond the arena corner and stays clamped there (R11).

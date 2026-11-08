@@ -204,11 +204,12 @@ void EditorComponentVisitor::visit(MovementPattern* movementPattern, entt::entit
     while (current != nullptr)
     {
         std::string wpNumText = std::to_string(waypointNum);
-        if (current->distanceTotal < movementPattern->distance && current->nextWP && movementPattern->distance < current->nextWP->distanceTotal)
+        // The running segment starts at this waypoint; its progress is the distance along it (rule R12).
+        if (!movementPattern->finished && waypointNum == movementPattern->segment)
         {
             ImGui::TextColored({ 0.f, 1.f, 0.f, 1.f }, "%s", (wpNumText + "  Run ").c_str());
             ImGui::SameLine(ImGui::GetWindowWidth() / 8.f);
-            ImGui::TextColored({ 0.f, 1.f, 0.f, 1.f }, "%s", std::to_string(movementPattern->distance - current->distanceTotal).c_str());
+            ImGui::TextColored({ 0.f, 1.f, 0.f, 1.f }, "%s", std::to_string(movementPattern->segmentDistance).c_str());
         }
         else
         {
