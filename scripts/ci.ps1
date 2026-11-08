@@ -37,12 +37,27 @@ if ($Milestone) {
 if ($Legacy) {
   $Presets = @($Presets) + @('legacy-msvc-debug', 'legacy-msvc-release')
 }
+function ConvertTo-WslPath([string]$Path) {
+  $full = [System.IO.Path]::GetFullPath($Path)
+  '/mnt/' + $full.Substring(0, 1).ToLowerInvariant() + ($full.Substring(2) -replace '\\', '/')
+}
 $failed = @()
 foreach ($preset in $Presets) {
   Write-Host "=== $preset ===" -ForegroundColor Cyan
   if ($preset.StartsWith('wsl:')) {
+    # WSL builds the committed tip of this checkout's branch. A worktree's
+    # branch is fetched from the main repository (worktrees share its refs)
+    # into a clone of its own, so parallel worktrees do not collide.
     $name = $preset.Substring(4)
-    wsl.exe -d Ubuntu -- bash -lc "bash /mnt/d/Dev/simple-engine-2/scripts/wsl-build.sh $name"
+    $branch = (git -C $repo rev-parse --abbrev-ref HEAD).Trim()
+    $common = (git -C $repo rev-parse --path-format=absolute --git-common-dir).Trim()
+    $main = Split-Path -Parent $common
+    $wslMain = ConvertTo-WslPath $main
+    $clone = '~/se-wsl'
+    if ([System.IO.Path]::GetFullPath($main) -ne [System.IO.Path]::GetFullPath($repo)) {
+      $clone = "~/se-wsl-$($branch -replace '[^A-Za-z0-9._-]', '-')"
+    }
+    wsl.exe -d Ubuntu -- bash -lc "SE_WIN_REPO=$wslMain SE_BRANCH=$branch SE_WSL_CLONE=$clone bash $wslMain/scripts/wsl-build.sh $name"
   } else {
     & cmd.exe /c "`"$repo\scripts\with-msvc.cmd`" cmake --workflow --preset $preset"
   }
