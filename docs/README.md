@@ -34,13 +34,15 @@ behaviour reference until every rule and editor operation is ported.
 | se_crash | engine/se_crash | Out-of-process crash capture on crashpad: Start/CrashGuard, RegisterStream, DumpWithoutCrash, the terminate annotation; nothing uploaded; a stub on Linux and in msvc-asan (M4, ADR-033, ADR-034). The watchdog skeleton: role kWatchdog, the HangDetector (boot budget; hangs declared from M12), RequestDump, the shutdown deadline (M4 integration, ADR-043) |
 | game_rampage | games/rampage | The legacy Sandbox's gameplay on the kernel: components, systems, scenes and prefabs (assets/), legacy scenarios, projections (M3) |
 | se_platform | engine/se_platform | SDL3 on the main thread: SDL's initialisation, the event filter and Inbox, WakeMain, the window and its Win32 subclass (Modal, session end, power), se::fs on SDL's filesystem API (M5) |
-| se_render | engine/se_render | The SDL_GPU device (D3D12 on Windows, Vulkan on Linux) and the frame transaction, clear-only until M7 (M5) |
+| se_render | engine/se_render | The SDL_GPU device (D3D12 on Windows, Vulkan on Linux) and the frame transaction, clear-only until M7 (M5); `se::present` (present.h): the SDL presentation patch's frame-latency wait, present statistics, GPU timestamps, native handles, device status and present mode, all unsupported in the unpatched build (M6a, ADR-050 to ADR-053) |
 | se_runtime | engine/se_runtime | The App on SDL's main callbacks: boot steps, the frame, the lifecycle and two-phase quit state machines, BasicInputService, the noexcept callbacks (`SE_DEFINE_SDL_APP`) (M5); the main thread's RoleScope, crash capture and its dump streams, the log worker and the watchdog in boot order (integration.h; ADR-042) |
 | rampage | games/rampage/app | The rampage executable: the sandbox scene at 120 Hz in a window, clear-only until M7 (M5); crashpad_handler is copied next to it |
 | se_replay | tools/se_replay | Headless runs of a game module: per-tick hashes, replays, projections |
 | refcmp | tools/refcmp/refcmp.py | Compares two `.seproj` projections within the M3 tolerances (Python 3, stdlib only) |
 | read_dump | tools/minidump/read_dump.py | Decodes a crash dump: threads, exception, annotations and the first-party streams (breadcrumbs, log rings, InputFrame ring), and lists every record that does not fit its index (a stale or torn InputFrame slot, log sequence numbers out of order) under "problems", apart from the one a running writer was overwriting (ADR-046); the crash tests' oracle (Python 3, stdlib only) |
 | se_crash_probe | tests/crash | Registers dump streams with known contents, then crashes or requests dumps; the `crash.*` tests (label crash) check its dumps with read_dump. `crash.rampage_*` (labels desktop and crash) check the M4 exit dumps of the rampage executable |
+| se_present_tests | tests/present | The present API on both GPU drivers (`present.d3d12.*`, `present.vulkan.*`, chosen with SE_GPU_DRIVER): caps, GPU timing, handles and status (label gpu), and the frame-latency waits, statistics, resize and present-mode changes (label desktop) |
+| SDL patch | cmake/patches | sdl3-3.4.20-se-presentation.patch: `include/SDL3/SDL_gpu_se.h` and its D3D12 and Vulkan backends, applied with `SE_SDL_PATCH` (docs/deps.md has the rebase notes) |
 | se_bench | bench/se_bench | Benchmark suites and their Release gates (`bench.*`) |
 | legacy tree | core/, app/ | The SFML reference (`SE_BUILD_LEGACY`, legacy presets) |
 
@@ -125,7 +127,8 @@ test build, `rampage --crash-test after-ticks:240` and
 `rampage --dump-test after-ticks:240` write the M4 exit dumps.
 
 `scripts/ci.ps1` runs the commit gate (msvc-dev, msvc-asan, clangcl-dev,
-including the `lint` and `checks` test labels); `scripts/ci.ps1 -Milestone`
+including the `lint` and `checks` test labels; `-Presets msvc-unpatched-dev`
+builds and tests without the SDL presentation patch); `scripts/ci.ps1 -Milestone`
 adds Debug, Release, the WSL Linux sanitizer presets and the desktop
 tests. `scripts/ci.ps1 -Desktop` runs only the desktop tests (label
 `desktop`: real windows on this machine's desktop, opened without taking

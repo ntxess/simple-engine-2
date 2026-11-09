@@ -960,3 +960,201 @@ start (ADR-029): the log worker starts at boot step 2, before the profiler.
 
 **Why.** Tracy names a thread only through that thread's own events, and
 neither helper had any, so the "named threads" gate could not pass.
+
+## ADR-050 The SDL presentation patch: one header, hooks, files of its own (2026-11-09)
+
+**Decision.** cmake/patches/sdl3-3.4.20-se-presentation.patch (a `git
+diff` against the extracted SDL3-3.4.20 tarball, with a short description
+above the first hunk) adds:
+- `include/SDL3/SDL_gpu_se.h`, the only new public header: nine
+  `SDL_SE_`-prefixed functions (capabilities, frame latency set and wait,
+  present statistics, GPU timing begin/end/read, device status, native
+  handles) and their types, versioned by `SDL_SE_GPU_PRESENTATION_VERSION`
+  (1);
+- `src/gpu/SDL_gpu_se.c`, the entry points: argument checks, then a
+  dispatch on the device's backend name ("direct3d12", "vulkan") to an
+  `SDL_SE_GPUBackend` table (`src/gpu/SDL_gpu_se_c.h`); other backends
+  report every capability unsupported;
+- per backend, `SDL_gpu_<backend>_se.h` (the state the backend's window,
+  renderer and command-buffer structures carry as one `se` member each,
+  and the hook prototypes), included once after the backend's fence type,
+  and `SDL_gpu_<backend>_se_impl.h` (the hooks and the table), included
+  right before the backend's `SDL_GPUBootstrap`, so it sees the private
+  structures and static functions. Both are headers so that SDL's
+  `*.c` source glob does not compile them on their own.
+
+The edits to SDL's own files are hook calls and the three `se` members,
+each marked `// simple-engine-2 presentation patch`: 20 lines in
+SDL_gpu_d3d12.c and 30 in SDL_gpu_vulkan.c (docs/deps.md lists them). The
+new functions are not entered in SDL's dynamic API tables: the engine links
+SDL statically, where that is not needed; a shared build or an upstream
+offer would run SDL's gendynapi.py. Nothing changes until a new function is
+called: the D3D12 waitable flag is added when SetFrameLatency first asks
+for it, Vulkan present ids only while a latency is set, display timing
+after the first statistics query, timestamp query objects at the first
+Begin; the Vulkan extensions are enabled at device creation when the
+device has them (ADR-051), which changes no behaviour. `.gitattributes`
+keeps `cmake/patches/*.patch` byte-exact (`-text`): git's CRLF conversion
+on Windows would break both `git apply` against the LF tarball and the
+SHA256 the build checks. cmake/Dependencies.cmake sets `SE_SDL_PATCHED`
+when it applies the patch and se_render passes it on as the compile
+definition `SE_SDL_PATCHED=0/1`; `base` sets `SE_SDL_PATCH=ON` explicitly
+and msvc-unpatched-dev `OFF`. msvc-unpatched-dev gains test and workflow
+presets (labels bench and desktop excluded, as in msvc-dev) and
+`SE_TRACY=ON`, so that it is msvc-dev without the patch: without Tracy,
+clang-tidy rejects the non-profiling expansion of SE_PROFILE_ZONE_DYNAMIC
+(`sizeof` of a string_view, bugprone-sizeof-container), which no other
+preset that runs the lint label builds.
+
+present.h is the spec's API with two additions that change no call: every
+function carries `SE_REQUIRES(g_main)` (the thread-safety analysis, as in
+gpu_device.h), and `present_count` is documented with DXGI's meaning, the
+present count of the most recently displayed present in the numbering of
+`last_present_count` (the spec's comment "presents the swapchain issued"
+describes `last_present_count`).
+
+**Why.** Rebasing onto a later SDL has to stay mechanical: the new code
+lives in files SDL does not have, and each touched line in SDL's files is a
+one-line hook whose position a later SDL keeps. SDL's backends keep their
+structures private to one translation unit, so the backend code is
+included into it rather than compiled beside it.
+
+**Note.** The SDL 3.4.20 tarball's AGENTS.md and CLAUDE.md say that
+contributions made with generative AI are not accepted by SDL. This patch
+was written by an AI agent, so it must not be offered upstream as it is
+(the design's "offered upstream" needs the owner's decision; docs/gates.md).
+
+## ADR-051 The frame-latency wait on D3D12 and Vulkan (2026-11-09)
+
+**Decision.**
+- D3D12: SetFrameLatency(n) on a swapchain without the waitable records n,
+  waits for the GPU (D3D12_Wait), destroys and recreates the swapchain as
+  SetSwapchainParameters does; every swapchain created while a latency is
+  set gets `DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT` (with
+  ALLOW_TEARING when supported), every `ResizeBuffers` passes the same
+  flags, and after each creation the patch calls
+  `IDXGISwapChain2::SetMaximumFrameLatency(n)` and takes
+  `GetFrameLatencyWaitableObject` (closed when the swapchain is released).
+  Later calls only set the maximum latency. WaitFrameLatency waits on the
+  waitable and a high-resolution waitable timer due at the timeout
+  (`CreateWaitableTimerExW` with `CREATE_WAITABLE_TIMER_HIGH_RESOLUTION`,
+  100 ns units rounded down, a millisecond backstop), so the wait never
+  exceeds the timeout by the 15.6 ms timer tick; a zero timeout polls.
+  Present mode changes and resizes keep the waitable (desktop test).
+- Vulkan: at device creation the patch appends `VK_KHR_present_id`,
+  `VK_KHR_present_wait` and `VK_GOOGLE_display_timing` when the physical
+  device has them and the application did not already request them, and
+  chains `VkPhysicalDevicePresentIdFeaturesKHR` and
+  `VkPhysicalDevicePresentWaitFeaturesKHR` when
+  `vkGetPhysicalDeviceFeatures2KHR` reports the features (it needs
+  VK_KHR_get_physical_device_properties2 on SDL's 1.0 instance). If
+  vkCreateDevice fails with the additions, it is called again without
+  them. While a latency L is set each present carries its window's present
+  number as its present id; WaitFrameLatency waits with
+  `vkWaitForPresentKHR` for id `last + 1 - L`, the present L back from the
+  next one. Ready without waiting: fewer than L presents with ids, or a
+  target that went to an earlier swapchain; VK_TIMEOUT is kTimeout; out of
+  date, surface lost and device lost return kReady (and record a lost
+  device) so the pacer never blocks on a swapchain SDL is about to
+  recreate. SetFrameLatency fails without both features.
+
+**Why.** DXGI accepts the waitable flag only at creation and refuses a
+`ResizeBuffers` whose flags differ. vkWaitForPresentKHR waits until the
+swapchain's presented id reaches the target, so a target from an earlier
+swapchain could wait for a present that never comes. Retrying device
+creation keeps "missing extensions never fail device creation" even for a
+driver that lists an extension it cannot enable. Measured on this machine
+(RTX 3080, 165 Hz output): 120 of 120 waits ready within two refreshes at
+latency 1 and 2 on both backends; NVIDIA's Vulkan driver has present_id and
+present_wait.
+
+## ADR-052 Present statistics, and composed windows without them (2026-11-09)
+
+**Decision.**
+- D3D12: GetPresentStats returns `IDXGISwapChain::GetFrameStatistics`
+  (PresentCount, PresentRefreshCount, SyncRefreshCount) and
+  `GetLastPresentCount`; SyncQPCTime is converted into the SDL_GetTicksNS
+  domain by sampling SDL_GetPerformanceCounter (QPC) around SDL_GetTicksNS.
+  False while minimized, on a DXGI error (DISJOINT) and while PresentCount
+  is 0. `Caps::present_stats` means the backend can report statistics, not
+  that the current presentation path produces them.
+- Measured: on this machine (Windows 11 26200, RTX 3080) DXGI returns
+  S_OK with every field zero for a windowed flip-model swapchain that DWM
+  composes, with and without the waitable, for a small unfocused window
+  and a large topmost one; `IDXGIOutput::GetFrameStatistics` returns
+  DXGI_ERROR_INVALID_CALL in windowed mode. DXGI fills the statistics for
+  independent flip (a borderless fullscreen window in front), which a
+  desktop test may not take the screen and the focus for. The windowed
+  statistics test therefore skips on D3D12 with that reason when no
+  statistics arrive, and a hidden Catch2 test (`[.fullscreen]`, never
+  discovered by CTest) checks them fullscreen; docs/gates.md has the
+  command.
+- Vulkan: `VK_GOOGLE_display_timing` when the device has it: the first
+  statistics query enables `VkPresentTimesInfoGOOGLE` on the following
+  presents (ids are the window's present numbers);
+  `vkGetPastPresentationTimingGOOGLE` gives the newest displayed present;
+  refresh counts are derived from actualPresentTime and
+  `vkGetRefreshCycleDurationGOOGLE` from the first displayed present of
+  the swapchain (refresh 1), and sync equals present (the sample is the
+  vblank of that present). Times are CLOCK_MONOTONIC on Linux and taken as
+  QPC nanoseconds on Windows (unverified: NVIDIA's Windows driver does not
+  offer the extension, so the statistics tests skip on Vulkan here).
+
+**Consequence for M6b and the integration.** With the windowed D3D12 path
+reporting no statistics on this machine, a pacer that requires statistics
+for Paced mode runs Standard in a window. A composed-mode miss source that
+needs no new SDL API: at frame latency 1, WaitFrameLatency returns when DWM
+latched the previous present, so its return time placed on the vblank
+sampler's grid tells the refresh that took the present. That choice (or
+borderless fullscreen for Paced) is the owner's; docs/gates.md, "Present
+statistics in independent flip".
+
+**Why.** The spec's statistics are DXGI's; reporting zeros as statistics
+would make every present look undisplayed, and inventing them from DWM's
+desktop-wide timing would bring back red team P2.
+
+## ADR-053 GPU timestamps, device status, native handles, tearing (2026-11-09)
+
+**Decision.**
+- Timestamps: one query heap (D3D12, `D3D12_QUERY_HEAP_TYPE_TIMESTAMP`) or
+  query pool (Vulkan) of 64 slots of two queries, one readback buffer
+  (D3D12), created at the first BeginGpuTiming. Begin takes the next slot
+  that no command buffer is recording into and writes the start timestamp
+  (Vulkan: `vkCmdResetQueryPool` first, so Begin and End must be outside
+  any pass, which SDL_SE_BeginGPUTiming asserts); End writes the end
+  timestamp, and Submit writes it when End was not called, resolves both
+  (D3D12 `ResolveQueryData` before the command list closes) and binds the
+  slot to the submission's fence, taking a reference so the pooled fence
+  cannot be reused while the result waits. ReadGpuTime finds the slot by
+  fence: nullopt (false) while the fence has not signalled or when the
+  submission was not timed; a successful read converts with
+  GetTimestampFrequency (D3D12) or timestampPeriod with the queue family's
+  timestampValidBits (Vulkan) and frees the slot. A slot whose result
+  nobody reads is reused 64 timings later; a cancelled command buffer
+  frees its slot. This replaces the spec's "a query heap and a readback
+  buffer per frame in flight" with one ring that serves any number of
+  frames in flight up to 64 outstanding results; it is no contract change.
+- Device status: D3D12 `GetDeviceRemovedReason` (S_OK is kOk). Vulkan:
+  every result checked by SDL's `CHECK_VULKAN_ERROR_AND_RETURN` (one hook
+  line in the macro) and every result of the patch's own calls records
+  VK_ERROR_DEVICE_LOST, and an unsubmitted fence created on first use is
+  polled with vkGetFenceStatus, which reports a lost device.
+- Native handles: ID3D12Device, the direct ID3D12CommandQueue and the
+  window's IDXGISwapChain3; VkInstance, VkPhysicalDevice, VkDevice, SDL's
+  single queue and its family, and the window's VkSwapchainKHR (a 64-bit
+  value in SDL's struct, a pointer-sized value in present.h). Borrowed;
+  the swapchain changes whenever SDL recreates it.
+- Tearing: SDL 3.4.20 already presents IMMEDIATE with sync interval 0 and
+  `DXGI_PRESENT_ALLOW_TEARING`, and creates every swapchain with
+  `ALLOW_TEARING`, when `CheckFeatureSupport(PRESENT_ALLOW_TEARING)`
+  reports it (SDL_gpu_d3d12.c, D3D12_INTERNAL_Submit and CreateSwapchain;
+  verified in the source, unchanged by the patch); `Caps::tearing` reports
+  that support on D3D12 and the surface's IMMEDIATE support on Vulkan.
+  SetPresentMode calls SDL_SetGPUSwapchainParameters with SDR composition,
+  which recreates the swapchain (keeping the waitable, ADR-051).
+
+**Why.** A fixed ring needs no allocation per frame and no bookkeeping of
+frames in flight, which the pacer's latency changes; the fence reference
+is what makes "Read after its fence signalled" safe against SDL's fence
+pool. SDL already reports device loss from nearly every Vulkan call
+through that macro, so one line covers them.
