@@ -12,6 +12,7 @@
 #include "se_core/assert.h"
 #include "se_core/breadcrumb.h"
 #include "se_core/core_components.h"
+#include "se_core/profile.h"
 #include "se_core/profile_clock.h"
 #include "se_core/world.h"
 
@@ -128,6 +129,7 @@ void Schedule::Step(World& world, const InputFrame& input,
     crumb.SetPhase(static_cast<std::uint8_t>(p));
     if (phase == Phase::kMovement) {
       crumb.SetSystem(kPrevTransformCopyId);
+      SE_PROFILE_ZONE("PrevTransformCopy");
       const std::uint64_t start = ProfileNowNs();
       CopyPrevTransforms(world);
       stats_[kPrevTransformCopyId].Record(ProfileNowNs() - start);
@@ -135,12 +137,14 @@ void Schedule::Step(World& world, const InputFrame& input,
     while (next < entries_.size() && entries_[next].phase == phase) {
       const Entry& entry = entries_[next++];
       crumb.SetSystem(entry.id);
+      SE_PROFILE_ZONE_DYNAMIC(stats_[entry.id].name);
       const std::uint64_t start = ProfileNowNs();
       entry.run(world, context);
       stats_[entry.id].Record(ProfileNowNs() - start);
     }
     if (phase == Phase::kCleanup) {
       crumb.SetSystem(kCleanupId);
+      SE_PROFILE_ZONE("Cleanup");
       const std::uint64_t start = ProfileNowNs();
       BuiltInCleanup(world);
       stats_[kCleanupId].Record(ProfileNowNs() - start);

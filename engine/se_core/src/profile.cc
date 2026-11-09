@@ -12,9 +12,11 @@
 #include <string_view>
 
 #if SE_TRACY
+// Tracy's client headers only: tracy/Tracy.hpp defines macros (FrameMark,
+// FrameMarkNamed) that clash with the functions below.
 #include <client/TracyProfiler.hpp>
 #include <client/TracyScoped.hpp>
-#include <tracy/Tracy.hpp>
+#include <common/TracySystem.hpp>
 #endif
 
 namespace se::profile {
@@ -164,7 +166,9 @@ void Message(std::string_view text) noexcept {
 #if SE_TRACY
   if (!Started()) return;
   ApplyPendingName();
-  TracyMessage(text.data(), text.size());
+  tracy::Profiler::LogString(tracy::MessageSourceType::User,
+                             tracy::MessageSeverity::Info, 0, 0, text.size(),
+                             text.data());
 #else
   static_cast<void>(text);
 #endif

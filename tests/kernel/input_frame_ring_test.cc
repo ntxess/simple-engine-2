@@ -55,6 +55,7 @@ TEST_CASE("A reader thread never accepts a torn InputFrame slot",
           "[input_frame_ring][threads]") {
   auto ring = std::make_unique<InputFrameRing>();
   constexpr std::uint64_t kFrames = 30'000;
+  std::atomic<bool> reading{false};
   std::atomic<bool> done{false};
   std::uint64_t accepted = 0;
   std::uint64_t rejected = 0;
@@ -62,7 +63,11 @@ TEST_CASE("A reader thread never accepts a torn InputFrame slot",
   std::thread reader([&] {
     std::uint64_t probe = 0;
     InputFrame frame;
-    while (!done.load(std::memory_order_acquire)) {
+    reading.store(true, std::memory_order_release);
+    // One more pass after the writer is done, so the stable ring is read
+    // even when the writer finished before this thread got a core.
+    for (bool finished = false; !finished;) {
+      finished = done.load(std::memory_order_acquire);
       const std::uint64_t head = ring->Head();
       if (head == 0) continue;
       // The newest frame, and one further back (possibly overwritten).
@@ -85,6 +90,7 @@ TEST_CASE("A reader thread never accepts a torn InputFrame slot",
       }
     }
   });
+  while (!reading.load(std::memory_order_acquire)) std::this_thread::yield();
   for (std::uint64_t n = 0; n < kFrames; ++n) WriteAsOwner(*ring, Expected(n));
   done.store(true, std::memory_order_release);
   reader.join();

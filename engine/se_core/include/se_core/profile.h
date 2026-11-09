@@ -106,13 +106,16 @@ void SetThreadName(std::string_view name) noexcept;
 #define SE_PROFILE_MESSAGE(text) ::se::profile::Message(text)
 #define SE_PROFILE_THREAD_NAME(name) ::se::profile::SetThreadName(name)
 #else
-#define SE_PROFILE_ZONE(name) static_cast<void>(0)
-#define SE_PROFILE_ZONE_DYNAMIC(name) static_cast<void>(0)
+// The arguments are named (in an unevaluated sizeof) so that they count as
+// used, and are never evaluated.
+#define SE_PROFILE_ZONE(name) static_cast<void>(sizeof(name))
+#define SE_PROFILE_ZONE_DYNAMIC(name) static_cast<void>(sizeof(name))
 #define SE_PROFILE_FRAME() static_cast<void>(0)
-#define SE_PROFILE_FRAME_NAMED(name) static_cast<void>(0)
-#define SE_PROFILE_PLOT(name, value) static_cast<void>(0)
-#define SE_PROFILE_MESSAGE(text) static_cast<void>(0)
-#define SE_PROFILE_THREAD_NAME(name) static_cast<void>(0)
+#define SE_PROFILE_FRAME_NAMED(name) static_cast<void>(sizeof(name))
+#define SE_PROFILE_PLOT(name, value) \
+  static_cast<void>(sizeof(name) + sizeof(value))
+#define SE_PROFILE_MESSAGE(text) static_cast<void>(sizeof(text))
+#define SE_PROFILE_THREAD_NAME(name) static_cast<void>(sizeof(name))
 #endif
 
 #endif  // SE_CORE_PROFILE_H_

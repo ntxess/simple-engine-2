@@ -1,7 +1,19 @@
-# se_core: the headless kernel. std, EnTT, glaze and spdlog only. glaze is
-# public because game modules' *_components.cc include reflect_glaze.h.
+# se_core: the headless kernel. std, EnTT and glaze, plus Tracy in SE_TRACY
+# builds. glaze is public because game modules' *_components.cc include
+# reflect_glaze.h. Tracy is private: only src/profile.cc includes it, and it
+# is built so that nothing starts before profile::Start() (ADR-029).
 
 se_use_deps(glaze)
+if(SE_TRACY)
+  se_use_deps(tracy)
+  # TRACY_DELAYED_INIT has no CMake option. TRACY_DBGHELP_LOCK names the
+  # lock Tracy takes around its own DbgHelp calls (src/profile.cc).
+  target_compile_definitions(TracyClient PUBLIC TRACY_DELAYED_INIT)
+  if(WIN32)
+    target_compile_definitions(TracyClient PUBLIC
+      TRACY_DBGHELP_LOCK=SeDbgHelp)
+  endif()
+endif()
 
 se_add_module(se_core KIND STATIC
   SOURCES
@@ -37,3 +49,7 @@ se_add_module(se_core KIND STATIC
 
 target_compile_definitions(se_core PUBLIC
   $<IF:$<CONFIG:Release>,SE_ASSERTS=0,SE_ASSERTS=1>)
+if(SE_TRACY)
+  target_link_libraries(se_core PRIVATE TracyClient)
+  target_compile_definitions(se_core PUBLIC SE_TRACY=1)
+endif()

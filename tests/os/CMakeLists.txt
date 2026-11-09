@@ -17,6 +17,7 @@ se_add_module(se_os_tests KIND EXECUTABLE
     log_worker_test.cc
     os_misc_test.cc
     thread_test.cc
+    ../support/tracy_inert_listener.cc
   PRIVATE_DEPS
     se_core
     se_log

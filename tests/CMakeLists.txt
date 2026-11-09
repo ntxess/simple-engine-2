@@ -60,6 +60,7 @@ se_add_module(se_tests KIND EXECUTABLE
     kernel/input_frame_ring_test.cc
     kernel/log_test.cc
     kernel/parallel_view_test.cc
+    kernel/profile_test.cc
     kernel/replay_test.cc
     kernel/rng_test.cc
     kernel/schedule_test.cc
@@ -70,6 +71,7 @@ se_add_module(se_tests KIND EXECUTABLE
     kernel/thread_registry_test.cc
     kernel/thread_role_test.cc
     kernel/world_test.cc
+    support/tracy_inert_listener.cc
   PRIVATE_DEPS
     se_core
     se_sim

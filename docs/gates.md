@@ -25,3 +25,4 @@ block a milestone; each lists the exact command to run once the setup exists.
 | Thresholds on weak machines | M15 | 4-core laptop, 2P+8E laptop on battery | `se_bench --suite real-stack` | pending |
 | Linux GPU stacks | M15, M18 | Mesa/Wayland and NVIDIA/X11 machines | `se_bench --suite real-stack`, rampage smoke | pending |
 | 10-minute fork-site soak | M16 | the weakest supported machine | `se_bench --soak <site> --minutes 10` | pending |
+| Tracy capture with `--profile` | M4 | the Tracy profiler GUI v0.14.x and a runtime app with `--profile` (the integration step wires `profile::Start()`; tests never start Tracy) | run the app with `--profile`, connect the GUI: named threads (main, log-worker, ...), a zone per schedule system and fork site, the `tick` frame set and the plots ticks per frame, k_max, debt and dilation | pending |
