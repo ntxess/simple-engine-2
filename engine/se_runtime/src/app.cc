@@ -1,0 +1,692 @@
+// Copyright 2026 The simple-engine-2 Authors.
+
+#include "se_runtime/app.h"
+
+#include <SDL3/SDL_events.h>
+#include <SDL3/SDL_hints.h>
+#include <SDL3/SDL_init.h>
+#include <SDL3/SDL_stdinc.h>
+#include <SDL3/SDL_timer.h>
+#include <SDL3/SDL_version.h>
+
+#include <algorithm>
+#include <cstdint>
+#include <cstdio>
+#include <expected>
+#include <format>
+#include <limits>
+#include <memory>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+#include "se_core/error.h"
+#include "se_core/jobs.h"
+#include "se_core/log.h"
+#include "se_core/thread_role.h"
+#include "se_core/time.h"
+#include "se_core/world.h"
+#include "se_platform/fatal.h"
+#include "se_platform/fs.h"
+#include "se_platform/inbox.h"
+#include "se_platform/sdl_context.h"
+#include "se_platform/wake.h"
+#include "se_platform/window.h"
+#include "se_render/frame_recorder.h"
+#include "se_render/gpu_device.h"
+#include "se_runtime/app_config.h"
+#include "se_runtime/basic_input.h"
+#include "se_runtime/integration.h"
+#include "se_runtime/lifecycle.h"
+#include "se_runtime/quit.h"
+#include "se_sim/game_module.h"
+#include "se_sim/game_state.h"
+#include "se_sim/replay.h"
+#include "se_sim/session_log.h"
+#include "se_sim/sim_driver.h"
+
+namespace se {
+
+// The simulation side of the App (boot step 10). Not movable: the stack and
+// the driver keep pointers into the module instance and the pool.
+struct GameRuntime {
+  GameRuntime(const GameModule& module, const StateEnv& env)
+      : instance(module),
+        states(instance.Factory(), WithRegistry(env, instance)),
+        driver(instance.MutableSchedule(), pool),
+        input(module.actions) {}
+  GameRuntime(const GameRuntime&) = delete;
+  GameRuntime& operator=(const GameRuntime&) = delete;
+
+  static StateEnv WithRegistry(StateEnv env, const ModuleInstance& instance) {
+    env.registry = &instance.Registry();
+    return env;
+  }
+
+  ModuleInstance instance;
+  GameStateStack states;
+  // W = 0 in M5 (INTEGRATION(M4a) sizes it from the CPU topology; M14
+  // starts workers).
+  jobs::ForkJoinPool pool;
+  SimDriver driver;
+  SessionLog session;
+  ReplayRecorder recorder;
+  NullAudioSink audio;
+  BasicInputService input;
+};
+
+namespace {
+
+constexpr std::uint64_t kTitleIntervalNs = 250'000'000;
+constexpr std::uint64_t kLogIntervalNs = 2'000'000'000;
+constexpr double kNsToSec = 1e-9;
+
+// A standard-library throw, the kind the fault boundaries contain (test
+// hook; engine code never writes `throw`).
+void InjectedThrow(std::string_view site) {
+  const std::vector<int> empty;
+  SE_LOG_WARN("injecting a throw in {}", site);
+  const int never = empty.at(site.size());
+  SE_LOG_ERROR("the injected throw did not happen ({})", never);
+}
+
+std::string GpuDriverFromEnvironment() {
+  const char* value = SDL_getenv("SE_GPU_DRIVER");
+  return value != nullptr ? std::string(value) : std::string();
+}
+
+}  // namespace
+
+std::expected<std::unique_ptr<App>, Error> App::Create(const AppConfig& config,
+                                                       GameFactory factory) {
+  SE_ASSERT_MAIN_THREAD();
+  if (factory == nullptr) {
+    return Fail(ErrorCode::kInvalidArgument, "App::Create needs a GameFactory");
+  }
+  auto setup = factory(config);
+  if (!setup) return std::unexpected(std::move(setup.error()));
+  if (setup->module == nullptr) {
+    return Fail(ErrorCode::kInvalidArgument, "the GameSetup has no module");
+  }
+  std::unique_ptr<App> app(new App(config, std::move(*setup)));
+  if (auto booted = app->Boot(); !booted) {
+    // ~App undoes the steps that ran, in the shutdown order.
+    return std::unexpected(std::move(booted.error()));
+  }
+  return app;
+}
+
+App::App(const AppConfig& config, GameSetup setup)
+    : config_(config),
+      setup_(std::move(setup)),
+      lifecycle_(setup_.lifecycle),
+      clock_(config.fixed_frame_dt_ms * 1e-3),
+      stepper_(setup_.tick_rate) {}
+
+App::~App() {
+  AssertMainThread();
+  Teardown();
+}
+
+std::expected<void, Error> App::BootStep(int step) const {
+  if (kRuntimeTestHooks && config_.fail_init_step == step) {
+    return Fail(
+        ErrorCode::kInvalidArgument,
+        std::format("injected failure at boot step {} ({})", step,
+                    InitStepNames()[static_cast<std::size_t>(step - 1)]));
+  }
+  return {};
+}
+
+std::expected<void, Error> App::Boot() {
+  // 1. The crash handler, before logging and SDL.
+  if (auto ok = BootStep(1); !ok) {
+    return ok;
+  }
+  auto crash = integration::StartCrashCapture(config_);
+  if (!crash) return std::unexpected(std::move(crash.error()));
+  crash_.emplace(*crash);
+
+  // 2. The log sinks, before any other engine thread exists.
+  if (auto ok = BootStep(2); !ok) {
+    return ok;
+  }
+  auto logging = integration::StartLogging(config_);
+  if (!logging) return std::unexpected(std::move(logging.error()));
+  logging_.emplace(std::move(*logging));
+
+  // 3. SDL.
+  if (auto ok = BootStep(3); !ok) {
+    return ok;
+  }
+  SdlInitConfig sdl_config;
+  sdl_config.app_name = setup_.title;
+  if (config_.headless) sdl_config.video_driver = "dummy";
+  auto sdl = SdlContext::Init(sdl_config);
+  if (!sdl) return std::unexpected(std::move(sdl.error()));
+  sdl_.emplace(std::move(*sdl));
+  SE_LOG_INFO("SDL {} video driver '{}'", SDL_GetRevision(),
+              sdl_->VideoDriver());
+
+  // 4. The event filter and the wake event.
+  if (auto ok = BootStep(4); !ok) {
+    return ok;
+  }
+  auto filter = EventFilter::Install(inbox_);
+  if (!filter) return std::unexpected(std::move(filter.error()));
+  filter_.emplace(std::move(*filter));
+  auto wake = WakeEventScope::Register();
+  if (!wake) return std::unexpected(std::move(wake.error()));
+  wake_.emplace(std::move(*wake));
+
+  // 5. The content root and the pref path.
+  if (auto ok = BootStep(5); !ok) {
+    return ok;
+  }
+  if (auto paths = ResolvePaths(); !paths) {
+    return paths;
+  }
+
+  // 6. The window and its subclass.
+  if (auto ok = BootStep(6); !ok) {
+    return ok;
+  }
+  if (!config_.headless) {
+    WindowConfig window_config;
+    window_config.title = setup_.title;
+    window_config.width = setup_.window_width;
+    window_config.height = setup_.window_height;
+    window_config.activate_when_shown = config_.activate_when_shown;
+    auto window = Window::Create(window_config);
+    if (!window) return std::unexpected(std::move(window.error()));
+    window_ = std::move(*window);
+    window_->SetListener(this);
+    refresh_hz_ = window_->Refresh().hz;
+  }
+
+  // 7. The GPU device, claiming the window with VSYNC.
+  if (auto ok = BootStep(7); !ok) {
+    return ok;
+  }
+  if (!config_.headless) {
+    GpuDeviceConfig gpu_config;
+    gpu_config.driver =
+        ResolveGpuDriver(config_.gpu_driver, GpuDriverFromEnvironment());
+    auto device = GpuDevice::Create(gpu_config);
+    if (!device) return std::unexpected(std::move(device.error()));
+    gpu_ = std::make_unique<GpuDevice>(std::move(*device));
+    if (auto claimed = gpu_->ClaimWindow(window_->Native()); !claimed) {
+      return claimed;
+    }
+    SE_LOG_INFO("GPU device '{}' (debug mode {}), display {:.3f} Hz",
+                gpu_->Driver(), gpu_->DebugMode(), refresh_hz_);
+  }
+
+  // 8. The CPU topology.
+  if (auto ok = BootStep(8); !ok) {
+    return ok;
+  }
+  auto cpu = integration::ReadCpuTopology();
+  if (!cpu) return std::unexpected(std::move(cpu.error()));
+  cpu_ = *cpu;
+
+  // 9. The helper threads.
+  if (auto ok = BootStep(9); !ok) {
+    return ok;
+  }
+  integration::WatchdogInputs inputs;
+  inputs.iterate_counter = &iterate_counter_;
+  inputs.modal = window_ ? &window_->ModalFlag() : &modal_flag_;
+  inputs.suspended = &suspended_flag_;
+  inputs.heartbeat = &heartbeat_flag_;
+  auto helpers = integration::StartHelperThreads(config_, inputs);
+  if (!helpers) return std::unexpected(std::move(helpers.error()));
+  helpers_.emplace(std::move(*helpers));
+
+  // 10. The game: registry, storages, states.
+  if (auto ok = BootStep(10); !ok) {
+    return ok;
+  }
+  if (auto game = StartGame(); !game) {
+    return game;
+  }
+
+  quit_.SetRecoveryHook(setup_.recovery);
+  quit_.SetDeadlineHook([] { integration::StartShutdownDeadline(); });
+  for (QuitProvider* provider : setup_.quit_providers) {
+    quit_.AddProvider(provider);
+  }
+  const bool focused = window_ == nullptr || window_->Focused();
+  const bool visible = window_ == nullptr || window_->Visible();
+  lifecycle_.BootComplete(SDL_GetTicksNS(), focused, visible);
+  booted_ = true;
+  SE_LOG_INFO("booted '{}': {} logical cores, {} Hz ticks, content {}",
+              setup_.title, cpu_.logical_cores, setup_.tick_rate,
+              paths_.content_root);
+  if (setup_.on_boot) setup_.on_boot(*this);
+  return {};
+}
+
+std::expected<void, Error> App::ResolvePaths() {
+  auto base = fs::BasePath();
+  if (!base) return std::unexpected(std::move(base.error()));
+  paths_.base = *base;
+  if (!config_.content_root.empty()) {
+    if (!fs::Exists(config_.content_root)) {
+      return std::unexpected(Error{ErrorCode::kNotFound,
+                                   "--content-root does not exist",
+                                   config_.content_root, 0, 0});
+    }
+    paths_.content_root = fs::Normalize(config_.content_root);
+  } else if (!setup_.content_marker.empty()) {
+    auto root = fs::FindRootContaining(paths_.base, setup_.content_marker);
+    if (!root) return std::unexpected(std::move(root.error()));
+    paths_.content_root = *root;
+  } else {
+    paths_.content_root = fs::Normalize(paths_.base);
+  }
+  if (!config_.pref_dir.empty()) {
+    if (auto made = fs::CreateDirectories(config_.pref_dir); !made) {
+      return made;
+    }
+    paths_.pref = fs::Normalize(config_.pref_dir) + "/";
+  } else {
+    auto pref = fs::PrefPath(setup_.org, setup_.app);
+    if (!pref) return std::unexpected(std::move(pref.error()));
+    paths_.pref = *pref;
+  }
+  return {};
+}
+
+std::expected<void, Error> App::StartGame() {
+  StateEnv env;
+  env.seed = setup_.seed;
+  env.tick_rate = setup_.tick_rate;
+  game_ = std::make_unique<GameRuntime>(*setup_.module, env);
+  for (const std::string& key : game_->input.UnknownKeys()) {
+    SE_LOG_WARN("binding to unknown key '{}' ignored", key);
+  }
+  if (setup_.configure) {
+    if (auto configured = setup_.configure(paths_); !configured) {
+      return configured;
+    }
+  }
+  const std::string_view start = setup_.module->start_state;
+  if (start.empty()) {
+    return Fail(ErrorCode::kInvalidArgument,
+                std::string(setup_.module->name) + " has no start state");
+  }
+  const InlineOwnerScope owner(OnMainThread());
+  game_->states.Request(StackOp::kPush, start);
+  game_->states.ApplyPending();
+  if (game_->states.Depth() != 1 || game_->states.RejectedCount() != 0) {
+    return Fail(ErrorCode::kInvalidArgument,
+                std::format("the start state '{}' could not be pushed", start));
+  }
+  return {};
+}
+
+Tick App::NextTick() const noexcept {
+  return game_ ? game_->driver.NextTick() : 0;
+}
+
+void App::RequestQuit() {
+  SE_ASSERT_MAIN_THREAD();
+  quit_.Request(QuitReason::kRequested);
+  SyncQuitState();
+}
+
+void App::SyncQuitState() {
+  if (quit_.Pending() && !quit_pending_seen_) {
+    quit_pending_seen_ = true;
+    lifecycle_.OnQuitPending();
+    SE_LOG_INFO("quit pending ({})", QuitReasonName(quit_.Reason()));
+  } else if (!quit_.Pending() && quit_pending_seen_ && !quit_.ReadyToExit()) {
+    quit_pending_seen_ = false;
+    lifecycle_.OnQuitCancelled();
+    SE_LOG_INFO("quit cancelled by {}", quit_.Blocker());
+  }
+}
+
+void App::ApplyCallbackRate() {
+  const CallbackRate rate = lifecycle_.Rate();
+  if (rate == applied_rate_) return;
+  applied_rate_ = rate;
+  const std::string hint(CallbackRateHint(rate));
+  SDL_SetHint(SDL_HINT_MAIN_CALLBACK_RATE, hint.c_str());
+}
+
+void App::TakeInbox() {
+  for (const SDL_Event& event : inbox_.TryTake()) {
+    ++inbox_events_;
+    HandleEvent(event);
+  }
+}
+
+SDL_AppResult App::HandleEvent(const SDL_Event& event) {
+  SE_ASSERT_MAIN_THREAD();
+  ++events_;
+  if (kRuntimeTestHooks && config_.throw_site == ThrowSite::kEvent &&
+      static_cast<std::int64_t>(events_) == config_.throw_on_call) {
+    InjectedThrow("SDL_AppEvent");
+  }
+  lifecycle_.OnAnyEvent();
+  if (ConsumeWakeEvent(event)) return SDL_APP_CONTINUE;
+  const std::uint64_t now = SDL_GetTicksNS();
+  const bool ours = window_ != nullptr &&
+                    event.type >= SDL_EVENT_WINDOW_FIRST &&
+                    event.type <= SDL_EVENT_WINDOW_LAST &&
+                    event.window.windowID == window_->Id();
+  switch (event.type) {
+    case SDL_EVENT_QUIT:
+      quit_.Request(QuitReason::kQuitEvent);
+      break;
+    case SDL_EVENT_TERMINATING:
+      SE_LOG_WARN("SDL_EVENT_TERMINATING: running the recovery hook");
+      quit_.RequestImmediate(QuitReason::kTerminating);
+      std::fflush(stderr);
+      break;
+    case SDL_EVENT_LOW_MEMORY:
+      ++low_memory_events_;
+      SE_LOG_WARN("SDL_EVENT_LOW_MEMORY");
+      break;
+    case SDL_EVENT_WILL_ENTER_BACKGROUND:
+    case SDL_EVENT_DID_ENTER_BACKGROUND:
+    case SDL_EVENT_WILL_ENTER_FOREGROUND:
+    case SDL_EVENT_DID_ENTER_FOREGROUND:
+      SE_LOG_INFO("background/foreground event {:#x}", event.type);
+      break;
+    case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
+      if (ours) quit_.Request(QuitReason::kWindowClose);
+      break;
+    case SDL_EVENT_WINDOW_SHOWN:
+      if (ours) lifecycle_.OnWindow(WindowSignal::kShown, now);
+      break;
+    case SDL_EVENT_WINDOW_HIDDEN:
+      if (ours) lifecycle_.OnWindow(WindowSignal::kHidden, now);
+      break;
+    case SDL_EVENT_WINDOW_EXPOSED:
+      if (ours) lifecycle_.OnWindow(WindowSignal::kExposed, now);
+      break;
+    case SDL_EVENT_WINDOW_OCCLUDED:
+      if (ours) lifecycle_.OnWindow(WindowSignal::kOccluded, now);
+      break;
+    case SDL_EVENT_WINDOW_MINIMIZED:
+      if (ours) lifecycle_.OnWindow(WindowSignal::kMinimized, now);
+      break;
+    case SDL_EVENT_WINDOW_MAXIMIZED:
+      if (ours) lifecycle_.OnWindow(WindowSignal::kMaximized, now);
+      break;
+    case SDL_EVENT_WINDOW_RESTORED:
+      if (ours) lifecycle_.OnWindow(WindowSignal::kRestored, now);
+      break;
+    case SDL_EVENT_WINDOW_FOCUS_GAINED:
+      if (ours) lifecycle_.OnWindow(WindowSignal::kFocusGained, now);
+      break;
+    case SDL_EVENT_WINDOW_FOCUS_LOST:
+      if (ours) lifecycle_.OnWindow(WindowSignal::kFocusLost, now);
+      break;
+    case SDL_EVENT_WINDOW_DISPLAY_CHANGED:
+    case SDL_EVENT_DISPLAY_CURRENT_MODE_CHANGED:
+      if (window_ != nullptr) refresh_hz_ = window_->Refresh().hz;
+      break;
+    case SDL_EVENT_KEY_DOWN:
+    case SDL_EVENT_KEY_UP:
+      if (game_) {
+        game_->input.OnKey(static_cast<std::uint32_t>(event.key.scancode),
+                           event.key.down, event.key.repeat);
+      }
+      lifecycle_.OnInputActivity(now);
+      break;
+    case SDL_EVENT_MOUSE_MOTION:
+    case SDL_EVENT_MOUSE_BUTTON_DOWN:
+    case SDL_EVENT_MOUSE_BUTTON_UP:
+    case SDL_EVENT_MOUSE_WHEEL:
+    case SDL_EVENT_TEXT_INPUT:
+    case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
+    case SDL_EVENT_GAMEPAD_BUTTON_UP:
+    case SDL_EVENT_GAMEPAD_AXIS_MOTION:
+      lifecycle_.OnInputActivity(now);
+      break;
+    default:
+      break;
+  }
+  SyncQuitState();
+  return SDL_APP_CONTINUE;
+}
+
+bool App::RenderClear(bool& presented, double& render_sec) {
+  presented = false;
+  if (gpu_ == nullptr) return false;
+  const std::uint64_t start = SDL_GetTicksNS();
+  if (kRuntimeTestHooks && config_.null_acquire_count > 0) {
+    const auto frame = static_cast<std::int64_t>(iterates_);
+    if (frame >= config_.null_acquire_from &&
+        frame < config_.null_acquire_from + config_.null_acquire_count) {
+      gpu_->ForceNullAcquires(1);
+    }
+  }
+  bool recorded = false;
+  {
+    auto frame = FrameRecorder::Prepare(*gpu_);
+    if (!frame) {
+      if (render_failures_ == 0) {
+        SE_LOG_ERROR("frame not recorded: {}", frame.error().message);
+      }
+      ++render_failures_;
+    } else {
+      recorded = true;
+      if (frame->AcquireSwapchain() != nullptr) {
+        frame->Clear(setup_.clear_color);
+        presented = true;
+      } else {
+        lifecycle_.OnNullAcquire();
+      }
+    }
+    // ~FrameRecorder submits here.
+  }
+  render_sec = static_cast<double>(SDL_GetTicksNS() - start) * kNsToSec;
+  return recorded;
+}
+
+SDL_AppResult App::Iterate() {
+  SE_ASSERT_MAIN_THREAD();
+  const std::uint64_t iterate_start = SDL_GetTicksNS();
+  iterate_counter_.fetch_add(1, std::memory_order_relaxed);
+  ++iterates_;
+  if (iterates_ == 1 && helpers_) helpers_->ArmWatchdog();
+  if (kRuntimeTestHooks && config_.throw_site == ThrowSite::kIterate &&
+      static_cast<std::int64_t>(iterates_) == config_.throw_on_call) {
+    InjectedThrow("SDL_AppIterate");
+  }
+
+  // Events diverted off main by the filter, then the two-phase quit.
+  TakeInbox();
+  quit_.Poll();
+  SyncQuitState();
+  if (quit_.ReadyToExit()) {
+    lifecycle_.OnShutdownStarted();
+    SE_LOG_INFO("quit ({}): exiting after {} iterates",
+                QuitReasonName(quit_.Reason()), iterates_);
+    return SDL_APP_SUCCESS;
+  }
+
+  const std::uint64_t now = SDL_GetTicksNS();
+  if (window_ != nullptr) lifecycle_.SetModal(window_->Modal());
+  lifecycle_.Update(now);
+  ApplyCallbackRate();
+  if (lifecycle_.TakeClearHeldInput()) game_->input.ClearHeld();
+  if (lifecycle_.TakeFrameClockReset()) {
+    clock_.Reset();
+    stepper_.ResetAccumulator();
+  }
+  suspended_flag_.store(lifecycle_.Suspended(), std::memory_order_release);
+  modal_flag_.store(lifecycle_.Modal(), std::memory_order_release);
+  heartbeat_flag_.store(true, std::memory_order_release);
+
+  FrameReport report;
+  report.iterate = iterates_;
+  report.now_ns = now;
+  double render_sec = 0.0;
+  // While Suspended (10 Hz), probe: a window that is visible again and
+  // acquires a texture leaves Suspended.
+  if (lifecycle_.WindowSuspended() && !lifecycle_.PowerSuspended() &&
+      window_ != nullptr && window_->Visible()) {
+    report.rendered = RenderClear(report.presented, render_sec);
+    lifecycle_.OnSuspendProbe(true, report.presented);
+    if (lifecycle_.TakeFrameClockReset()) {
+      clock_.Reset();
+      stepper_.ResetAccumulator();
+    }
+  }
+
+  const FrameClock frame_clock =
+      clock_.Next(now, refresh_hz_, lifecycle_.Modal());
+  report.gameplay_ran = lifecycle_.GameplayRuns() && game_->states.SimRunning();
+  report.plan =
+      stepper_.Plan(frame_clock, costs_.Current(), report.gameplay_ran,
+                    /*debugger=*/false, /*editor_play=*/false);
+  report.first_tick = game_->driver.NextTick();
+  const std::uint64_t ticks_start = SDL_GetTicksNS();
+  game_->driver.TickInline(game_->states, report.plan, game_->input,
+                           game_->session, game_->recorder, game_->audio);
+  const double ticks_sec =
+      static_cast<double>(SDL_GetTicksNS() - ticks_start) * kNsToSec;
+  ticks_run_ += static_cast<std::uint64_t>(report.plan.steps);
+  for (int i = 0; i < report.plan.steps; ++i) {
+    costs_.AddTick(ticks_sec / report.plan.steps);
+  }
+  report.next_tick = game_->driver.NextTick();
+
+  if (!report.rendered && lifecycle_.ShouldRender()) {
+    report.rendered = RenderClear(report.presented, render_sec);
+  }
+  if (report.presented) ++presented_frames_;
+  stepper_.OnPresentResult(/*missed=*/false, lifecycle_.Modal());
+
+  // The non-tick CPU cost, without the swapchain wait and submit (M6's
+  // pacer and M7's renderer measure those separately).
+  const double busy_sec =
+      static_cast<double>(SDL_GetTicksNS() - iterate_start) * kNsToSec;
+  const double non_tick_sec = std::max(0.0, busy_sec - ticks_sec - render_sec);
+  costs_.AddFrame(frame_clock.real_delta, non_tick_sec,
+                  std::numeric_limits<double>::quiet_NaN());
+
+  report.state = lifecycle_.State();
+  report.rate = lifecycle_.Rate();
+  report.modal = lifecycle_.Modal();
+  report.suspended = lifecycle_.Suspended();
+  UpdateTitle(now);
+  LogProgress(now);
+
+  // --frames N: presented frames (iterates when headless).
+  const std::uint64_t counted = gpu_ != nullptr ? presented_frames_ : iterates_;
+  if (config_.frames > 0 &&
+      counted >= static_cast<std::uint64_t>(config_.frames)) {
+    quit_.Request(QuitReason::kFrames);
+    SyncQuitState();
+  }
+  if (setup_.on_frame) setup_.on_frame(*this, report);
+  return SDL_APP_CONTINUE;
+}
+
+void App::UpdateTitle(std::uint64_t now_ns) {
+  if (window_ == nullptr || now_ns - last_title_ns_ < kTitleIntervalNs) return;
+  last_title_ns_ = now_ns;
+  window_->SetTitle(std::format("{} | tick {} | {}", setup_.title,
+                                game_->driver.NextTick() - 1,
+                                LifecycleStateName(lifecycle_.State())));
+}
+
+void App::LogProgress(std::uint64_t now_ns) {
+  if (last_log_ns_ == 0) last_log_ns_ = now_ns;
+  if (now_ns - last_log_ns_ < kLogIntervalNs) return;
+  last_log_ns_ = now_ns;
+  SE_LOG_INFO("tick {} | {} | {} iterates, {} presented, {} NULL acquires",
+              game_->driver.NextTick() - 1,
+              LifecycleStateName(lifecycle_.State()), iterates_,
+              presented_frames_, lifecycle_.NullAcquires());
+}
+
+void App::Shutdown(SDL_AppResult result) {
+  SE_ASSERT_MAIN_THREAD();
+  if (setup_.on_shutdown) setup_.on_shutdown(*this, result);
+  SE_LOG_INFO(
+      "shutdown ({}): {} iterates, {} presented frames, ran {} ticks "
+      "(next tick {}), {} NULL acquires, {} inbox events",
+      result == SDL_APP_FAILURE ? "failure" : "success", iterates_,
+      presented_frames_, ticks_run_, NextTick(), lifecycle_.NullAcquires(),
+      inbox_events_);
+  Teardown();
+}
+
+void App::Teardown() {
+  if (torn_down_) return;
+  torn_down_ = true;
+  lifecycle_.OnShutdownStarted();
+  // Step 3: normally started when the quit drain ended.
+  if (booted_ && !quit_.DeadlineStarted()) {
+    integration::StartShutdownDeadline();
+  }
+  // Step 4: no more diverted events; the GPU finishes its work.
+  if (filter_) filter_->Remove();
+  if (gpu_) gpu_->WaitForIdle();
+  // Steps 5-6: every World, on main.
+  if (game_) {
+    {
+      const InlineOwnerScope owner(OnMainThread());
+      game_->states.Clear();
+    }
+    game_.reset();
+  }
+  // Step 12: release the window from the device, destroy the device.
+  gpu_.reset();
+  // Step 14: remove the subclass, destroy the window.
+  if (window_) window_->SetListener(nullptr);
+  window_.reset();
+  wake_.reset();
+  filter_.reset();
+  SDL_ResetHint(SDL_HINT_MAIN_CALLBACK_RATE);
+  // Step 15: SDL_QuitSubSystem(GAMEPAD | VIDEO).
+  sdl_.reset();
+  // Steps 16-17: the log worker, then the watchdog (the last thread).
+  if (helpers_) helpers_->Stop();
+  helpers_.reset();
+  logging_.reset();
+  crash_.reset();
+  lifecycle_.OnExited();
+}
+
+SDL_AppResult App::OnCallbackFault(std::string_view where,
+                                   std::string_view what) noexcept {
+  integration::RequestFaultDump(where);
+  ShowFaultMessage(setup_.title, where, what,
+                   window_ != nullptr ? window_->Native() : nullptr);
+  lifecycle_.OnShutdownStarted();
+  return SDL_APP_FAILURE;
+}
+
+void App::OnSessionEnd(SessionEnd kind) noexcept {
+  // Synchronous: the recovery hook runs before the window procedure
+  // returns to Windows.
+  quit_.RequestImmediate(QuitReason::kSessionEnd);
+  std::fflush(stderr);
+  static_cast<void>(kind);
+}
+
+void App::OnPower(PowerChange change) noexcept {
+  if (change == PowerChange::kSuspend) {
+    lifecycle_.OnPowerSuspend();
+  } else {
+    lifecycle_.OnPowerResume();
+  }
+  suspended_flag_.store(lifecycle_.Suspended(), std::memory_order_release);
+}
+
+void App::OnModalChanged(bool modal) noexcept {
+  lifecycle_.SetModal(modal);
+  modal_flag_.store(modal, std::memory_order_release);
+}
+
+}  // namespace se

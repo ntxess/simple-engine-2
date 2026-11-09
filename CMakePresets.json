@@ -129,7 +129,6 @@
       "cacheVariables": {
         "CMAKE_C_COMPILER": "clang-20",
         "CMAKE_CXX_COMPILER": "clang++-20",
-        "SE_BUILD_PLATFORM": "OFF",
         "SE_CRASH": "OFF",
         "SE_THREAD_SAFETY_ERRORS": "ON"
       }
@@ -229,7 +228,7 @@
       "configurePreset": "msvc-debug",
       "filter": {
         "exclude": {
-          "label": "slow|lint|bench"
+          "label": "slow|lint|bench|desktop"
         }
       }
     },
@@ -239,7 +238,7 @@
       "configurePreset": "msvc-dev",
       "filter": {
         "exclude": {
-          "label": "bench"
+          "label": "bench|desktop"
         }
       }
     },
@@ -249,7 +248,7 @@
       "configurePreset": "msvc-release",
       "filter": {
         "exclude": {
-          "label": "lint"
+          "label": "lint|desktop"
         }
       }
     },
@@ -259,7 +258,7 @@
       "configurePreset": "msvc-asan",
       "filter": {
         "exclude": {
-          "label": "lint|bench"
+          "label": "lint|bench|desktop"
         }
       }
     },
@@ -269,7 +268,7 @@
       "configurePreset": "clangcl-dev",
       "filter": {
         "exclude": {
-          "label": "bench"
+          "label": "bench|desktop"
         }
       }
     },

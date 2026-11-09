@@ -26,3 +26,8 @@ se_add_module(game_rampage KIND STATIC
   BANNED_INCLUDES
     ${SE_BAN_PLATFORM_INCLUDES}
   DETERMINISTIC)
+
+# The executable on se_runtime (M5).
+if(SE_BUILD_PLATFORM)
+  add_subdirectory(app)
+endif()

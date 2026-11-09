@@ -2,8 +2,9 @@
 //
 // The rampage GameModule: components, systems and the "sandbox" gameplay
 // state, which loads a scene (se-scene-v1) or a legacy scenario into one
-// World. The rampage executable arrives in M13; until then the module runs
-// through se_replay and the tests.
+// World. The rampage executable (games/rampage/app, M5) runs it on
+// se_runtime; se_replay and the tests run it headless. M13 adds the game's
+// other states.
 
 #ifndef GAME_RAMPAGE_MODULE_H_
 #define GAME_RAMPAGE_MODULE_H_
@@ -63,8 +64,8 @@ struct SceneRequest {
 };
 
 // Sets the scene of the next sandbox state. Call it on the owner thread
-// before the state is pushed (se_replay, tests; the runtime from its
-// configuration in M13).
+// before the state is pushed (se_replay, tests; the rampage executable in
+// its GameSetup::configure).
 void SetSandboxScene(SceneRequest request);
 [[nodiscard]] const SceneRequest& SandboxScene() noexcept;
 

@@ -33,6 +33,10 @@ behaviour reference until every rule and editor operation is ported.
 | se_render_core | engine/se_render_core | Headless renderer half: SpriteRenderer, Camera2D, BuildRenderList; depends on se_core only (M3) |
 | se_crash | engine/se_crash | Out-of-process crash capture on crashpad: Start/CrashGuard, RegisterStream, DumpWithoutCrash, the terminate annotation; nothing uploaded; a stub on Linux and in msvc-asan (M4, ADR-033, ADR-034) |
 | game_rampage | games/rampage | The legacy Sandbox's gameplay on the kernel: components, systems, scenes and prefabs (assets/), legacy scenarios, projections (M3) |
+| se_platform | engine/se_platform | SDL3 on the main thread: SDL's initialisation, the event filter and Inbox, WakeMain, the window and its Win32 subclass (Modal, session end, power), se::fs on SDL's filesystem API (M5) |
+| se_render | engine/se_render | The SDL_GPU device (D3D12 on Windows, Vulkan on Linux) and the frame transaction, clear-only until M7 (M5) |
+| se_runtime | engine/se_runtime | The App on SDL's main callbacks: boot steps, the frame, the lifecycle and two-phase quit state machines, BasicInputService, the noexcept callbacks (`SE_DEFINE_SDL_APP`) and the M4 integration hooks (M5) |
+| rampage | games/rampage/app | The rampage executable: the sandbox scene at 120 Hz in a window, clear-only until M7 (M5) |
 | se_replay | tools/se_replay | Headless runs of a game module: per-tick hashes, replays, projections |
 | refcmp | tools/refcmp/refcmp.py | Compares two `.seproj` projections within the M3 tolerances (Python 3, stdlib only) |
 | read_dump | tools/minidump/read_dump.py | Decodes a crash dump: threads, exception, annotations and the first-party streams (breadcrumbs, log rings, InputFrame ring); the crash tests' oracle (Python 3, stdlib only) |
@@ -81,6 +85,15 @@ out\build\msvc-release\bin\se_bench --suite rampage_tick_5k --json rampage_tick_
 The `bench.*` tests run only in the msvc-release preset, against
 bench/thresholds.json; run them on an otherwise idle machine.
 
+The rampage executable runs the sandbox scene in a window (clear-only
+until M7; the title shows the tick and the lifecycle state). `--frames N`
+quits after N presented frames; the runtime's options are listed in
+engine/se_runtime/include/se_runtime/app_config.h:
+
+```bat
+out\build\msvc-dev\bin\rampage --frames 600
+```
+
 Crash dumps (Windows; the crashpad handler writes them into the database's
 reports/ directory) decode with:
 
@@ -91,5 +104,8 @@ python tools\minidump\read_dump.py DUMP --json
 
 `scripts/ci.ps1` runs the commit gate (msvc-dev, msvc-asan, clangcl-dev,
 including the `lint` and `checks` test labels); `scripts/ci.ps1 -Milestone`
-adds Debug, Release and the WSL Linux sanitizer presets. The legacy tree
+adds Debug, Release, the WSL Linux sanitizer presets and the desktop
+tests. `scripts/ci.ps1 -Desktop` runs only the desktop tests (label
+`desktop`: real windows on this machine's desktop, opened without taking
+focus) on msvc-dev and msvc-asan. The legacy tree
 builds with the `legacy-msvc-debug` and `legacy-msvc-release` presets.

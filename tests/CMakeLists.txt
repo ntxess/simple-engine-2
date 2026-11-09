@@ -177,6 +177,9 @@ add_subdirectory(os)
 add_subdirectory(rampage)
 add_subdirectory(render)
 add_subdirectory(crash)
+if(SE_BUILD_PLATFORM)
+  add_subdirectory(platform)
+endif()
 
 # tools/se_replay links the kernel test module from tests/support, so it is
 # built with the tests.
