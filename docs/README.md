@@ -31,9 +31,12 @@ behaviour reference until every rule and editor operation is ported.
 | se_log | engine/se_log | The log worker: drains the per-thread log rings into the spdlog file, stderr and panel sinks; the only module that includes spdlog (M4, ADR-032) |
 | se_sim | engine/se_sim | Game modules, GameStateStack, SessionLog, replays, SimDriver (M2) |
 | se_render_core | engine/se_render_core | Headless renderer half: SpriteRenderer, Camera2D, BuildRenderList; depends on se_core only (M3) |
+| se_crash | engine/se_crash | Out-of-process crash capture on crashpad: Start/CrashGuard, RegisterStream, DumpWithoutCrash, the terminate annotation; nothing uploaded; a stub on Linux and in msvc-asan (M4, ADR-033, ADR-034) |
 | game_rampage | games/rampage | The legacy Sandbox's gameplay on the kernel: components, systems, scenes and prefabs (assets/), legacy scenarios, projections (M3) |
 | se_replay | tools/se_replay | Headless runs of a game module: per-tick hashes, replays, projections |
 | refcmp | tools/refcmp/refcmp.py | Compares two `.seproj` projections within the M3 tolerances (Python 3, stdlib only) |
+| read_dump | tools/minidump/read_dump.py | Decodes a crash dump: threads, exception, annotations and the first-party streams (breadcrumbs, log rings, InputFrame ring); the crash tests' oracle (Python 3, stdlib only) |
+| se_crash_probe | tests/crash | Registers dump streams with known contents, then crashes or requests dumps; the `crash.*` tests (label crash) check its dumps with read_dump |
 | se_bench | bench/se_bench | Benchmark suites and their Release gates (`bench.*`) |
 | legacy tree | core/, app/ | The SFML reference (`SE_BUILD_LEGACY`, legacy presets) |
 
@@ -77,6 +80,14 @@ out\build\msvc-release\bin\se_bench --suite rampage_tick_5k --json rampage_tick_
 
 The `bench.*` tests run only in the msvc-release preset, against
 bench/thresholds.json; run them on an otherwise idle machine.
+
+Crash dumps (Windows; the crashpad handler writes them into the database's
+reports/ directory) decode with:
+
+```bat
+python tools\minidump\read_dump.py out\build\msvc-dev\crash_out\abort\db\reports\<id>.dmp
+python tools\minidump\read_dump.py DUMP --json
+```
 
 `scripts/ci.ps1` runs the commit gate (msvc-dev, msvc-asan, clangcl-dev,
 including the `lint` and `checks` test labels); `scripts/ci.ps1 -Milestone`

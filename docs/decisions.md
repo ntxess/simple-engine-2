@@ -547,3 +547,83 @@ otherwise. Details the spec leaves open:
 rings double as the crash tail; the watermark keeps the file's order
 meaningful without making producers wait for the worker, and the mark is
 the same mechanism Stop needs to drain without losing records.
+
+## ADR-033 se_crash drives crashpad's client API directly; nothing is uploaded (2026-11-08)
+
+**Decision.** se_crash (M4b) uses crashpad's client API from the pinned
+sentry-native archive (CrashpadClient, CrashpadInfo, CrashReportDatabase,
+crashpad annotations), not sentry_init: the sentry library is never linked
+(se_crash FORBIDs it; only `crashpad::client` is), and the build copies
+`crashpad_handler` next to each executable that starts crash capture
+(`se_crash_copy_handler`). The contract the M4 integration and later
+milestones build on:
+- `Start(CrashConfig)` launches the handler synchronously with no URL, no
+  metrics directory and no extra arguments, after turning uploads off in
+  the database settings. Failures are Errors: kInvalidArgument (empty path,
+  already started), kNotFound (no handler executable), kIo (database or
+  launch), kUnsupported (stub builds). crashpad's process-wide state allows
+  one launch per process; if the launch fails, the exception filter and the
+  SIGABRT handler that StartHandler installed first are put back.
+- Fatal faults reach the handler from Start to process exit: crashpad
+  cannot uninstall its exception filter. Destroying the CrashGuard ends
+  DumpWithoutCrash (kUnsupported afterwards) and restores the previous
+  terminate handler.
+- The terminate handler records why std::terminate ran in the annotation
+  object `se.terminate` ("std::terminate with exception: <what>" or
+  "std::terminate without an active exception"; for a throw through
+  noexcept MSVC keeps the exception active, clang-cl does not), then calls
+  the previous handler or std::abort, which crashpad's SIGABRT handler
+  turns into a dump (exception code STATUS_FATAL_APP_EXIT). It rethrows
+  the active exception to read its message, so
+  engine/se_crash/src/terminate_handler.cc is a `// se-fault-boundary`
+  file, one more boundary than ADR-006 lists.
+- `DumpWithoutCrash(reason)` sets the annotation object `se.dump_reason`,
+  asks the handler for a dump and returns when crashpad's dump-completed
+  event fires (crashpad waits without a timeout). Requests are serialised
+  by a mutex held across the dump, which the watchdog and main's fault
+  path can both take: an exception to "no lock shared between main and a
+  helper", accepted because crashpad itself admits one dump at a time and
+  the handler suspends every thread of the process while it writes one.
+- `RegisterStream(type, data, size)` wraps
+  CrashpadInfo::AddUserDataMinidumpStream under a mutex (crashpad does not
+  lock its list) and rejects types outside 0x53450001-0x5345FFFF, empty
+  regions and duplicates (the minidump writer would drop a second stream
+  of a type). Types: 0x53450001 breadcrumbs, 0x53450002 InputFrame ring,
+  0x53450003 SessionLog tail, 0x53450004 flight recorder, and
+  0x53450100 + slot for the log ring of ThreadRegistry slot `slot`, with
+  slot 64 for the shared library ring. tools/minidump/read_dump.py knows
+  these values and decodes each stream by its own header.
+- `CrashConfig::annotations` become crashpad's process annotations.
+
+**Why.** Registered streams need AddUserDataMinidumpStream, which
+sentry_init does not expose, and the engine wants no upload path at all
+rather than a configured-off one. The mutex in DumpWithoutCrash keeps the
+reason annotation of concurrent requests apart at no cost the dump itself
+does not already impose.
+
+## ADR-034 Crash capture runs on Windows only for now, and not under ASan (2026-11-08)
+
+**Decision.** se_crash has two backends with one API: crashpad (Windows,
+`SE_CRASH=ON`) and a stub (Start and DumpWithoutCrash return kUnsupported,
+RegisterStream validates and keeps nothing). The stub is built on Linux
+and in msvc-asan:
+- Linux: crashpad's Linux build calls `find_package(CURL REQUIRED)` for its
+  HTTP transport (external/crashpad/util/CMakeLists.txt) even with
+  SENTRY_TRANSPORT=none, and the WSL machine has libcurl's runtime but not
+  its development files. Installing packages is the owner's step, so the
+  Linux presets keep `SE_CRASH=OFF`, the crash tests are not registered
+  there (crash.stub runs instead) and docs/gates.md, "Linux crash capture",
+  names the package and the remaining work.
+- msvc-asan keeps `SE_CRASH=OFF`, as since M0. Measured with crashpad
+  built under /fsanitize=address: ASan's own exception handler takes
+  access violations and stack overflows before crashpad's filter, prints
+  its report and exits 1 without a dump, so those two crash tests cannot
+  pass there; abort, std::terminate and DumpWithoutCrash dumps work but
+  take 7-10 s each (docs/gates.md, "Crash capture under ASan"). The crash
+  tests run in msvc-dev and clangcl-dev; msvc-asan runs crash.stub, and
+  M5's init-failure tests under ASan see crash capture fail as it may in
+  the field.
+
+**Why.** The stub keeps every caller free of build switches, and a crash
+test that cannot run is better absent than skipped silently: the gates.md
+entries say exactly what would enable each.
