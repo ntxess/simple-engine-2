@@ -357,6 +357,10 @@ TEST_CASE("Wakes from another thread reach SDL only while the app runs",
   };
   setup.on_frame = [&](App& /*app*/, const FrameReport& report) {
     if (report.iterate == 20) {
+      // The waker must have run while the app runs: under load 20 headless
+      // iterates can finish before it is scheduled again.
+      const std::uint64_t calls_now = calls.load();
+      while (calls.load() < calls_now + 1000) std::this_thread::yield();
       pushed_while_running = WakeEventsPushed() - pushed_at_boot;
     }
   };

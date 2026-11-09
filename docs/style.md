@@ -73,6 +73,16 @@ check_includes.py enforce these, each with a planted fixture
 (`checks.planted.*`) of one file per form, every one of which must be
 caught.
 
+## GPU resources (M7)
+
+Outside se_render, code keeps a `Handle<Texture>` and resolves it every
+frame through GpuResources; no class, struct or union stores an
+`SDL_GPUTexture*` (a pointer member or a container of them), tests and
+tools included (tools/checks/check_gpu_members.py,
+`checks.gpu_texture_members`, with a planted fixture). Every SDL_GPU call
+runs on main, and se_render's wrappers assert it. stb is a third-party
+header: included with angle brackets, exempt from lint.
+
 ## Tools
 
 | Tool | Config | Run |

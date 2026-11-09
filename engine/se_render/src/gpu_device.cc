@@ -15,6 +15,7 @@
 #include "se_core/error.h"
 #include "se_core/log.h"
 #include "se_core/thread_role.h"
+#include "src/gpu_assert.h"
 
 namespace se {
 namespace {
@@ -45,7 +46,7 @@ std::string ResolveGpuDriver(std::string_view command_line,
 
 std::expected<GpuDevice, Error> GpuDevice::Create(
     const GpuDeviceConfig& config) {
-  SE_ASSERT_MAIN_THREAD();
+  SE_ASSERT_GPU_THREAD();
   const std::string driver =
       config.driver.empty() ? std::string(DefaultGpuDriver()) : config.driver;
   constexpr SDL_GPUShaderFormat kFormats =
@@ -100,14 +101,14 @@ GpuDevice::~GpuDevice() { Release(); }
 
 void GpuDevice::Release() noexcept {
   if (device_ == nullptr) return;
-  SE_ASSERT_MAIN_THREAD();
+  SE_ASSERT_GPU_THREAD();
   ReleaseWindow();
   SDL_DestroyGPUDevice(device_);
   device_ = nullptr;
 }
 
 std::expected<void, Error> GpuDevice::ClaimWindow(SDL_Window* window) {
-  SE_ASSERT_MAIN_THREAD();
+  SE_ASSERT_GPU_THREAD();
   SE_ASSERT_MSG(window_ == nullptr, "the GPU device already claims a window");
   if (!SDL_ClaimWindowForGPUDevice(device_, window)) {
     return std::unexpected(GpuError("SDL_ClaimWindowForGPUDevice"));
@@ -125,14 +126,14 @@ std::expected<void, Error> GpuDevice::ClaimWindow(SDL_Window* window) {
 
 void GpuDevice::ReleaseWindow() noexcept {
   if (window_ == nullptr || device_ == nullptr) return;
-  SE_ASSERT_MAIN_THREAD();
+  SE_ASSERT_GPU_THREAD();
   SDL_ReleaseWindowFromGPUDevice(device_, window_);
   window_ = nullptr;
 }
 
 void GpuDevice::WaitForIdle() noexcept {
   if (device_ == nullptr) return;
-  SE_ASSERT_MAIN_THREAD();
+  SE_ASSERT_GPU_THREAD();
   SDL_WaitForGPUIdle(device_);
 }
 

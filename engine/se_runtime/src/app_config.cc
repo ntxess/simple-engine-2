@@ -17,6 +17,7 @@
 
 #include "se_core/error.h"
 #include "se_core/log.h"
+#include "se_render/frame_faults.h"
 #include "se_runtime/pacer_policy.h"
 
 namespace se {
@@ -173,6 +174,48 @@ std::expected<std::int64_t, Error> ParseAfterTicks(std::string_view option,
   }
   return Bad(
       std::format("{}: bad value '{}' (expected after-ticks:N)", option, text));
+}
+
+// NAME@FRAME[=FILE].
+std::expected<TextureReloadHook, Error> ParseReload(std::string_view text) {
+  const std::size_t at = text.find('@');
+  if (at == std::string_view::npos || at == 0) {
+    return Bad(
+        std::format("--reload-texture: bad value '{}' (expected "
+                    "NAME@FRAME[=FILE])",
+                    text));
+  }
+  TextureReloadHook hook;
+  hook.name = std::string(text.substr(0, at));
+  std::string_view rest = text.substr(at + 1);
+  const std::size_t eq = rest.find('=');
+  if (eq != std::string_view::npos) {
+    hook.file = std::string(rest.substr(eq + 1));
+    rest = rest.substr(0, eq);
+    if (hook.file.empty()) {
+      return Bad(std::format("--reload-texture: empty FILE in '{}'", text));
+    }
+  }
+  const auto frame = ParseNumber<std::int64_t>(rest);
+  if (!frame || *frame < 1) {
+    return Bad(std::format("--reload-texture: bad FRAME in '{}'", text));
+  }
+  hook.frame = *frame;
+  return hook;
+}
+
+// FRAME:FILE (FILE may hold a drive letter's colon).
+std::expected<ReadbackHook, Error> ParseReadback(std::string_view text) {
+  const std::size_t colon = text.find(':');
+  if (colon == std::string_view::npos || colon + 1 >= text.size()) {
+    return Bad(
+        std::format("--readback: bad value '{}' (expected FRAME:FILE)", text));
+  }
+  const auto frame = ParseNumber<std::int64_t>(text.substr(0, colon));
+  if (!frame || *frame < 1) {
+    return Bad(std::format("--readback: bad FRAME in '{}'", text));
+  }
+  return ReadbackHook{*frame, std::string(text.substr(colon + 1))};
 }
 
 std::expected<void, Error> NeedTestHooks(std::string_view option) {
@@ -333,6 +376,33 @@ std::expected<AppConfig, Error> ParseAppConfig(
       } else {
         config.dump_test_after_ticks = *ticks;
       }
+    } else if (option == "--inject-frame-fault") {
+      if (auto ok = NeedTestHooks(option); !ok) {
+        return std::unexpected(ok.error());
+      }
+      auto value = reader.Value(option);
+      if (!value) return std::unexpected(value.error());
+      auto fault = ParseFrameFault(*value);
+      if (!fault) return std::unexpected(fault.error());
+      config.frame_fault = *fault;
+    } else if (option == "--reload-texture") {
+      if (auto ok = NeedTestHooks(option); !ok) {
+        return std::unexpected(ok.error());
+      }
+      auto value = reader.Value(option);
+      if (!value) return std::unexpected(value.error());
+      auto reload = ParseReload(*value);
+      if (!reload) return std::unexpected(reload.error());
+      config.texture_reloads.push_back(std::move(*reload));
+    } else if (option == "--readback") {
+      if (auto ok = NeedTestHooks(option); !ok) {
+        return std::unexpected(ok.error());
+      }
+      auto value = reader.Value(option);
+      if (!value) return std::unexpected(value.error());
+      auto readback = ParseReadback(*value);
+      if (!readback) return std::unexpected(readback.error());
+      config.readbacks.push_back(std::move(*readback));
     } else {
       return Bad(std::format("unknown option '{}'", option));
     }

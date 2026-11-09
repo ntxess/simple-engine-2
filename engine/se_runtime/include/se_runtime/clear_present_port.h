@@ -16,8 +16,8 @@
 // wait, so WaitFrameFence polls with a zero timeout and otherwise blocks
 // in SDL_WaitForGPUFences (a GPU wait, which main may do).
 //
-// RepresentLast records another clear frame: the clear is the whole
-// composite in M5.
+// RepresentLast is Renderer2D::RepresentLast, the blit of the last
+// composite (M7, merged before the integration's adapter).
 //
 // Main thread only; destroy it before the device (it releases its fences).
 
@@ -33,8 +33,8 @@
 
 #include "se_core/thread_role.h"
 #include "se_core/thread_safety.h"
-#include "se_render/frame_recorder.h"
 #include "se_render/gpu_device.h"
+#include "se_render/renderer_2d.h"
 #include "se_runtime/present_port.h"
 
 namespace se {
@@ -44,7 +44,8 @@ class ClearOnlyPresentPort final : public PresentPort {
   // Fences kept: enough for frame latency 2 and one more.
   static constexpr std::size_t kFences = 3;
 
-  ClearOnlyPresentPort(GpuDevice& device, const ClearColor& color)
+  // |renderer| outlives the port.
+  ClearOnlyPresentPort(GpuDevice& device, Renderer2D& renderer)
       SE_REQUIRES(g_main);
   ~ClearOnlyPresentPort() override;
 
@@ -74,7 +75,7 @@ class ClearOnlyPresentPort final : public PresentPort {
   void Keep(SDL_GPUFence* fence) noexcept;
 
   GpuDevice* device_ = nullptr;
-  ClearColor color_;
+  Renderer2D* renderer_ = nullptr;
   SwapchainMode mode_ = SwapchainMode::kVsync;
   // The newest fence is fences_[(head_ + size_ - 1) % kFences].
   std::array<SDL_GPUFence*, kFences> fences_{};

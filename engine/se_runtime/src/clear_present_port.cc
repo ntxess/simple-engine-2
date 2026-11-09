@@ -12,8 +12,8 @@
 #include "se_core/assert.h"
 #include "se_core/log.h"
 #include "se_core/thread_role.h"
-#include "se_render/frame_recorder.h"
 #include "se_render/gpu_device.h"
+#include "se_render/renderer_2d.h"
 #include "se_runtime/present_port.h"
 
 namespace se {
@@ -34,8 +34,8 @@ SDL_GPUPresentMode ToSdl(SwapchainMode mode) noexcept {
 }  // namespace
 
 ClearOnlyPresentPort::ClearOnlyPresentPort(GpuDevice& device,
-                                           const ClearColor& color)
-    : device_(&device), color_(color) {
+                                           Renderer2D& renderer)
+    : device_(&device), renderer_(&renderer) {
   AssertMainThread();
   SE_ASSERT_MSG(device.ClaimedWindow() != nullptr,
                 "the present port needs a claimed window");
@@ -154,16 +154,7 @@ PresentWait ClearOnlyPresentPort::WaitFrameFence(int frames_back,
 
 bool ClearOnlyPresentPort::RepresentLast() {
   AssertMainThread();
-  bool presented = false;
-  {
-    auto frame = FrameRecorder::Prepare(*device_);
-    if (!frame) return false;
-    if (frame->AcquireSwapchain() != nullptr) {
-      frame->Clear(color_);
-      presented = true;
-    }
-    // ~FrameRecorder submits here.
-  }
+  const bool presented = renderer_->RepresentLast().presented;
   if (presented) ++represents_;
   return presented;
 }

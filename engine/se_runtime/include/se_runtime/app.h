@@ -14,7 +14,10 @@
 //    4 event-filter    the event filter and Inbox; the wake event
 //    5 content-paths   the content root
 //    6 window          the window and its Win32 subclass
-//    7 gpu-device      the SDL_GPU device, claiming the window with VSYNC
+//    7 gpu-device      the SDL_GPU device, claiming the window with VSYNC;
+//                      Renderer2D and the textures of the game's texture
+//                      table (decoded with stb_image, uploaded before the
+//                      first frame)
 //    8 cpu-topology    the CPU topology and the pool sizes it gives
 //    9 helper-threads  the vblank sampler (Windows, a window), then the
 //                      watchdog (boot budget until the first iterate)
@@ -31,10 +34,13 @@
 // input, frame-clock reset), FramePacer::BeginFrame (the N-L fence, present
 // statistics, the FrameClock), plan the frame's ticks with the FixedStepper,
 // tick the running Worlds through SimDriver::TickInline with
-// BasicInputService's frames, record the clear-only frame, and
-// FramePacer::EndFrame (Paced, Standard or VRR; M6b). The pacer presents
-// through ClearOnlyPresentPort until the integration's adapter over
-// se::present and M7's FrameRecorder.
+// BasicInputService's frames, then render: the GameStateStack's render
+// sources (every state's Worlds, the top one at the plan's alpha) through
+// GameSetup::camera, drawn by Renderer2D into the composite and blitted to
+// the swapchain (M7); then FramePacer::EndFrame (Paced, Standard or VRR;
+// M6b). Iterates that do not render still pump the texture uploads. A
+// fault in the render build phase is a fault of the game build: it takes
+// the callbacks' fault path (a dump, the message box, the quit path).
 //
 // Shutdown follows the design's order for the parts that exist: the
 // watchdog's deadline starts when the quit drain ends; remove the event
@@ -49,6 +55,8 @@
 // Test builds add the M4 exit hooks: --crash-test after-ticks:N faults on
 // main right after tick N; --dump-test after-ticks:N has the watchdog write
 // a dump after tick N, holds the ticks until it is written, then quits.
+// M7 adds --inject-frame-fault, --reload-texture and --readback
+// (app_config.h).
 
 #ifndef SE_RUNTIME_APP_H_
 #define SE_RUNTIME_APP_H_
@@ -77,6 +85,9 @@
 #include "se_platform/window.h"
 #include "se_render/frame_recorder.h"
 #include "se_render/gpu_device.h"
+#include "se_render/renderer_2d.h"
+#include "se_render/texture_table.h"
+#include "se_render_core/render_components.h"
 #include "se_runtime/app_config.h"
 #include "se_runtime/clear_present_port.h"
 #include "se_runtime/frame_pacer.h"
@@ -112,6 +123,8 @@ struct FrameReport {
   bool gameplay_ran = false;
   bool rendered = false;
   bool presented = false;
+  // Renderer2D's numbers for this frame (when rendered).
+  Renderer2DStats render;
   bool modal = false;
   bool suspended = false;
   // The pacer's FrameClock and what it did this frame (M6b).
@@ -135,6 +148,12 @@ struct GameSetup {
   int window_width = 1280;
   int window_height = 720;
   LifecycleConfig lifecycle;
+  // The texture table (config/texture.json, ADR-026) relative to the
+  // content root; empty: no textures (every sprite draws magenta).
+  std::string texture_table;
+  // The camera a World is drawn with; empty: its primary Camera2D, else a
+  // default one.
+  std::function<Camera2D(const World& world)> camera;
   // Boot step 10, before the start state is pushed: point the game at its
   // content (a scene, settings).
   std::function<std::expected<void, Error>(const ContentPaths& paths)>
@@ -192,6 +211,14 @@ class App final : public WindowListener {
   [[nodiscard]] QuitController& Quit() noexcept { return quit_; }
   [[nodiscard]] Window* GetWindow() const noexcept { return window_.get(); }
   [[nodiscard]] GpuDevice* Gpu() const noexcept { return gpu_.get(); }
+  [[nodiscard]] Renderer2D* Renderer() const noexcept {
+    return renderer_.get();
+  }
+  // The texture table's entries, with paths joined to the content root.
+  [[nodiscard]] const std::vector<TextureTableEntry>& Textures()
+      const noexcept {
+    return textures_;
+  }
   [[nodiscard]] const FixedStepper& Stepper() const noexcept {
     return stepper_;
   }
@@ -234,9 +261,16 @@ class App final : public WindowListener {
   void TakeInbox() SE_REQUIRES(g_main);
   void SyncQuitState();
   void ApplyCallbackRate();
-  // Records and submits the clear-only frame; false when nothing could be
-  // recorded. |presented| tells whether a swapchain texture was acquired.
-  bool RenderClear(bool& presented, double& render_sec) SE_REQUIRES(g_main);
+  std::expected<void, Error> StartRenderer() SE_REQUIRES(g_main);
+  // Renders the frame of |report|'s plan and fills its rendered, presented
+  // and render fields; |wait_sec| is the time spent in the swapchain wait.
+  // An Error is a fault of the render build phase.
+  std::expected<void, Error> RenderFrame(FrameReport& report, double& wait_sec)
+      SE_REQUIRES(g_main);
+  [[nodiscard]] Camera2D CameraFor(const World& world) const;
+  // The M7 test hooks due at this iterate.
+  void RunTextureReloads() SE_REQUIRES(g_main);
+  void RunReadbacks(const FrameReport& report) SE_REQUIRES(g_main);
   void UpdateTitle(std::uint64_t now_ns) SE_REQUIRES(g_main);
   // Re-reads the window's monitor and display mode after a display change
   // or a move (always with |force|); a new monitor goes to the vblank
@@ -266,6 +300,10 @@ class App final : public WindowListener {
   std::unique_ptr<Window> window_;
   std::unique_ptr<GpuDevice> gpu_;
   std::unique_ptr<ClearOnlyPresentPort> present_;
+  std::unique_ptr<Renderer2D> renderer_;
+  std::vector<TextureTableEntry> textures_;
+  std::vector<RenderLayer> layers_;
+  std::vector<bool> readbacks_done_;
   integration::CpuInfo cpu_;
   std::optional<integration::HelperThreads> helpers_;
   std::unique_ptr<GameRuntime> game_;
@@ -309,7 +347,7 @@ class App final : public WindowListener {
   std::uint64_t inbox_events_ = 0;
   std::uint64_t low_memory_events_ = 0;
   std::uint64_t presented_frames_ = 0;
-  std::uint64_t render_failures_ = 0;
+  std::uint64_t frames_skipped_ = 0;
   std::uint64_t ticks_run_ = 0;
   std::uint64_t last_title_ns_ = 0;
   std::uint64_t last_log_ns_ = 0;

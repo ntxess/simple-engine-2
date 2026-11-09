@@ -51,6 +51,7 @@
 #include "se_platform/window.h"
 #include "se_render/frame_recorder.h"
 #include "se_render/gpu_device.h"
+#include "se_render/renderer_2d.h"
 #include "se_runtime/app.h"
 #include "se_runtime/frame_pacer.h"
 #include "se_runtime/pacer_policy.h"
@@ -354,20 +355,22 @@ TEST_CASE("display_rates", "[desktop][display]") {
   REQUIRE(created);
   auto device = std::make_unique<GpuDevice>(std::move(*created));
   REQUIRE(device->ClaimWindow(rig.window->Native()));
+  auto renderer = Renderer2D::Create(*device);
+  REQUIRE(renderer);
   constexpr int kWarmup = 30;
   constexpr int kFrames = 240;
   std::uint64_t start = 0;
+  FrameRequest request;
+  request.clear = ClearColor{0.2F, 0.2F, 0.3F, 1.0F};
   for (int i = 0; i < kWarmup + kFrames; ++i) {
     if (i == kWarmup) start = SDL_GetTicksNS();
     SDL_PumpEvents();
-    auto frame = FrameRecorder::Prepare(*device);
-    REQUIRE(frame);
-    if (frame->AcquireSwapchain() != nullptr) {
-      frame->Clear(ClearColor{0.2F, 0.2F, 0.3F, 1.0F});
-    }
+    REQUIRE((*renderer)->Frame(request).submitted);
   }
   const double present_hz =
       kFrames / (static_cast<double>(SDL_GetTicksNS() - start) * 1e-9);
+  (*renderer)->Shutdown();
+  renderer->reset();
   device->WaitForIdle();
   device.reset();
   const VblankReading reading = WaitForMonitor(*rig.sampler, monitor, 2000);

@@ -1,9 +1,11 @@
 // Copyright 2026 The simple-engine-2 Authors.
 //
-// The rampage executable (docs/milestone-specs.md M5): the sandbox scene
-// through game_rampage's GameModule at 120 Hz on SDL's main callbacks,
-// with the clear-only frame (M7 draws the sprites). The window title shows
-// the tick and the lifecycle state.
+// The rampage executable (docs/milestone-specs.md M5, M7): the sandbox
+// scene through game_rampage's GameModule at 120 Hz on SDL's main
+// callbacks, drawn by Renderer2D: the Sandbox's RenderList (the World at
+// the frame's alpha, through SandboxCamera) with the textures of
+// config/texture.json. The window title shows the tick and the lifecycle
+// state.
 //
 //   rampage [runtime options] [-- --scene FILE]
 //
@@ -19,7 +21,9 @@
 #include <utility>
 
 #include "game_rampage/module.h"
+#include "game_rampage/view.h"
 #include "se_core/error.h"
+#include "se_core/world.h"
 #include "se_platform/fs.h"
 #include "se_runtime/app.h"
 #include "se_runtime/app_config.h"
@@ -51,9 +55,15 @@ std::expected<se::GameSetup, se::Error> MakeRampage(
   setup.content_marker = kDefaultScene;
   setup.seed = 1;
   setup.tick_rate = 120;
-  setup.clear_color = se::ClearColor{0.10F, 0.12F, 0.20F, 1.0F};
+  // Opaque black, as the legacy Engine clears its window, so the window
+  // matches the legacy image of the same tick.
+  setup.clear_color = se::ClearColor{0.0F, 0.0F, 0.0F, 1.0F};
   setup.window_width = 1280;
   setup.window_height = 720;
+  setup.texture_table = "config/texture.json";
+  setup.camera = [](const se::World& world) {
+    return se::rampage::SandboxCamera(world);
+  };
   setup.configure =
       [scene](const se::ContentPaths& paths) -> std::expected<void, se::Error> {
     se::rampage::SceneRequest request;

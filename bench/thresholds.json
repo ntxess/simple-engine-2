@@ -20,6 +20,23 @@
         "note": "Ranges over 5 runs of 1000 warm iterations (7556 of 10000 sprites visible, 32 batches) while other builds shared the machine; the p99 and max outliers are that load."
       }
     },
+    "render_frame_10k": {
+      "n": 10000,
+      "iterations": 1000,
+      "warmup": 50,
+      "p95_ms": 1.0,
+      "source": "M7 exit gate: RenderList plus sprite vertices of 10k visible sprites, CPU side, p95 <= 1 ms in Release (docs/milestone-specs.md M7, Bench)",
+      "measured": {
+        "date": "2026-11-09",
+        "build": "msvc-release, MSVC 19.51",
+        "runs": 6,
+        "median_ms": [0.445, 0.452],
+        "p95_ms": [0.477, 0.513],
+        "p99_ms": [0.580, 0.639],
+        "max_ms": [0.647, 0.761],
+        "note": "Idle machine (CPU load 5% before and after): the ctest run of bench.render_frame_10k in scripts/ci.ps1 -Presets msvc-release plus 5 runs of se_bench --suite render_frame_10k; renderlist_10k in the same minutes: median 0.375-0.402 ms, p95 0.418-0.453 ms. 10000 of 10000 sprites visible, 0 culled. Earlier the same day under other agents' parallel builds (CPU at 100%): median 0.699-0.777 ms, p95 0.868-2.054 ms."
+      }
+    },
     "rampage_tick_5k": {
       "n": 5000,
       "iterations": 1000,

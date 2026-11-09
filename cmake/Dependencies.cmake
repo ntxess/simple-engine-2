@@ -90,6 +90,11 @@ _se_declare(lz4
 _se_declare(imgui
   https://github.com/ocornut/imgui/archive/refs/tags/v1.93.0-docking.tar.gz
   746c265540bd3aa109570f29492ef4d8f5b421dd9fd0049c35ca35f21496f1a5)
+# stb (M7): stb_image.h for PNG decoding in se_render, stb_image_write.h for
+# the readback hook, tests and tools. Header-only; se::stb below.
+_se_declare(stb
+  https://github.com/nothings/stb/archive/4e9b368bfc071e97206ea5c6adba68dd0cbf8897.tar.gz
+  e60706ab084e0cae35ee7282deb4a7f283e4a28be1896d097437205da01a0683)
 
 # SDL3 carries the engine's presentation patch (M6) when SE_SDL_PATCH is on
 # and the patch file exists.
@@ -186,9 +191,22 @@ option(SE_SDL_WINDOW_SYSTEMS
   OFF)
 macro(_se_options_imgui)
 endmacro()
+macro(_se_options_stb)
+endmacro()
+# stb has no CMake project: se::stb is an INTERFACE target over its headers
+# (SYSTEM, so its warnings stay out of engine builds). Exactly one
+# translation unit of se_render defines each implementation macro.
+macro(_se_after_stb)
+  if(NOT TARGET se_stb)
+    add_library(se_stb INTERFACE)
+    add_library(se::stb ALIAS se_stb)
+    target_include_directories(se_stb SYSTEM INTERFACE "${stb_SOURCE_DIR}")
+  endif()
+endmacro()
 
 # se_use_deps(<name>...): configure and make the named dependencies
-# available. Names: catch2 spdlog glaze tracy sentry miniaudio lz4 imgui sdl3.
+# available. Names: catch2 spdlog glaze tracy sentry miniaudio lz4 imgui sdl3
+# stb.
 macro(se_use_deps)
   foreach(_se_dep ${ARGN})
     get_property(_se_done GLOBAL PROPERTY SE_DEP_${_se_dep}_DONE)
@@ -196,6 +214,9 @@ macro(se_use_deps)
       _se_fetch_archive(${_se_dep})
       cmake_language(CALL _se_options_${_se_dep})
       FetchContent_MakeAvailable(${_se_dep})
+      if(COMMAND _se_after_${_se_dep})
+        cmake_language(CALL _se_after_${_se_dep})
+      endif()
       set_property(GLOBAL PROPERTY SE_DEP_${_se_dep}_DONE TRUE)
     endif()
   endforeach()

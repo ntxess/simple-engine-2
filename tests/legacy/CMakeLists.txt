@@ -72,3 +72,33 @@ add_test(NAME legacy.selfdet.live_replay
 set_tests_properties(legacy.selfdet.live_replay PROPERTIES
   LABELS "legacy;desktop"
   RUN_SERIAL TRUE)
+
+# The legacy image comparison (docs/milestone-specs.md M7): legacy_replay
+# --image-out against the engine's render_shot, which the legacy presets do
+# not build; registered when an engine build of this checkout has it (the
+# engine presets register the same test, render.legacy_image.*, when they
+# find a legacy build). Labels gpu and legacy.
+set(_legacy_render_shot "")
+foreach(_tree msvc-dev msvc-debug msvc-release)
+  set(_candidate
+      "${CMAKE_SOURCE_DIR}/out/build/${_tree}/bin/render_shot${CMAKE_EXECUTABLE_SUFFIX}")
+  if(EXISTS "${_candidate}")
+    set(_legacy_render_shot "${_candidate}")
+    break()
+  endif()
+endforeach()
+if(_legacy_render_shot)
+  add_test(NAME legacy.image_compare.stress
+    COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_SOURCE_DIR}/tools/render_shot/legacy_image_test.py"
+            --legacy-replay "$<TARGET_FILE:legacy_replay>"
+            --render-shot "${_legacy_render_shot}"
+            --driver direct3d12 --scenario stress --tick 600
+            --work "${_legacy_work}/image_compare"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+  set_tests_properties(legacy.image_compare.stress PROPERTIES
+    LABELS "gpu;legacy" SKIP_RETURN_CODE 77)
+else()
+  message(STATUS "legacy: no engine render_shot found; "
+                 "legacy.image_compare.stress is not registered")
+endif()
