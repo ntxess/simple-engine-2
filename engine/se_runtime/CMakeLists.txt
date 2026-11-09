@@ -13,6 +13,7 @@ se_add_module(se_runtime KIND STATIC
     src/frame_clock.cc
     src/integration.cc
     src/lifecycle.cc
+    src/pacer_policy.cc
     src/quit.cc
     src/sdl_app.cc
   PUBLIC_DEPS
