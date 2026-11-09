@@ -24,15 +24,16 @@ namespace {
 
 using SortItem = RenderListScratch::SortItem;
 
-constexpr float kDegreesToRadians = static_cast<float>(dm::kPi / 180.0);
+constexpr float kHalfTurn = static_cast<float>(dm::kPi);
+constexpr float kTurn = static_cast<float>(2.0 * dm::kPi);
 
-// The shorter signed arc from |from| to |to| in degrees, in [-180, 180): a
+// The shorter signed arc from |from| to |to| in radians, in [-pi, pi): a
 // half turn goes the negative way. Most ticks turn by less than half a
 // turn, which skips the floor.
 float ShortestArc(float from, float to) noexcept {
   const float d = to - from;
-  if (d >= -180.0F && d < 180.0F) return d;
-  return d - 360.0F * std::floor((d + 180.0F) / 360.0F);
+  if (d >= -kHalfTurn && d < kHalfTurn) return d;
+  return d - kTurn * std::floor((d + kHalfTurn) / kTurn);
 }
 
 // A 32-bit key that orders floats as their values do: negative values have
@@ -175,9 +176,9 @@ void BuildRenderList(const World& world, const Camera2D& camera, float alpha,
     const float v_top = region.y;
     const float v_bottom = region.y + region.h;
 
-    // Rotate (clockwise on screen for positive degrees, y down) and move to
+    // Rotate (clockwise on screen for positive angles, y down) and move to
     // the canvas: corner (x, y) -> (cx + x c - y s, cy + x s + y c).
-    const dm::SinCosPair<float> sc = dm::SinCos(rot * kDegreesToRadians);
+    const dm::SinCosPair<float> sc = dm::SinCos(rot);
     const float cx = (pos.x - camera.center.x) * zoom + half_w;
     const float cy = (pos.y - camera.center.y) * zoom + half_h;
     const float x0c = x0 * sc.cos;

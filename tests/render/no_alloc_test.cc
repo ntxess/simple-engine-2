@@ -64,8 +64,8 @@ std::vector<entt::entity> Populate(World& world, std::uint32_t count)
     sprite.z = draws.Unit();
     const Vec2 pos{-240.0F + 2400.0F * draws.Unit(),
                    -135.0F + 1350.0F * draws.Unit()};
-    entities.push_back(
-        testing::AddSprite(world, i + 1, pos, sprite, 360.0F * draws.Unit()));
+    entities.push_back(testing::AddSprite(
+        world, i + 1, pos, sprite, testing::Degrees(360.0F) * draws.Unit()));
   }
   return entities;
 }
@@ -77,7 +77,7 @@ void Move(World& world, const std::vector<entt::entity>& entities, float step)
   for (const entt::entity e : entities) {
     Transform& t = testing::MutableTransform(world, e);
     t.pos.x += step;
-    t.rot += 3.0F;
+    t.rot += testing::Degrees(3.0F);
   }
 }
 

@@ -12,6 +12,7 @@
 
 #include "se_core/component_registry.h"
 #include "se_core/core_components.h"
+#include "se_core/detmath.h"
 #include "se_core/guid.h"
 #include "se_core/thread_role.h"
 #include "se_core/thread_safety.h"
@@ -20,6 +21,11 @@
 #include "se_render_core/render_components.h"
 
 namespace se::testing {
+
+// |degrees| as radians, the unit of Transform::rot (ADR-023).
+[[nodiscard]] constexpr float Degrees(float degrees) noexcept {
+  return degrees * static_cast<float>(dm::kPi / 180.0);
+}
 
 // RegisterCoreComponents and RegisterRenderComponents, sealed.
 [[nodiscard]] const ComponentRegistry& RenderRegistry();
@@ -33,7 +39,7 @@ namespace se::testing {
                                             float h);
 
 // Creates an entity with Guid {0, id}, a Transform at |pos| (rotation in
-// degrees) and |sprite|, and finalizes the spawn (PrevTransform = Transform,
+// radians) and |sprite|, and finalizes the spawn (PrevTransform = Transform,
 // teleport_tick = spawn tick).
 entt::entity AddSprite(World& world, std::uint64_t id, Vec2 pos,
                        const SpriteRenderer& sprite, float rot = 0.0F)

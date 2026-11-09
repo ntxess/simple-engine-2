@@ -5,7 +5,7 @@
 // simulation, so changing a sprite does not change the world hash.
 //
 // Units: positions and sizes are world pixels, y grows downwards, and
-// Transform::rot is in degrees, clockwise on screen (ADR-022).
+// Transform::rot is in radians, clockwise on screen (ADR-023).
 
 #ifndef SE_RENDER_CORE_RENDER_COMPONENTS_H_
 #define SE_RENDER_CORE_RENDER_COMPONENTS_H_

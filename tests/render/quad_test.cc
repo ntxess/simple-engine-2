@@ -78,14 +78,16 @@ TEST_CASE("Scale and rotation pivot about the origin", "[render][quad]") {
   }
   SECTION("90 degrees is clockwise on screen (y down)") {
     // Local corner (x, y) goes to (-y, x).
-    const SpriteQuad quad = BuildOne(OffCentre(), 90.0F, {1.0F, 1.0F});
+    const SpriteQuad quad =
+        BuildOne(OffCentre(), testing::Degrees(90.0F), {1.0F, 1.0F});
     CheckPos(quad, 0, 11.0F, 18.0F);  // (-2, -1) -> (1, -2)
     CheckPos(quad, 1, 11.0F, 26.0F);  // (6, -1) -> (1, 6)
     CheckPos(quad, 2, 7.0F, 26.0F);   // (6, 3) -> (-3, 6)
     CheckPos(quad, 3, 7.0F, 18.0F);   // (-2, 3) -> (-3, -2)
   }
   SECTION("180 degrees") {
-    const SpriteQuad quad = BuildOne(OffCentre(), 180.0F, {1.0F, 1.0F});
+    const SpriteQuad quad =
+        BuildOne(OffCentre(), testing::Degrees(180.0F), {1.0F, 1.0F});
     CheckPos(quad, 0, 12.0F, 21.0F);
     CheckPos(quad, 2, 4.0F, 17.0F);
   }
@@ -133,7 +135,8 @@ TEST_CASE("Flips mirror the sprite about its origin", "[render][quad]") {
   }
   SECTION("flips rotate with the sprite") {
     sprite.flip_x = true;
-    const SpriteQuad quad = BuildOne(sprite, 90.0F, {1.0F, 1.0F});
+    const SpriteQuad quad =
+        BuildOne(sprite, testing::Degrees(90.0F), {1.0F, 1.0F});
     // Flipped local corners (-6, -1) and (2, 3), turned 90 degrees.
     CheckPos(quad, 0, 11.0F, 14.0F);
     CheckPos(quad, 2, 7.0F, 22.0F);

@@ -83,6 +83,7 @@ TEST_CASE("Rotation takes the shorter arc across +-180 degrees",
   const testing::MainThreadScope main_thread;
   const InlineOwnerScope owner(OnMainThread());
 
+  // In degrees; Transform::rot holds radians.
   struct Case {
     float from;
     float to;
@@ -104,15 +105,15 @@ TEST_CASE("Rotation takes the shorter arc across +-180 degrees",
     INFO("from " << c.from << " to " << c.to << " at " << c.alpha);
     World world(testing::RenderRegistry(), {});
     const SpriteRenderer sprite = testing::CenteredSprite(1, 40.0F, 10.0F);
-    const entt::entity e =
-        testing::AddSprite(world, 1, {500.0F, 500.0F}, sprite, c.from);
+    const entt::entity e = testing::AddSprite(world, 1, {500.0F, 500.0F},
+                                              sprite, testing::Degrees(c.from));
     testing::StepTick(world);
-    testing::MutableTransform(world, e).rot = c.to;
+    testing::MutableTransform(world, e).rot = testing::Degrees(c.to);
     const SpriteQuad moving = Build(world, c.alpha);
 
     World reference(testing::RenderRegistry(), {});
-    static_cast<void>(
-        testing::AddSprite(reference, 1, {500.0F, 500.0F}, sprite, c.expected));
+    static_cast<void>(testing::AddSprite(reference, 1, {500.0F, 500.0F}, sprite,
+                                         testing::Degrees(c.expected)));
     CheckQuadsMatch(moving, Build(reference, 1.0F));
   }
 }

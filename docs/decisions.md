@@ -234,7 +234,8 @@ open, so game modules, the GPU backend (M7) and the editor (M10) agree:
 - `Transform::rot` and `PrevTransform::rot` are degrees, clockwise on screen
   (y grows downwards), as in the legacy tree's sf::Sprite and in the
   rotations game_rampage projects (R12's heading). The renderer converts
-  them to radians for `se::dm::SinCos`.
+  them to radians for `se::dm::SinCos`. *Superseded at the M3 integration
+  by ADR-023: the unit is radians, still clockwise on screen.*
 - `SpriteQuad::pos` is in canvas pixels of the camera (0..virtual_size,
   y down): `(world - center) * zoom + virtual_size / 2`. The backend maps the
   canvas to the window (letterboxing, `Camera2D::integer_scale`).
@@ -256,7 +257,8 @@ open, so game modules, the GPU backend (M7) and the editor (M10) agree:
 **Why.** The spec gives the types but not the units. Degrees match the
 reference the M3 comparison runs against and the `.seproj` rotations;
 canvas pixels and texel UVs keep the headless list free of GPU and asset
-knowledge until M7 and M9.
+knowledge until M7 and M9. (The rotation unit was settled the other way by
+ADR-023 when M3b and M3c were merged.)
 
 ## ADR-023 Transform::rot is in radians, the way sf::Angle stores it (2026-11-08)
 
@@ -272,6 +274,17 @@ already stores Atan2's result), the RenderList (M3c) rotates corners with
 `dm::SinCos(rot)`, and copying sf::Angle's operations made the engine's
 legacy-ref-v1 projections bit-identical to the reference's (refcmp reports
 zero deviation on all three scenarios), rotation included.
+
+**Integration (M3).** M3b and M3c were written in parallel and chose
+different units: ADR-022's first bullet (M3c) said degrees. Radians win,
+and that bullet is superseded: the kernel test module, se::dm and
+game_rampage already store radians, the determinism goldens hash them, and
+the reference comparison is exact with them, while the RenderList needed
+only its conversion factor removed. `BuildRenderList` now passes
+`Transform::rot` to `dm::SinCos` unchanged, and the shorter arc of the
+interpolation is taken in [-pi, pi) (a half turn still goes the negative
+way). Positive angles still turn clockwise on screen (y down), as
+sf::Sprite's do, so RotationFromHeading's values draw the legacy headings.
 
 ## ADR-024 Scene files name stats; components store their ids (2026-11-08)
 

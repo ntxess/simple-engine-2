@@ -19,6 +19,7 @@
 #include "se_bench/suite.h"
 #include "se_core/component_registry.h"
 #include "se_core/core_components.h"
+#include "se_core/detmath.h"
 #include "se_core/error.h"
 #include "se_core/guid.h"
 #include "se_core/rng.h"
@@ -34,6 +35,8 @@ namespace {
 constexpr float kArenaW = 1920.0F;
 constexpr float kArenaH = 1080.0F;
 constexpr std::uint32_t kTextures = 8;
+// A whole turn in radians, the unit of Transform::rot.
+constexpr float kTurn = static_cast<float>(2.0 * dm::kPi);
 constexpr std::uint64_t kGuidHi = 0x5EB0000000000000ULL;
 
 std::expected<void, Error> RunRenderList(const SuiteOptions& options,
@@ -52,7 +55,7 @@ std::expected<void, Error> RunRenderList(const SuiteOptions& options,
     Transform transform;
     transform.pos = {kArenaW * (1.2F * draws.Unit() - 0.1F),
                      kArenaH * (1.2F * draws.Unit() - 0.1F)};
-    transform.rot = 360.0F * draws.Unit();
+    transform.rot = kTurn * draws.Unit();
     const float scale = 0.5F + 1.5F * draws.Unit();
     transform.scale = {scale, scale};
     world.Reg().emplace<Transform>(entity, transform);
@@ -87,7 +90,8 @@ std::expected<void, Error> RunRenderList(const SuiteOptions& options,
     rng::Stream draws(options.seed, 1, id.guid, 1);
     transform.pos = transform.pos + Vec2{8.0F * draws.Unit() - 4.0F,
                                          8.0F * draws.Unit() - 4.0F};
-    transform.rot += 20.0F * draws.Unit() - 10.0F;
+    // Up to 10 degrees either way.
+    transform.rot += kTurn * (draws.Unit() - 0.5F) / 18.0F;
   }
 
   Camera2D camera;

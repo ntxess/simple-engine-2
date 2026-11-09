@@ -66,12 +66,12 @@ TEST_CASE("Culling uses the rotated bounds", "[render][culling]") {
   // 20 x 2: unrotated it spans x +-10, y +-1; at 90 degrees x +-1, y +-10.
   const SpriteRenderer bar = testing::CenteredSprite(1, 20.0F, 2.0F);
   REQUIRE(Visible({-3.0F, 40.0F}, bar, 0.0F, camera) == 1);
-  REQUIRE(Visible({-3.0F, 40.0F}, bar, 90.0F, camera) == 0);
+  REQUIRE(Visible({-3.0F, 40.0F}, bar, testing::Degrees(90.0F), camera) == 0);
   REQUIRE(Visible({50.0F, -5.0F}, bar, 0.0F, camera) == 0);
-  REQUIRE(Visible({50.0F, -5.0F}, bar, 90.0F, camera) == 1);
+  REQUIRE(Visible({50.0F, -5.0F}, bar, testing::Degrees(90.0F), camera) == 1);
   // At 45 degrees the half extent is (10 + 1) / sqrt(2) = 7.78 per axis.
-  REQUIRE(Visible({-7.5F, 40.0F}, bar, 45.0F, camera) == 1);
-  REQUIRE(Visible({-8.0F, 40.0F}, bar, 45.0F, camera) == 0);
+  REQUIRE(Visible({-7.5F, 40.0F}, bar, testing::Degrees(45.0F), camera) == 1);
+  REQUIRE(Visible({-8.0F, 40.0F}, bar, testing::Degrees(45.0F), camera) == 0);
 }
 
 TEST_CASE("The camera's centre and zoom map the world onto the canvas",
