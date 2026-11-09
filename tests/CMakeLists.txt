@@ -170,6 +170,7 @@ endif()
 
 add_subdirectory(rampage)
 add_subdirectory(render)
+add_subdirectory(crash)
 
 # tools/se_replay links the kernel test module from tests/support, so it is
 # built with the tests.

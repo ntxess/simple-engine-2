@@ -6,6 +6,8 @@ Rules (docs/style.md and docs/decisions.md):
     - `catch` only in files marked `// se-fault-boundary`
     - no RTTI: dynamic_cast, typeid
     - no <filesystem>, <ratio>, <cfenv>, <fenv.h> (Google C++ style)
+    - no in-process dump writing: MiniDumpWriteDump, <dbghelp.h> (the
+      crash handler writes every dump out of process, M4b); no opt-out
   deterministic (simulation) modules, additionally
     - no wall clocks: steady_clock, system_clock, high_resolution_clock,
       SDL_GetTicks
@@ -52,6 +54,9 @@ DETERMINISM_RULES = [
         r"[\w:<>,\s*&]*?[\w>*&]\s*\b[A-Za-z_]\w*\s*(?:=|;|\{|\[)")),
 ]
 CATCH_RE = re.compile(r"\bcatch\s*\(")
+# In-process dump writing: the call (in code) or the DbgHelp include (raw).
+DUMP_CALL_RE = re.compile(r"\bMiniDumpWriteDump\b")
+DUMP_INCLUDE_RE = re.compile(r"#\s*include\s*[<\"][Dd]bg[Hh]elp\.h[>\"]")
 FAULT_BOUNDARY = "se-fault-boundary"
 ALLOW_RE = re.compile(r"se-allow\((\w+)\)")
 
@@ -102,6 +107,10 @@ def scan_file(path, deterministic):
             subject = raw if name == "header" else code
             if name not in allowed and pattern.search(subject):
                 found.append(f"{path}:{number}: banned ({name}): {raw.strip()}")
+        if DUMP_CALL_RE.search(code) or DUMP_INCLUDE_RE.search(raw):
+            found.append(f"{path}:{number}: banned (dump): in-process dump "
+                         f"writing; the crash handler writes dumps out of "
+                         f"process: {raw.strip()}")
         if (CATCH_RE.search(code) and not fault_boundary
                 and "catch" not in allowed):
             found.append(f"{path}:{number}: catch outside a file marked "

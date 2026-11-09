@@ -4,3 +4,4 @@
 add_subdirectory(se_core)
 add_subdirectory(se_sim)
 add_subdirectory(se_render_core)
+add_subdirectory(se_crash)
