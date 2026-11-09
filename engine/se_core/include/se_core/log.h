@@ -114,8 +114,11 @@ class LogConsumer {
 [[nodiscard]] bool AttachLogConsumer(LogConsumer* consumer) noexcept;
 
 // Returns the front end to the synchronous path. When it returns, no thread
-// is writing a ring record any more (it waits for writes in progress), so
-// the consumer can drain the rings a last time.
+// is writing a ring record or using |consumer| any more: it waits for every
+// write in progress, without a deadline (ADR-045), so the consumer can
+// drain the rings a last time and then be destroyed. The consumer must
+// keep serving Flush until it returns (a flush in progress holds its
+// writer's mark), and the caller must not hold a write mark itself.
 void DetachLogConsumer(LogConsumer* consumer) noexcept;
 
 // True while a consumer is attached.

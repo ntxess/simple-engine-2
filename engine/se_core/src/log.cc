@@ -30,8 +30,6 @@ static_assert(kLogMaxMessage == kLogRecordMessageSize,
 
 // How long SE_LOG_FATAL waits for the worker to write and flush.
 constexpr std::uint64_t kFatalFlushTimeoutNs = 2'000'000'000;
-// How long DetachLogConsumer waits for ring writes in progress.
-constexpr std::uint64_t kDetachTimeoutNs = 1'000'000'000;
 
 std::atomic<LogLevel> g_level{LogLevel::kInfo};
 std::atomic<LogSink> g_sink{nullptr};
@@ -242,12 +240,13 @@ void DetachLogConsumer(LogConsumer* consumer) noexcept {
                                           std::memory_order_seq_cst)) {
     return;
   }
-  // Wait for writes that saw the consumer (a few hundred nanoseconds each).
-  const std::uint64_t deadline = ProfileNowNs() + kDetachTimeoutNs;
+  // Wait for every write that may have seen the consumer, without a
+  // deadline: a writer that is still using it after the caller frees the
+  // consumer would touch freed memory (ADR-045). Each wait ends: a mark
+  // covers one push (a few hundred nanoseconds), or a flush bounded by its
+  // own timeout, which the consumer keeps serving until this returns.
   ThreadRegistry::Instance().ForEachLogRing([&](const LogRing& ring) {
-    while (ring.WriteStartedNs() != 0 && ProfileNowNs() < deadline) {
-      std::this_thread::yield();
-    }
+    while (ring.WriteStartedNs() != 0) std::this_thread::yield();
   });
 }
 

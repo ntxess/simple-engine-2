@@ -3,7 +3,9 @@
 #include "se_log/log_worker.h"
 
 #include <algorithm>
+#include <atomic>
 #include <catch2/catch_test_macros.hpp>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -295,12 +297,21 @@ TEST_CASE("The panel ring keeps the last lines", "[log_worker]") {
 
 TEST_CASE("Start fails cleanly", "[log_worker]") {
   SE_TEST_MAIN_THREAD();
-  auto first = LogWorker::Start(FileOnly(OutPath("first.log")));
+  const std::string first_path = OutPath("first.log");
+  auto first = LogWorker::Start(FileOnly(first_path));
   REQUIRE(first.has_value());
-  const auto second = LogWorker::Start(FileOnly(OutPath("second.log")));
+  const std::string second_path = OutPath("second.log");
+  const auto second = LogWorker::Start(FileOnly(second_path));
   REQUIRE_FALSE(second.has_value());
   CHECK(second.error().code == ErrorCode::kUnsupported);
+  // The second worker's thread ended without draining: the first one still
+  // owns the rings and writes what comes next (ADR-045).
+  CHECK(LogConsumerAttached());
+  SE_LOG_INFO("after the refused start");
   first->Stop();
+  REQUIRE(Containing(ReadLines(first_path), "after the refused start").size() ==
+          1);
+  CHECK(ReadLines(second_path).empty());
 
   // A log path below a regular file cannot be opened.
   const std::string blocker = OutPath("blocker.txt");
@@ -312,6 +323,51 @@ TEST_CASE("Start fails cleanly", "[log_worker]") {
   CHECK(bad.error().code == ErrorCode::kIo);
   CHECK(bad.error().path == blocker + "/x.log");
   CHECK_FALSE(LogConsumerAttached());
+}
+
+// The worker's console lines reach the test's sink (WriteConsoleLine); this
+// one holds the worker for 1.2 s on the line that asks for it, longer than
+// the 1 s DetachLogConsumer used to wait (ADR-045).
+std::atomic<bool> g_worker_stalled{false};
+
+void StallingSink(LogLevel /*level*/, std::string_view line) {
+  if (line.find("stall the worker") != std::string_view::npos) {
+    g_worker_stalled.store(true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+  }
+}
+
+TEST_CASE("Stop waits for every write in progress without a deadline",
+          "[log_worker][threads]") {
+  SE_TEST_MAIN_THREAD();
+  g_worker_stalled.store(false);
+  SetLogSink(&StallingSink);
+  LogConfig config{.stderr_enabled = true, .rate_limit_per_second = 0};
+  auto worker = LogWorker::Start(config);
+  REQUIRE(worker.has_value());
+  SE_LOG_INFO("stall the worker");
+  while (!g_worker_stalled.load()) std::this_thread::yield();
+  // A thread with a ring of its own asks for a flush, which the stalled
+  // worker serves only after the stall; FlushLog holds the thread's write
+  // mark (and uses the consumer) until then.
+  std::atomic<const LogRing*> ring{nullptr};
+  std::atomic<bool> flushed{false};
+  auto flusher = StartThread(
+      {.role = ThreadRole::kBackground, .name = "flusher"}, [&ring, &flushed] {
+        ring.store(CurrentThreadLogRing());
+        flushed.store(FlushLog(10'000'000'000));
+      });
+  REQUIRE(flusher.has_value());
+  while (ring.load() == nullptr || ring.load()->WriteStartedNs() == 0) {
+    std::this_thread::yield();
+  }
+  worker->Stop();
+  // Stop returned only after the flusher let go of the consumer, so the
+  // worker's State could be freed now.
+  REQUIRE(ring.load()->WriteStartedNs() == 0);
+  flusher->Join();
+  CHECK(flushed.load());
+  SetLogSink(nullptr);
 }
 
 }  // namespace

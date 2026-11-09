@@ -528,7 +528,8 @@ otherwise. Details the spec leaves open:
 - Detach. `DetachLogConsumer` clears the consumer and then waits (at most
   1 s) for marks in progress; a producer checks the consumer after setting
   its mark, so every record is either in a ring the worker drains a last
-  time or written synchronously, never lost.
+  time or written synchronously, never lost. *(Superseded by ADR-045: the
+  wait has no deadline.)*
 - The main thread without a slot (it normally has slot 0) uses the library
   ring only through try_lock, and counts a drop when the lock is busy.
 - SE_LOG_FATAL pushes the record and asks the consumer to flush while the
@@ -829,6 +830,28 @@ flush (se::FlushLog, 1 s) and ends the process with TerminateProcess
 and main never waits on it; a queue main fills and a semaphore it releases
 keep both true. Declaring hangs needs M12's GPU and compositor labels, so
 M4 gives the interface and the boot budget only, as the spec asks.
+
+## ADR-045 The log consumer is detached without a deadline, and attached after its thread starts (2026-11-09)
+
+**Decision.** `DetachLogConsumer` waits for every ring write mark in
+progress without a deadline, replacing ADR-032's "at most 1 s". When it
+returns, no thread uses the consumer any more, so LogWorker::Stop can
+destroy its State. Each wait ends: a mark covers one push, or a flush
+(SE_LOG_FATAL, 2 s; `FlushLog`, its caller's timeout) that the worker
+keeps serving, because Stop detaches before it asks the worker to stop; at
+shutdown the watchdog's 5 s deadline bounds the whole step 16 as well. The
+caller must not hold a mark itself (no SE_LOG_* call path detaches).
+`LogWorker::Start` now starts its thread first and attaches the consumer
+after it: the thread waits for the outcome and runs only when the attach
+succeeded. A thread that cannot be created therefore leaves no records
+stranded in the rings, and a second worker that finds the first one
+attached never drains the first one's rings.
+
+**Why.** After a timed-out detach a producer still inside its mark (a
+fatal flush lasts up to 2 s, longer than the old 1 s) could call
+OnRecordPushed or poll the flush counter of a freed State. The old start
+order attached before the thread existed, so a failed thread start left
+whatever was pushed meanwhile in the rings with nobody to write it.
 
 ## ADR-046 The dump reader checks every record against its index (2026-11-09)
 

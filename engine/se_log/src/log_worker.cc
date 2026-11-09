@@ -230,6 +230,10 @@ struct LogWorker::State final : public LogConsumer {
   std::shared_ptr<PanelSink> panel;
 
   std::binary_semaphore wake{0};
+  // Start: released once the attach has been tried; `attached` says how it
+  // went.
+  std::binary_semaphore go{0};
+  std::atomic<bool> attached{false};
   std::atomic<bool> parked{false};
   std::atomic<bool> stop{false};
   std::atomic<bool> stopped{false};
@@ -486,18 +490,26 @@ std::expected<LogWorker, Error> LogWorker::Start(const LogConfig& config) {
   if (auto sinks = state->CreateSinks(); !sinks) {
     return std::unexpected(std::move(sinks.error()));
   }
-  if (!AttachLogConsumer(state.get())) {
-    return Fail(ErrorCode::kUnsupported, "a log worker is already running");
-  }
+  // The thread starts before the consumer is attached and waits for the
+  // outcome (ADR-045): a thread that cannot start leaves no record behind
+  // in a ring, and a worker that finds another one attached never drains
+  // that worker's rings.
   State* raw = state.get();
   auto thread = StartThread(
       ThreadSpec{.role = ThreadRole::kLogWorker, .name = "log-worker"},
-      [raw](const std::stop_token& /*stop*/) { raw->Run(); });
-  if (!thread) {
-    DetachLogConsumer(raw);
-    return std::unexpected(std::move(thread.error()));
-  }
+      [raw](const std::stop_token& /*stop*/) {
+        raw->go.acquire();
+        if (raw->attached.load(std::memory_order_acquire)) raw->Run();
+      });
+  if (!thread) return std::unexpected(std::move(thread.error()));
   state->thread = std::move(*thread);
+  const bool attached = AttachLogConsumer(raw);
+  raw->attached.store(attached, std::memory_order_release);
+  raw->go.release();
+  if (!attached) {
+    state->thread.Join();
+    return Fail(ErrorCode::kUnsupported, "a log worker is already running");
+  }
   return LogWorker(std::move(state));
 }
 
