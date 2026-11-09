@@ -14,6 +14,7 @@ se_add_module(se_core KIND STATIC
     src/fp.cc
     src/guid.cc
     src/hash.cc
+    src/input_frame_ring.cc
     src/jobs.cc
     src/log.cc
     src/log_ring.cc

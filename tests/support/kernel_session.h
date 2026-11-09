@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "se_core/input_frame.h"
+#include "se_core/input_frame_ring.h"
 #include "se_core/thread_role.h"
 #include "se_core/thread_safety.h"
 #include "se_core/time.h"
@@ -52,6 +53,8 @@ struct KernelSessionOptions {
   // Every K ticks, step a clone of each running World serially and compare
   // per-entity digests with the real tick (0: off).
   std::uint32_t det_crosscheck = 0;
+  // Attached to the SimDriver (InputFrameRing) when set.
+  InputFrameRing* input_ring = nullptr;
   // Called after every tick.
   std::function<void(Tick, const GameStateStack&)> on_tick;
 };

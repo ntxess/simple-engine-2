@@ -24,6 +24,7 @@ TickResult SimDriver::RunTick(GameStateStack& states, const InputFrame& frame,
   states.ApplyPending();
   log.ApplyDue(tick, states);
   recorder.Record(frame);
+  if (input_ring_ != nullptr) input_ring_->Write(frame);
 
   TickResult result;
   result.tick = tick;
