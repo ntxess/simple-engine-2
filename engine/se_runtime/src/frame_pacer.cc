@@ -72,6 +72,9 @@ void FramePacer::Attach(PresentPort* port, VblankReader sampler) {
   sampler_ = std::move(sampler);
   caps_ = port_ != nullptr ? port_->QueryCaps() : PresentCaps{};
   tracker_.Reset();
+  wait_tracker_.Reset();
+  stats_live_ = false;
+  carried_ = WaitTracker::Result{};
   half_rate_.Reset();
   latency_.Reset();
   target_ns_ = 0;
@@ -113,6 +116,7 @@ void FramePacer::OnOutputChanged() {
   last_present_id_ = 0;
   paced_since_ns_ = 0;
   tracker_.Reset();
+  wait_tracker_.Reset();
   next_evaluation_ns_ = 0;
 }
 
@@ -123,6 +127,7 @@ void FramePacer::ResetClock() noexcept {
   target_ns_ = 0;
   vrr_deadline_ns_ = 0;
   tracker_.Reset();
+  wait_tracker_.Reset();
 }
 
 int FramePacer::PresentInterval() const noexcept {
@@ -188,6 +193,7 @@ void FramePacer::SetMode(PacingMode mode, std::string_view reason) {
     vrr_deadline_ns_ = 0;
     last_present_id_ = 0;
     tracker_.Reset();
+    wait_tracker_.Reset();
   }
   mode_ = mode;
   mode_reason_ = reason;
@@ -218,25 +224,32 @@ FrameClock FramePacer::BeginFrame(bool modal, FixedStepper& stepper) {
         now = clock_->NowNs();
         frame_.fence_wait_ns = now - start;
         ++totals_.fence_waits;
+        totals_.fence_wait_ns += frame_.fence_wait_ns;
       }
     }
   }
 
-  // 2. Present statistics: hits and misses, one result per frame.
-  bool missed = false;
+  // 2. Hits and misses, one result per frame: present statistics when the
+  // presentation path produces them; else what the previous EndFrame's
+  // latency waits resolved (ADR-066).
+  bool missed = carried_.missed > 0;
+  stats_live_ = false;
   if (port_ != nullptr && caps_.present_stats && mode_ != PacingMode::kVrr) {
     PresentStatistics stats;
     if (port_->GetPresentStats(stats)) {
+      stats_live_ = true;
       const PresentTracker::Result result =
           tracker_.OnStats(stats, vblank_period_sec_ * kNsPerSec);
       frame_.resolved = result.resolved;
       frame_.missed = result.missed;
+      frame_.late_vblanks = result.late_refreshes;
       frame_.stats_reset = result.reset;
       totals_.resolved_presents += result.resolved;
+      totals_.resolved_by_statistics += result.resolved;
       totals_.missed_presents += result.missed;
       totals_.missed_vblanks += result.late_refreshes;
       if (result.reset) ++totals_.stats_resets;
-      missed = result.missed > 0;
+      missed = missed || result.missed > 0;
     }
   }
   stepper.OnPresentResult(missed, modal);
@@ -328,14 +341,23 @@ FrameClock FramePacer::BeginFrame(bool modal, FixedStepper& stepper) {
   frame_.period_sec = clock.period_sec;
   frame_.frame_start_ns = start;
   frame_.target_ns = frame_target_ns_;
+  if (stats_live_) {
+    frame_.miss_source = MissSource::kStatistics;
+  } else if (port_ != nullptr && caps_.frame_latency_waitable &&
+             mode_ != PacingMode::kVrr && frame_target_ns_ != 0) {
+    frame_.miss_source = MissSource::kLatencyWait;
+  }
   return clock;
 }
 
 void FramePacer::RegisterPresent(std::uint64_t target_ns) {
-  if (port_ == nullptr || !caps_.present_stats || target_ns == 0 ||
-      mode_ == PacingMode::kVrr) {
-    return;
+  if (port_ == nullptr || mode_ == PacingMode::kVrr) return;
+  // Every present the waitable will wait for, so that the waits line up
+  // with their presents; with statistics the waits resolve nothing.
+  if (caps_.frame_latency_waitable) {
+    wait_tracker_.OnPresentIssued(stats_live_ ? 0 : target_ns);
   }
+  if (!caps_.present_stats || target_ns == 0) return;
   PresentStatistics stats;
   if (!port_->GetPresentStats(stats)) return;
   if (stats.last_present_count != last_present_id_) {
@@ -373,8 +395,52 @@ void FramePacer::Sleep(std::uint64_t now_ns, std::uint64_t wake_ns) {
                                 : -ToSec(wake_ns - woke));
 }
 
+void FramePacer::WaitWaitable(std::uint64_t& now_ns) {
+  if (!caps_.frame_latency_waitable) return;
+  const std::uint64_t start = clock_->NowNs();
+  // A poll first: only a wait that blocked returned when its present was
+  // taken from the queue.
+  bool blocked = false;
+  PresentWait result = port_->WaitFrameLatency(0);
+  if (result == PresentWait::kTimeout) {
+    blocked = true;
+    result = port_->WaitFrameLatency(config_.waitable_timeout_ns);
+  }
+  now_ns = clock_->NowNs();
+  frame_.waitable = result;
+  frame_.waitable_wait_ns += now_ns - start;
+  ++totals_.waitable_waits;
+  if (result == PresentWait::kTimeout) ++totals_.waitable_timeouts;
+  if (mode_ == PacingMode::kVrr) return;
+  const WaitTracker::Result waited =
+      wait_tracker_.OnWait(result == PresentWait::kReady, blocked, now_ns,
+                           latency_.Latency(), vblank_period_sec_ * kNsPerSec);
+  if (!stats_live_) AddWaitResult(waited);
+}
+
+void FramePacer::AddWaitResult(const WaitTracker::Result& result) {
+  frame_.resolved += result.resolved;
+  frame_.missed += result.missed;
+  frame_.late_vblanks += result.late_refreshes;
+  frame_.unresolved += result.unresolved;
+  if (result.blocked) {
+    frame_.wait_blocked = true;
+    frame_.wait_phase_ns = result.phase_ns;
+  }
+  totals_.resolved_presents += result.resolved;
+  totals_.resolved_by_wait += result.resolved;
+  totals_.missed_presents += result.missed;
+  totals_.missed_vblanks += result.late_refreshes;
+  totals_.unresolved_waits += result.unresolved;
+  carried_.resolved += result.resolved;
+  carried_.missed += result.missed;
+  carried_.late_refreshes += result.late_refreshes;
+  carried_.unresolved += result.unresolved;
+}
+
 void FramePacer::UpdatePolicies(const StepPlan& next, const FrameCosts& costs,
-                                bool modal) {
+                                bool modal,
+                                const WaitTracker::Result& carried) {
   if (mode_ == PacingMode::kVrr || modal) return;
   const double vblank = vblank_period_sec_;
   const double frame_sec = std::clamp(frame_.period_sec, 0.0, kMaxMeasuredSec);
@@ -385,8 +451,10 @@ void FramePacer::UpdatePolicies(const StepPlan& next, const FrameCosts& costs,
     HalfRatePolicy::FrameInput input;
     input.vblank_period_sec = vblank;
     input.frame_sec = frame_sec;
-    input.resolved = frame_.resolved;
-    input.missed = frame_.missed;
+    // Statistics resolved at this frame's start; the latency waits at the
+    // previous frame's end.
+    input.resolved = frame_.resolved + carried.resolved;
+    input.missed = frame_.missed + carried.missed;
     input.planned_full_rate_sec =
         ticks_per_vblank * costs.tick_hi + costs.non_tick_hi + g_hi + m;
     input.full_rate_cost95_sec =
@@ -426,7 +494,8 @@ void FramePacer::UpdatePolicies(const StepPlan& next, const FrameCosts& costs,
 void FramePacer::EndFrame(const StepPlan& next, const FrameCosts& costs,
                           bool modal) {
   AssertMainThread();
-  UpdatePolicies(next, costs, modal);
+  const WaitTracker::Result carried = std::exchange(carried_, {});
+  UpdatePolicies(next, costs, modal, carried);
   frame_.interval = PresentInterval();
   frame_.latency = latency_.Latency();
   std::uint64_t now = clock_->NowNs();
@@ -434,15 +503,6 @@ void FramePacer::EndFrame(const StepPlan& next, const FrameCosts& costs,
     LogSecond(now);
     return;
   }
-  const auto wait_waitable = [&] {
-    if (!caps_.frame_latency_waitable) return;
-    const std::uint64_t start = clock_->NowNs();
-    frame_.waitable = port_->WaitFrameLatency(config_.waitable_timeout_ns);
-    now = clock_->NowNs();
-    frame_.waitable_wait_ns = now - start;
-    ++totals_.waitable_waits;
-    if (frame_.waitable == PresentWait::kTimeout) ++totals_.waitable_timeouts;
-  };
   const auto wait_swapchain = [&] {
     const std::uint64_t start = clock_->NowNs();
     static_cast<void>(port_->WaitSwapchain());
@@ -453,7 +513,7 @@ void FramePacer::EndFrame(const StepPlan& next, const FrameCosts& costs,
 
   switch (mode_) {
     case PacingMode::kPaced: {
-      wait_waitable();
+      WaitWaitable(now);
       const VblankReading reading = sampler_ ? sampler_(now) : VblankReading{};
       if (!reading.valid) {
         // The sampler went away mid-frame: wait like Standard this once;
@@ -470,7 +530,7 @@ void FramePacer::EndFrame(const StepPlan& next, const FrameCosts& costs,
       break;
     }
     case PacingMode::kStandard: {
-      wait_waitable();
+      WaitWaitable(now);
       wait_swapchain();
       if (PresentInterval() == 2) {
         // HalfRate: the same composite again, so each frame shows for two
@@ -478,16 +538,17 @@ void FramePacer::EndFrame(const StepPlan& next, const FrameCosts& costs,
         frame_.represented = port_->RepresentLast();
         if (frame_.represented) {
           ++totals_.represents;
-          if (frame_target_ns_ != 0) {
-            RegisterPresent(frame_target_ns_ + ToNs(vblank_period_sec_));
-          }
+          RegisterPresent(frame_target_ns_ != 0
+                              ? frame_target_ns_ + ToNs(vblank_period_sec_)
+                              : 0);
+          WaitWaitable(now);
           wait_swapchain();
         }
       }
       break;
     }
     case PacingMode::kVrr: {
-      wait_waitable();
+      WaitWaitable(now);
       const std::uint64_t period_ns = ToNs(1.0 / VrrRateHz(display_hz_));
       const double lead_sec =
           std::min(kMaxVrrLeadSec, lateness_.Count() >= kMinLatenessSamples
@@ -525,16 +586,21 @@ void FramePacer::LogSecond(std::uint64_t now_ns) {
   const PacerTotals& l = logged_totals_;
   SE_LOG_DEBUG(
       "pacer: {} {:.3f} Hz ({}) x{} L{}: {} frames, {} presented, {} "
-      "waitable waits ({} timeouts), {} fence waits, {} missed vblanks in {} "
-      "of {} presents, {} NULL acquires, {} sleeps, timer p99 {:.3f} ms",
+      "waitable waits ({} timeouts), {} fence waits ({:.3f} ms), {} missed "
+      "vblanks in {} "
+      "of {} presents (misses from {}; {} unresolved waits), {} NULL "
+      "acquires, {} sleeps, timer p99 {:.3f} ms",
       PacingModeName(mode_), 1.0 / vblank_period_sec_,
       PeriodSourceName(frame_.period_source), PresentInterval(),
       latency_.Latency(), t.frames - l.frames, t.presented - l.presented,
       t.waitable_waits - l.waitable_waits,
       t.waitable_timeouts - l.waitable_timeouts, t.fence_waits - l.fence_waits,
+      static_cast<double>(t.fence_wait_ns - l.fence_wait_ns) * 1e-6,
       t.missed_vblanks - l.missed_vblanks,
       t.missed_presents - l.missed_presents,
       t.resolved_presents - l.resolved_presents,
+      MissSourceName(frame_.miss_source),
+      t.unresolved_waits - l.unresolved_waits,
       t.null_acquires - l.null_acquires, t.sleeps - l.sleeps,
       TimerP99Sec() * 1e3);
   logged_totals_ = totals_;

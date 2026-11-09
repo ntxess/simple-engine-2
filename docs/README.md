@@ -35,16 +35,16 @@ behaviour reference until every rule and editor operation is ported.
 | game_rampage | games/rampage | The legacy Sandbox's gameplay on the kernel: components, systems, scenes and prefabs (assets/), legacy scenarios, projections (M3) |
 | se_platform | engine/se_platform | SDL3 on the main thread: SDL's initialisation, the event filter and Inbox, WakeMain, the window and its Win32 subclass (Modal, session end, power), se::fs on SDL's filesystem API (M5); the display outputs (QueryDisplayConfig's current mode of the window's monitor, ADR-055) and the vblank sampler (role kVblankSampler: WaitForVBlank on the window's DXGI output, stamps in the SDL_GetTicksNS domain, a median period; a stub elsewhere) (M6b, ADR-056) |
 | se_render | engine/se_render | The SDL_GPU device (D3D12 on Windows, Vulkan on Linux) (M5); Renderer2D on main: the frame transaction (FrameRecorder, its fault boundary and the --inject-frame-fault hook), GpuResources (texture handles with a magenta fallback, the retire queue, the 8 MB upload queue, device-loss release and recreation), the sprite and blit pipelines, the composite and ViewportTargets, the texture table and PNGs through stb; HLSL shaders in shaders/, SPIR-V committed in shaders/generated/, DXIL built with the SDK's dxc (M7, ADR-059 to ADR-063); `se::present` (present.h): the SDL presentation patch's frame-latency wait, present statistics, GPU timestamps, native handles, device status and present mode, all unsupported in the unpatched build (M6a, ADR-050 to ADR-053) |
-| se_runtime | engine/se_runtime | The App on SDL's main callbacks: boot steps, the frame, the lifecycle and two-phase quit state machines, BasicInputService, the noexcept callbacks (`SE_DEFINE_SDL_APP`) (M5); the main thread's RoleScope, crash capture and its dump streams, the log worker and the watchdog in boot order (integration.h; ADR-042); the FramePacer over the pure PacerPolicy (Paced, Standard, VRR, HalfRate, adaptive latency, misses from present statistics; `--pacing`) and the PresentPort it presents through, ClearOnlyPresentPort until the integration (M6b, ADR-054, ADR-057, ADR-058) |
+| se_runtime | engine/se_runtime | The App on SDL's main callbacks: boot steps, the frame, the lifecycle and two-phase quit state machines, BasicInputService, the noexcept callbacks (`SE_DEFINE_SDL_APP`) (M5); the main thread's RoleScope, crash capture and its dump streams, the log worker and the watchdog in boot order (integration.h; ADR-042); the FramePacer over the pure PacerPolicy (Paced, Standard, VRR, HalfRate, adaptive latency, misses from present statistics or the latency wait; `--pacing`) and the PresentPort it presents through (M6b, ADR-054, ADR-057, ADR-058); RenderPresentPort, the adapter over `se::present` and Renderer2D, misses from the frame-latency wait on the vblank grid where no present statistics arrive, the GPU timings as FrameCosts' g, and device loss (DeviceLost, recreation on main, `--inject-device-lost`) (M6/M7 integration, ADR-066 to ADR-068) |
 | rampage | games/rampage/app | The rampage executable: the sandbox scene at 120 Hz in a window (M5), drawn textured by Renderer2D (M7); crashpad_handler is copied next to it |
 | se_replay | tools/se_replay | Headless runs of a game module: per-tick hashes, replays, projections |
-| render_shot | tools/render_shot | A rampage scenario at one tick rendered offscreen by se_render into a PNG, and the image comparison (`--compare`, the golden tolerance); drives the legacy image comparison and the rampage fault-injection tests (M7, ADR-065) |
+| render_shot | tools/render_shot | A rampage scenario at one tick rendered offscreen by se_render into a PNG, and the image comparison (`--compare`, the golden tolerance); drives the legacy image comparison and the rampage fault-injection tests, `render.fault.<driver>.device_lost` included (M7, ADR-065; ADR-068) |
 | build_shaders | tools/shaders/build_shaders.py | Compiles the renderer's HLSL: SPIR-V headers through glslang (committed; `--check` is the WSL freshness test), DXIL headers through dxc at build time (Python 3, stdlib only) |
 | compare_images | tools/render_shot/compare_images.py | Compares two PNGs with the renderer's tolerance and writes a diff image (Python 3, stdlib only) |
 | refcmp | tools/refcmp/refcmp.py | Compares two `.seproj` projections within the M3 tolerances (Python 3, stdlib only) |
 | read_dump | tools/minidump/read_dump.py | Decodes a crash dump: threads, exception, annotations and the first-party streams (breadcrumbs, log rings, InputFrame ring), and lists every record that does not fit its index (a stale or torn InputFrame slot, log sequence numbers out of order) under "problems", apart from the one a running writer was overwriting (ADR-046); the crash tests' oracle (Python 3, stdlib only) |
 | presentmon | tools/presentmon/analyze.py, run.ps1 | Summarises a PresentMon CSV for one process: displayed latency p50/p99, dropped and repeated frames, present intervals, with optional limits (Python 3, stdlib only; `presentmon.analyze` tests it); run.ps1 captures rampage with PresentMon (not installed; docs/gates.md) (M6b) |
-| se_pacing_tests | tests/pacing | PacerPolicy, the FramePacer on a fake clock and present port, the vblank sampler on a fake source (label unit, TSan included); desktop: the sampler on this machine's outputs, SDL's refresh against the OS's, Standard without the patch, the VRR deadline, and the Paced exit tests that need M6a (`pacing.*`) |
+| se_pacing_tests | tests/pacing | PacerPolicy, the FramePacer on a fake clock and present port, the vblank sampler on a fake source (label unit, TSan included); desktop: the sampler on this machine's outputs, SDL's refresh against the OS's, Standard without the patch, the VRR deadline, Paced's misses over 20 s on D3D12 and on Vulkan with the source they came from, and an injected late frame draining (`pacing.*`) |
 | se_crash_probe | tests/crash | Registers dump streams with known contents, then crashes or requests dumps; the `crash.*` tests (label crash) check its dumps with read_dump. `crash.rampage_*` (labels desktop and crash) check the M4 exit dumps of the rampage executable |
 | se_present_tests | tests/present | The present API on both GPU drivers (`present.d3d12.*`, `present.vulkan.*`, chosen with SE_GPU_DRIVER): caps, GPU timing, handles and status (label gpu), and the frame-latency waits, statistics, resize and present-mode changes (label desktop) |
 | SDL patch | cmake/patches | sdl3-3.4.20-se-presentation.patch: `include/SDL3/SDL_gpu_se.h` and its D3D12 and Vulkan backends, applied with `SE_SDL_PATCH` (docs/deps.md has the rebase notes) |
@@ -102,14 +102,27 @@ engine/se_runtime/include/se_runtime/app_config.h:
 out\build\msvc-dev\bin\rampage --frames 600
 ```
 
-`--pacing paced|standard|vrr|auto` chooses the FramePacer's mode (auto:
-Paced on Windows when the SDL presentation patch, present statistics and
-the vblank sampler allow it, else Standard; VRR presents IMMEDIATE at a
-self-paced 120 Hz). Test builds add the pacer's mode, rate, present
-interval, frame latency and missed presents to the title, and
-`--log-level debug` logs its statistics once a second. A PresentMon
-capture is summarised with `python tools\presentmon\analyze.py
-capture.csv` (docs/gates.md has the capture command).
+`--pacing paced|standard|vrr|auto` chooses the FramePacer's mode:
+
+| Mode | When | What it does |
+|---|---|---|
+| Paced | auto on Windows (or `--pacing paced` anywhere) when the SDL presentation patch's frame-latency waitable exists and the vblank sampler measures the window's output and agrees with its display mode within 0.5% (ADR-055, ADR-057); never while the display sleeps | waits on the waitable, then sleeps (SDL_DelayNS) to the predicted vblank minus B(next); misses from present statistics when the presentation path gives them (D3D12 independent flip), else from the waitable's (D3D12) or present_wait's (Vulkan) return on the vblank grid (ADR-066) |
+| Standard | otherwise (no patch, no sampler, a display asleep, Linux), or `--pacing standard` | the waitable when present, then SDL_WaitForGPUSwapchain; HalfRate re-presents the last composite |
+| VRR | `--pacing vrr`, where IMMEDIATE (tearing) works, patched or not | IMMEDIATE, a self-paced 120 Hz deadline (60 Hz below a 120 Hz mode), no miss logic |
+
+HalfRate (above 100 Hz) and frame latency 2 are chosen by the pacer from
+its misses and FrameCosts (with the GPU's measured g when the patch's
+timestamps exist). Each mode change is logged as `pacing: <Mode>
+(<reason>)`. Test builds add the pacer's mode, rate, present interval,
+frame latency and missed presents to the title, and `--log-level debug`
+logs its statistics once a second (waits, fence waits, misses and their
+source, unresolved waits) and the renderer's (quads, batches, build and
+record times, the GPU time). The pacing test hooks are
+`--inject-late-frame FRAME:MS` and `--inject-device-lost FRAME` (the
+device status reports removed once: DeviceLost, the device recreated, the
+textures re-uploaded; ADR-068). A PresentMon capture is summarised with
+`python tools\presentmon\analyze.py capture.csv` (docs/gates.md has the
+capture command).
 
 The renderer's test hooks (every build but Release) write the composite
 as PNG (`--readback FRAME:FILE`), reload a texture (`--reload-texture
@@ -124,10 +137,15 @@ out\build\legacy-msvc-release\app\legacy_replay --scenario tests/fixtures/refere
 out\build\msvc-dev\bin\render_shot --legacy-scenario tests/fixtures/reference/stress.scenario.json --inputs tests/fixtures/reference/stress.seinput --tick 600 --out engine.png --compare legacy.png
 ```
 
-The shaders' SPIR-V is regenerated with `python
-tools/shaders/build_shaders.py spirv` (glslang in WSL) and committed; the
-golden images (tests/golden/render/<driver>/) with `SE_UPDATE_GOLDENS=1
-ctest --test-dir out\build\msvc-dev -R Golden`.
+Shaders are HLSL in engine/se_render/shaders/. The DXIL headers are
+compiled at build time by the Windows SDK's dxc.exe; the SPIR-V headers in
+engine/se_render/shaders/generated/ are regenerated with `python
+tools/shaders/build_shaders.py spirv` (glslang through wsl.exe) and
+committed, and `checks.shaders.spirv_fresh` in the WSL presets fails on a
+stale one. The golden images (tests/golden/render/d3d12/ and vulkan/) are
+rewritten with `set SE_UPDATE_GOLDENS=1` and `ctest --test-dir
+out\build\msvc-dev -R Golden` (scripts/ci.ps1 clears the variable, so the
+gate always checks them); review the new PNGs before committing them.
 
 Every run of an engine executable writes its log through the log worker to
 `<pref>/logs/<app>.log` (rotated at 5 MB, 3 kept) and to stderr, and keeps

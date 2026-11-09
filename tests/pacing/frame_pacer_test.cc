@@ -13,6 +13,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <expected>
 #include <limits>
 #include <span>
@@ -45,6 +46,14 @@ PresentCaps Patched() {
   caps.frame_latency_waitable = true;
   caps.present_stats = true;
   caps.tearing = true;
+  return caps;
+}
+
+// A patched SDL presenting a window DWM composes: the waitable, but no
+// present statistics arrive (ADR-052, ADR-066).
+PresentCaps Windowed() {
+  PresentCaps caps = Patched();
+  caps.present_stats = false;
   return caps;
 }
 
@@ -238,6 +247,65 @@ TEST_CASE("Presents one refresh late are misses although starts are on time",
   for (int i = 0; i < 40; ++i) loop.Step();
   REQUIRE(loop.pacer.Totals().missed_presents >= 30);
   REQUIRE(loop.pacer.Totals().missed_vblanks >= 30);
+}
+
+TEST_CASE("Statistics are the miss source when they arrive", "[pacer]") {
+  const testing::MainThreadScope main;
+  Loop loop(Patched());
+  loop.Attach();
+  for (int i = 0; i < 30; ++i) loop.Step();
+  const PacerTotals& totals = loop.pacer.Totals();
+  // The first present is resolved by its wait: nothing has been displayed
+  // yet, so there are no statistics. From then on they are the source.
+  CHECK(loop.frames[0].pacer.miss_source == MissSource::kLatencyWait);
+  REQUIRE(totals.resolved_by_wait == 1);
+  for (std::size_t i = 1; i < loop.frames.size(); ++i) {
+    CHECK(loop.frames[i].pacer.miss_source == MissSource::kStatistics);
+  }
+  CHECK(totals.resolved_by_statistics + 1 == totals.resolved_presents);
+  // The waits polled first, then blocked.
+  REQUIRE(loop.port.waitable_polls == 30);
+  REQUIRE(loop.port.waitable_waits == 30);
+}
+
+TEST_CASE("A window without statistics: Paced, misses from the latency wait",
+          "[pacer]") {
+  const testing::MainThreadScope main;
+  Loop loop(Windowed());
+  loop.Attach();
+  REQUIRE(loop.pacer.Mode() == PacingMode::kPaced);
+  CHECK(loop.pacer.ModeReason().find("latency wait") != std::string_view::npos);
+  for (int i = 0; i < 60; ++i) loop.Step();
+  const PacerTotals& totals = loop.pacer.Totals();
+  REQUIRE(totals.missed_presents == 0);
+  REQUIRE(totals.resolved_by_wait >= 58);
+  REQUIRE(totals.resolved_by_statistics == 0);
+  for (std::size_t i = 2; i < loop.frames.size(); ++i) {
+    const PacerFrame& frame = loop.frames[i].pacer;
+    CHECK(frame.miss_source == MissSource::kLatencyWait);
+    REQUIRE(frame.resolved == 1);
+    CHECK(frame.wait_blocked);
+    // The fake's wait returns 0.1 ms after the vblank that showed the
+    // present: its target.
+    REQUIRE(std::llabs(frame.wait_phase_ns - 100'000) <= 2);
+  }
+
+  SECTION("presents one refresh late are misses") {
+    loop.port.LatePresents(1000);
+    for (int i = 0; i < 40; ++i) loop.Step();
+    REQUIRE(totals.missed_presents >= 38);
+    REQUIRE(totals.missed_vblanks >= 38);
+  }
+  SECTION("a late frame drains within 2 frames") {
+    loop.Step(30'000'000);
+    const std::size_t late = loop.frames.size() - 1;
+    for (int i = 0; i < 30; ++i) loop.Step();
+    REQUIRE(loop.frames[late].pacer.missed == 1);
+    REQUIRE(loop.frames[late].pacer.late_vblanks >= 4);
+    for (std::size_t i = late + 1; i < loop.frames.size(); ++i) {
+      REQUIRE(loop.frames[i].pacer.missed == 0);
+    }
+  }
 }
 
 TEST_CASE("The sampler decides between Paced and Standard", "[pacer]") {
@@ -525,6 +593,22 @@ TEST_CASE("The --inject-late-frame FRAME:MS test hook", "[pacer]") {
   CHECK_FALSE(Parse({"--inject-late-frame", "400:0"}));
   CHECK_FALSE(Parse({"--inject-late-frame", "400:1001"}));
   CHECK_FALSE(Parse({"--inject-late-frame", "x:30"}));
+}
+
+TEST_CASE("The --inject-device-lost FRAME test hook", "[pacer]") {
+  auto config = Parse({"--inject-device-lost", "100"});
+  if (!kRuntimeTestHooks) {
+    CHECK_FALSE(config);
+    return;
+  }
+  REQUIRE(config);
+  REQUIRE(config->device_lost_at == 100);
+  auto defaults = Parse({});
+  REQUIRE(defaults);
+  REQUIRE(defaults->device_lost_at == 0);
+  CHECK_FALSE(Parse({"--inject-device-lost", "0"}));
+  CHECK_FALSE(Parse({"--inject-device-lost", "x"}));
+  CHECK_FALSE(Parse({"--inject-device-lost"}));
 }
 
 }  // namespace

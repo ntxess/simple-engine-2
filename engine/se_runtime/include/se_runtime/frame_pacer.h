@@ -8,7 +8,9 @@
 // Each iterate:
 //   BeginFrame   the fence of frame N-L (L = FrameLatency()), then the
 //                present statistics turned into hits and misses
-//                (PresentTracker), each frame's result reported to
+//                (PresentTracker) when the presentation path produces
+//                them, each frame's result (with the previous frame's
+//                latency-wait result, below) reported to
 //                FixedStepper::OnPresentResult(missed, modal); returns the
 //                FrameClock. Its period is the sampler's when it agrees with
 //                the display mode within 0.5%, else the mode, else the
@@ -20,11 +22,16 @@
 //                to the port, and the present is registered with its target
 //                vblank for the miss count.
 //   EndFrame     nothing while Modal or when the frame presented nothing.
+//                Every wait on the waitable polls first, then blocks; when
+//                there are no statistics, a blocked wait's return on the
+//                vblank grid gives the hit or miss of the present it
+//                waited for (WaitTracker, ADR-066).
 //                Paced: the waitable, then SDL_DelayNS to the predicted
 //                vblank of the window's output minus B(next) (never spins).
 //                Standard: the waitable when present, then
 //                SDL_WaitForGPUSwapchain; in HalfRate the last composite is
-//                presented again (RepresentLast). VRR: the waitable, then
+//                presented again (RepresentLast) and waited for the same
+//                way. VRR: the waitable, then
 //                the self-paced deadline. HalfRate and the adaptive frame
 //                latency are updated here.
 //
@@ -112,9 +119,19 @@ struct PacerFrame {
   // VRR: the next deadline, and how late the wake was against it.
   std::uint64_t deadline_ns = 0;
   std::int64_t deadline_error_ns = 0;
-  // Present statistics resolved this frame.
+  // Presents resolved this frame (statistics at BeginFrame, the latency
+  // wait at EndFrame), and where the results came from (ADR-066).
   std::uint32_t resolved = 0;
   std::uint32_t missed = 0;
+  // Vblanks the missed ones were late by, summed.
+  std::uint64_t late_vblanks = 0;
+  MissSource miss_source = MissSource::kNone;
+  // Latency waits that told nothing (ready at once, a timeout, no target).
+  std::uint32_t unresolved = 0;
+  // A blocked latency wait resolved this frame's present: its return's
+  // offset from the vblank the present was taken at.
+  bool wait_blocked = false;
+  std::int64_t wait_phase_ns = 0;
   bool stats_reset = false;
   bool presented = false;
   bool null_acquire = false;
@@ -128,12 +145,18 @@ struct PacerTotals {
   std::uint64_t waitable_waits = 0;
   std::uint64_t waitable_timeouts = 0;
   std::uint64_t fence_waits = 0;
+  std::uint64_t fence_wait_ns = 0;
   std::uint64_t fence_pending_frames = 0;
   std::uint64_t swapchain_waits = 0;
   std::uint64_t sleeps = 0;
   std::uint64_t resolved_presents = 0;
   std::uint64_t missed_presents = 0;
   std::uint64_t missed_vblanks = 0;
+  // Presents resolved by each source (ADR-066), and latency waits that
+  // told nothing.
+  std::uint64_t resolved_by_statistics = 0;
+  std::uint64_t resolved_by_wait = 0;
+  std::uint64_t unresolved_waits = 0;
   std::uint64_t stats_resets = 0;
   std::uint64_t represents = 0;
   std::uint64_t mode_changes = 0;
@@ -192,6 +215,10 @@ class FramePacer {
   [[nodiscard]] int FrameLatency() const noexcept { return latency_.Latency(); }
   [[nodiscard]] bool HalfRate() const noexcept { return half_rate_.Active(); }
   [[nodiscard]] const PresentCaps& Caps() const noexcept { return caps_; }
+  // Where this frame's misses come from (ADR-066).
+  [[nodiscard]] MissSource Source() const noexcept {
+    return frame_.miss_source;
+  }
   [[nodiscard]] double DisplayHz() const noexcept { return display_hz_; }
   [[nodiscard]] const PacerFrame& LastFrame() const noexcept { return frame_; }
   [[nodiscard]] const PacerTotals& Totals() const noexcept { return totals_; }
@@ -205,8 +232,12 @@ class FramePacer {
   void SetMode(PacingMode mode, std::string_view reason);
   [[nodiscard]] SamplerSample Sample(const VblankReading& reading) const;
   void RegisterPresent(std::uint64_t target_ns);
-  void UpdatePolicies(const StepPlan& next, const FrameCosts& costs,
-                      bool modal);
+  // The waitable: a poll, then a bounded wait; its result feeds the
+  // WaitTracker when there are no statistics.
+  void WaitWaitable(std::uint64_t& now_ns);
+  void AddWaitResult(const WaitTracker::Result& result);
+  void UpdatePolicies(const StepPlan& next, const FrameCosts& costs, bool modal,
+                      const WaitTracker::Result& carried);
   void Sleep(std::uint64_t now_ns, std::uint64_t wake_ns);
   void LogSecond(std::uint64_t now_ns);
 
@@ -224,6 +255,12 @@ class FramePacer {
   std::uint64_t paced_since_ns_ = 0;
 
   PresentTracker tracker_;
+  WaitTracker wait_tracker_;
+  // The last GetPresentStats returned statistics (the path produces them).
+  bool stats_live_ = false;
+  // The latency waits' results of the previous EndFrame, reported to the
+  // stepper and HalfRate in the next frame.
+  WaitTracker::Result carried_;
   HalfRatePolicy half_rate_;
   LatencyPolicy latency_;
   LatenessTracker lateness_;

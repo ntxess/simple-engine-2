@@ -164,6 +164,18 @@ std::expected<void, Error> ParseLateFrame(std::string_view text,
       "--inject-late-frame: bad value '{}' (expected FRAME:MS)", text));
 }
 
+// "FRAME", FRAME >= 1 (--inject-device-lost).
+std::expected<void, Error> ParseDeviceLost(std::string_view text,
+                                           AppConfig& config) {
+  const auto frame = ParseNumber<std::int64_t>(text);
+  if (!frame || *frame < 1) {
+    return Bad(std::format(
+        "--inject-device-lost: bad value '{}' (expected FRAME >= 1)", text));
+  }
+  config.device_lost_at = *frame;
+  return {};
+}
+
 // "after-ticks:N", N >= 1 (the M4 exit hooks).
 std::expected<std::int64_t, Error> ParseAfterTicks(std::string_view option,
                                                    std::string_view text) {
@@ -361,6 +373,15 @@ std::expected<AppConfig, Error> ParseAppConfig(
       auto value = reader.Value(option);
       if (!value) return std::unexpected(value.error());
       if (auto ok = ParseLateFrame(*value, config); !ok) {
+        return std::unexpected(ok.error());
+      }
+    } else if (option == "--inject-device-lost") {
+      if (auto ok = NeedTestHooks(option); !ok) {
+        return std::unexpected(ok.error());
+      }
+      auto value = reader.Value(option);
+      if (!value) return std::unexpected(value.error());
+      if (auto ok = ParseDeviceLost(*value, config); !ok) {
         return std::unexpected(ok.error());
       }
     } else if (option == "--crash-test" || option == "--dump-test") {

@@ -38,9 +38,22 @@
 // sources (every state's Worlds, the top one at the plan's alpha) through
 // GameSetup::camera, drawn by Renderer2D into the composite and blitted to
 // the swapchain (M7); then FramePacer::EndFrame (Paced, Standard or VRR;
-// M6b). Iterates that do not render still pump the texture uploads. A
-// fault in the render build phase is a fault of the game build: it takes
-// the callbacks' fault path (a dump, the message box, the quit path).
+// M6b). The pacer presents through RenderPresentPort, the adapter over
+// se::present and Renderer2D, and Renderer2D's GPU timings are FrameCosts'
+// g (the M6/M7 integration). Iterates that do not render still pump the
+// texture uploads. A fault in the render build phase is a fault of the
+// game build: it takes the callbacks' fault path (a dump, the message box,
+// the quit path).
+//
+// Device loss (ADR-068): the device status is read at each iterate's start
+// and after a failed submit. On kRemoved the lifecycle enters DeviceLost:
+// the pacer lets go of the port, Renderer2D releases every GPU object
+// through the retire queue, the window is released; then a new device is
+// created on main, claims the window, Renderer2D recreates its objects and
+// re-uploads every texture from the kept payloads (handles stay valid), a
+// new port is attached and the lifecycle returns to Running with a
+// frame-clock reset. Worlds are untouched. A recreation that fails is
+// retried every second, and the fifth failure takes the fault path.
 //
 // Shutdown follows the design's order for the parts that exist: the
 // watchdog's deadline starts when the quit drain ends; remove the event
@@ -89,11 +102,11 @@
 #include "se_render/texture_table.h"
 #include "se_render_core/render_components.h"
 #include "se_runtime/app_config.h"
-#include "se_runtime/clear_present_port.h"
 #include "se_runtime/frame_pacer.h"
 #include "se_runtime/integration.h"
 #include "se_runtime/lifecycle.h"
 #include "se_runtime/quit.h"
+#include "se_runtime/render_present_port.h"
 #include "se_sim/game_module.h"
 
 namespace se {
@@ -223,6 +236,10 @@ class App final : public WindowListener {
     return stepper_;
   }
   [[nodiscard]] const FramePacer& Pacer() const noexcept { return pacer_; }
+  // Device losses recovered so far (ADR-068).
+  [[nodiscard]] std::uint64_t DeviceRecoveries() const noexcept {
+    return device_recoveries_;
+  }
   // The window's display: SDL's refresh, the OS's mode (0: unknown) and
   // the monitor.
   [[nodiscard]] double SdlRefreshHz() const noexcept { return refresh_hz_; }
@@ -272,6 +289,14 @@ class App final : public WindowListener {
   void RunTextureReloads() SE_REQUIRES(g_main);
   void RunReadbacks(const FrameReport& report) SE_REQUIRES(g_main);
   void UpdateTitle(std::uint64_t now_ns) SE_REQUIRES(g_main);
+  // Device loss (ADR-068): the status at frame start (and the flag a
+  // failed submit set); DeviceLost's release; the recreation. An Error is
+  // a recreation that failed for the last time.
+  [[nodiscard]] std::expected<void, Error> CheckDevice() SE_REQUIRES(g_main);
+  void EnterDeviceLost() SE_REQUIRES(g_main);
+  [[nodiscard]] std::expected<void, Error> RecreateDevice() SE_REQUIRES(g_main);
+  // The pacer's view of the vblank sampler (empty: none).
+  [[nodiscard]] VblankReader MakeVblankReader() const;
   // Re-reads the window's monitor and display mode after a display change
   // or a move (always with |force|); a new monitor goes to the vblank
   // sampler and the pacer.
@@ -299,7 +324,7 @@ class App final : public WindowListener {
   ContentPaths paths_;
   std::unique_ptr<Window> window_;
   std::unique_ptr<GpuDevice> gpu_;
-  std::unique_ptr<ClearOnlyPresentPort> present_;
+  std::unique_ptr<RenderPresentPort> present_;
   std::unique_ptr<Renderer2D> renderer_;
   std::vector<TextureTableEntry> textures_;
   std::vector<RenderLayer> layers_;
@@ -318,6 +343,13 @@ class App final : public WindowListener {
   MonitorMode display_mode_;
   MonitorHandle monitor_ = nullptr;
   bool late_frame_injected_ = false;
+  // Device loss (ADR-068).
+  bool device_lost_injected_ = false;
+  bool device_removed_ = false;
+  std::uint64_t device_recoveries_ = 0;
+  std::uint32_t recreate_failures_ = 0;
+  std::uint64_t next_recreate_ns_ = 0;
+  std::uint64_t device_lost_ns_ = 0;
   // Shutdown step 9 left the vblank sampler in its wait (logged after the
   // teardown).
   bool vblank_detached_ = false;

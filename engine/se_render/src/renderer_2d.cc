@@ -29,6 +29,7 @@
 #include "se_render/frame_recorder.h"
 #include "se_render/gpu_device.h"
 #include "se_render/gpu_resources.h"
+#include "se_render/present.h"
 #include "se_render/shaders.h"
 #include "se_render_core/render_list.h"
 #include "se_render_core/sprite_vertices.h"
@@ -543,20 +544,39 @@ void Renderer2D::Blit(FrameRecorder& recorder, SDL_GPUTexture* swapchain,
   recorder.EndRenderPass();
 }
 
-void Renderer2D::KeepFence(SDL_GPUFence* fence) noexcept {
+void Renderer2D::KeepFence(SDL_GPUFence* fence, bool timed) noexcept {
   if (fence == nullptr) return;
   fence_head_ = (fence_head_ + 1) % kFenceRing;
   if (fences_[fence_head_] != nullptr) {
+    // A timing nobody read stays in the patch's ring until it is reused.
     resources_->ReleaseFence(fences_[fence_head_]);
   }
   fences_[fence_head_] = fence;
+  fence_timed_[fence_head_] = timed;
 }
 
 void Renderer2D::ReleaseFences() noexcept {
-  for (SDL_GPUFence*& fence : fences_) {
-    if (fence != nullptr) {
-      resources_->ReleaseFence(std::exchange(fence, nullptr));
+  for (std::size_t i = 0; i < kFenceRing; ++i) {
+    if (fences_[i] != nullptr) {
+      resources_->ReleaseFence(std::exchange(fences_[i], nullptr));
     }
+    fence_timed_[i] = false;
+  }
+}
+
+void Renderer2D::CollectGpuTimes() {
+  // Oldest first, so the newest arrival is the one reported.
+  for (std::size_t back = kFenceRing; back >= 1; --back) {
+    const std::size_t slot =
+        (fence_head_ + kFenceRing - (back - 1)) % kFenceRing;
+    if (!fence_timed_[slot] || fences_[slot] == nullptr) continue;
+    const std::optional<present::GpuTime> time =
+        present::ReadGpuTime(*device_, fences_[slot]);
+    if (!time) continue;
+    fence_timed_[slot] = false;
+    last_.gpu_timed = true;
+    last_.gpu_ns = time->duration_ns;
+    ++totals_.gpu_timings;
   }
 }
 
@@ -571,6 +591,7 @@ void Renderer2D::CountRecord(const FrameRecorder& recorder,
   result.submitted = record.submitted;
   result.presented = record.submitted && recorder.Swapchain() != nullptr;
   if (record.submitted) ++totals_.submitted;
+  result.submit_failed = record.submit_failed;
   if (record.submit_failed) ++totals_.submit_failures;
   if (result.presented) ++totals_.presented;
   last_.presented = result.presented;
@@ -585,6 +606,7 @@ FrameResult Renderer2D::Frame(const FrameRequest& request) {
   last_ = Renderer2DStats{};
   last_.frame = ++totals_.frames;
   const std::uint64_t build_start = NowNs();
+  CollectGpuTimes();
 
   // 1. The build phase.
   std::expected<void, Error> built;
@@ -661,7 +683,7 @@ FrameResult Renderer2D::Frame(const FrameRequest& request) {
 
   // 5. The guard: submit, keep the fence, run the retire queue.
   recorder->Submit();
-  KeepFence(recorder->TakeFence());
+  KeepFence(recorder->TakeFence(), /*timed=*/true);
   CountRecord(*recorder, result);
   last_.record_ns = NowNs() - record_start - last_.swapchain_wait_ns;
   return result;
@@ -688,7 +710,7 @@ FrameResult Renderer2D::RepresentLast() {
     }
   }
   recorder->Submit();
-  KeepFence(recorder->TakeFence());
+  KeepFence(recorder->TakeFence(), /*timed=*/false);
   CountRecord(*recorder, result);
   return result;
 }

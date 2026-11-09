@@ -41,6 +41,9 @@
 //                          quits through the two-phase quit
 //   --inject-late-frame FRAME:MS  iterate FRAME sleeps MS milliseconds after
 //                          its ticks, before it renders (a late frame)
+//   --inject-device-lost FRAME  at the start of iterate FRAME the device
+//                          status reports removed once: DeviceLost, the
+//                          device recreated on main (ADR-068)
 //   --inject-frame-fault STEP[:EVERY[:UNTIL]]  the frame transaction's STEP
 //                          (build, vertices, upload, prepare, copy_pass,
 //                          viewport_pass, acquire, swapchain_pass, submit)
@@ -121,6 +124,7 @@ struct AppConfig {
   std::int64_t dump_test_after_ticks = 0;
   std::int64_t late_frame_at = 0;
   double late_frame_ms = 0.0;
+  std::int64_t device_lost_at = 0;
   FrameFaultConfig frame_fault;
   std::vector<TextureReloadHook> texture_reloads;
   std::vector<ReadbackHook> readbacks;

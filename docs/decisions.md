@@ -1109,7 +1109,9 @@ needs no new SDL API: at frame latency 1, WaitFrameLatency returns when DWM
 latched the previous present, so its return time placed on the vblank
 sampler's grid tells the refresh that took the present. That choice (or
 borderless fullscreen for Paced) is the owner's; docs/gates.md, "Present
-statistics in independent flip".
+statistics in independent flip". The integration took the waitable's return on
+the sampler's grid for windows and keeps statistics where they arrive
+(ADR-066).
 
 **Why.** The spec's statistics are DXGI's; reporting zeros as statistics
 would make every present look undisplayed, and inventing them from DWM's
@@ -1608,3 +1610,145 @@ commit gate instead of a desktop-only test; a separate checker keeps the
 member scan (which needs brace tracking) out of the line-based banned-API
 scan; the drawn-pixel condition makes "matches the legacy image" fail
 when the sprites are missing, which the background alone would hide.
+
+## ADR-066 Paced in a window counts misses from the frame-latency wait on the vblank grid (2026-11-09)
+
+**Decision.** M6a found (ADR-052) that DXGI returns S_OK with every
+DXGI_FRAME_STATISTICS field at zero for a windowed flip-model swapchain
+that DWM composes, and NVIDIA's Windows Vulkan driver has no
+VK_GOOGLE_display_timing. Paced therefore takes its hits and misses from
+the first real source available, per frame:
+
+| Backend | Presentation path | Source |
+|---|---|---|
+| D3D12 | independent flip (borderless fullscreen in front) | present statistics (GetFrameStatistics, GetLastPresentCount) |
+| D3D12 | a window DWM composes | the frame-latency waitable's return on the vblank sampler's grid |
+| Vulkan | VK_GOOGLE_display_timing present | present statistics (ADR-052's derived counts) |
+| Vulkan | present_id and present_wait only (NVIDIA here) | vkWaitForPresentKHR's return (WaitFrameLatency) on the grid |
+| any | no waitable (unpatched), no valid sampler (display asleep, Linux), VRR, `--fixed-frame-dt` | none: Standard, or no miss logic |
+
+- Statistics are preferred: a frame whose GetPresentStats returned
+  statistics uses them (PresentTracker, ADR-057), and the latency waits'
+  results are then dropped, so nothing is counted twice. Otherwise the
+  WaitTracker (pacer_policy.h) resolves the presents.
+- The wait. With frame latency L the wait after a present returns once the
+  present L - 1 before it has left the present queue: DXGI signals the
+  waitable when the compositor (or the display) takes the present at a
+  vblank; vkWaitForPresentKHR returns when it has been presented. Every
+  wait now polls (timeout 0) first and then blocks; only a wait that
+  blocked returned at that moment. The present was taken
+  floor((return - target + slack) / period) vblanks after its target
+  vblank, slack = min(1.5 ms, period / 4), which allows for the sampler's
+  stamps (taken after WaitForVBlank returns) trailing the true vblank; one
+  or more is a miss. The target is the one the pacer planned (Paced:
+  PlanPacedWake's vblank; Standard: the frame start plus one interval),
+  as for the statistics.
+- A wait that was ready at once, timed out, or had no target (no grid) is
+  unresolved, never a hit: a D3D12 waitable that is a semaphore left
+  signalled by skipped waits (Modal frames) would otherwise pass a late
+  present as on time. Presents whose own wait never ran are dropped as
+  unresolved.
+- The offset is taken as 0: the wait returns at the vblank that took the
+  present, not one later. Were it one later in reality, every present
+  would count as late and the test would fail loudly; the opposite
+  assumption could hide a one-refresh-late equilibrium (red team P1). The
+  desktop test prints the measured distribution of the return's offset
+  from its vblank (`wait return after the vblank ... p50, p99`), which
+  settles it on a display that is awake.
+- Paced no longer requires present statistics: ChooseMode asks for the
+  waitable and a valid, agreeing, fixed-refresh sampler; its reason says
+  where the misses come from. PacerFrame carries `miss_source`,
+  `late_vblanks`, `unresolved`, `wait_blocked` and `wait_phase_ns`;
+  PacerTotals counts presents resolved by each source and unresolved
+  waits; the per-second log, the shutdown line and `pacing.paced_misses`
+  print the source. A wait's result is recorded in the frame that waited
+  and reported to FixedStepper::OnPresentResult and HalfRate at the next
+  frame (the statistics' results arrive at a frame start, as before).
+- In Standard's HalfRate the re-presented composite is registered and
+  waited for like the frame's own present (one wait per present).
+- The fullscreen statistics check stays a gates.md entry (ADR-052).
+
+**Why.** A miss is a present shown later than planned; in a composed window
+the only per-present signal of when it was taken is the latency wait, and
+the vblank sampler is the only clock of the window's output. DWM's
+desktop-wide timing would bring back red team P2. Counting unknown waits as
+hits would report numbers the hardware did not give.
+
+## ADR-067 The PresentPort adapter and the GPU timing hooks (2026-11-09)
+
+**Decision.**
+- `RenderPresentPort` (se_runtime/render_present_port.h) is the PresentPort
+  over se::present and Renderer2D, and replaces M6b's ClearOnlyPresentPort
+  (deleted). Caps, latency, waits, statistics, timing, status, handles and
+  the present mode are se::present field by field. Without the SDL patch
+  `tearing` and SetPresentMode come from SDL itself
+  (SDL_WindowSupportsGPUPresentMode, SDL_SetGPUSwapchainParameters), so
+  VRR still runs unpatched as ADR-058 says; every other cap is false.
+- Fences: Renderer2D keeps each submission's fence
+  (FrameRecorder::TakeFence) in its ring of three, so OnFrameSubmitted has
+  nothing to keep (a fence handed in is released) and WaitFrameFence reads
+  Renderer2D::FrameFence(frames_back): a zero timeout polls, a longer one
+  blocks in SDL_WaitForGPUFences (SDL has no timed wait). RepresentLast is
+  Renderer2D::RepresentLast; WaitSwapchain is SDL_WaitForGPUSwapchain.
+- GPU timing: FrameRecorder::Prepare calls present::BeginGpuTiming right
+  after the frame command buffer is acquired, Submit calls EndGpuTiming
+  after ending any pass and before SDL_SubmitGPUCommandBufferAndAcquireFence;
+  at each Frame() start Renderer2D reads, oldest first, the kept frames
+  whose fences have signalled (present::ReadGpuTime consumes the result)
+  and reports the newest in Renderer2DStats (`gpu_timed`, `gpu_ns`).
+  RepresentLast's blit is timed by the patch but not read. The App passes
+  it to CostTracker::AddFrame, so FrameCosts' g_hi and g_95 are measured
+  (unknown, NaN, when nothing arrived: unpatched, or a frame that did not
+  render). Measured here: 0.012 ms (D3D12) and 0.017 ms (Vulkan) for the
+  sandbox frame.
+- FrameCosts' R stays ADR-064's (the iterate minus its ticks minus the
+  recorder's swapchain wait). The pacer's own waits run in EndFrame, after
+  the costs are recorded, so they are never in R.
+- Measured on D3D12: the N-L fence (frame latency 1) is still pending at
+  nearly every frame start in Standard, about 0.28 ms after the waitable
+  returned (164 fence waits a second, 46 ms in all); on Vulkan never.
+
+**Why.** Renderer2D already owns the frame's fences and the composite, so
+the adapter is a thin copy; reading timings at the next frame start needs
+no wait, and timing only the frame's own command buffer keeps g the cost
+of a frame.
+
+## ADR-068 Device loss: DeviceLost, recreation on main, the test hook (2026-11-09)
+
+**Decision.**
+- The App reads present::QueryDeviceStatus at every iterate's start and
+  after a submit that failed (a failed submit only sets a flag for the next
+  start). kRemoved, and nothing else, enters the lifecycle's new
+  DeviceLost condition (dominant after the quit phases): no rendering, no
+  gameplay, a 10 Hz callback rate while recreation keeps failing.
+- Entering it: the pacer detaches from the port (the sampler keeps
+  running), the port goes, Renderer2D::ReleaseGpuObjects moves every GPU
+  object through the retire queue (the GPU idle, the queue run), and the
+  old device releases the window. The old device stays alive until the new
+  one exists, so the renderer never refers to a destroyed device.
+- Recreation, in the same iterate when it succeeds: a new GpuDevice with
+  the same driver claims the window, Renderer2D::RecreateGpuObjects
+  (GpuResources::RecreateAll re-uploads every kept payload and flushes;
+  handles keep their values), a new RenderPresentPort, the pacer attached
+  again (it chooses its mode and frame latency afresh), and the lifecycle
+  back to Running with a frame-clock reset (no catch-up). Worlds are
+  untouched. A recreation that fails is logged and retried every second;
+  the fifth failure takes the callbacks' fault path ("GPU device
+  recreation").
+- `--inject-device-lost FRAME` (test builds): at the start of iterate FRAME
+  the port reports kRemoved once. The desktop tests
+  `render.fault.<driver>.device_lost` run rampage with it at frame 100 on
+  the fault suite's synthetic clock and require DeviceLost, the recovery,
+  exit 0 after 150 presented frames, every GPU object released, and the
+  frame-140 readback to match the suite's no-fault reference readback
+  within the golden tolerance (ADR-065). The reference readback is the
+  "golden" here: the sandbox's committed golden is drawn by render_shot at
+  another size.
+- Measured: recovery takes about 70 ms on D3D12 and 150 ms on Vulkan with
+  the debug layers on.
+
+**Why.** The design enters DeviceLost only on a device-removed status and
+recreates on main with handles kept; keeping the old device until the new
+one is ready makes a failed recreation safe to retry, and recovering at the
+frame start keeps the tick sequence, so the readback can be compared frame
+for frame.

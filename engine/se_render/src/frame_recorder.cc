@@ -25,6 +25,7 @@
 #include "se_render/frame_faults.h"
 #include "se_render/gpu_device.h"
 #include "se_render/gpu_resources.h"
+#include "se_render/present.h"
 #include "src/gpu_assert.h"
 
 namespace se {
@@ -84,8 +85,9 @@ std::expected<FrameRecorder, Error> FrameRecorder::Prepare(
     }
     recorder.commands_ = commands;
     ++device.MutableStats().frames;
-    // INTEGRATION(M6): present::BeginGpuTiming(device, commands), so the
-    // frame's GPU duration feeds g_hi in FrameCosts.
+    // The frame's GPU duration (M6's timestamps; nothing without the SDL
+    // patch), read by Renderer2D once the fence signalled: g in FrameCosts.
+    present::BeginGpuTiming(device, commands);
   }
   if (options.uploads) {
     const bool injected = faults.Fires(FrameStep::kUpload);
@@ -230,9 +232,9 @@ bool FrameRecorder::Submit() noexcept {
   if (upload_commands_ != nullptr) SubmitUploads();
   bool ok = true;
   if (commands_ != nullptr) {
-    // INTEGRATION(M6): present::EndGpuTiming(*device_, commands_) here, and
-    // present::ReadGpuTime(*device_, fence) once this frame's fence has
-    // signalled (Renderer2D's fence ring, at a later frame start).
+    // Outside any pass (both ended above); Renderer2D reads the result
+    // through the frame's fence at a later frame start.
+    present::EndGpuTiming(*device_, commands_);
     const std::uint64_t start = SDL_GetTicksNS();
     // Always submit: cancelling after an acquire is forbidden, and a
     // buffer without an acquired texture submits as an offscreen frame.

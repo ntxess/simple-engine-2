@@ -60,8 +60,7 @@ TEST_CASE("Pacing requests parse and print", "[pacer]") {
   REQUIRE(SwapchainModeName(SwapchainMode::kImmediate) == "immediate");
 }
 
-TEST_CASE("Paced needs the waitable, statistics and an agreeing sampler",
-          "[pacer]") {
+TEST_CASE("Paced needs the waitable and an agreeing sampler", "[pacer]") {
   ModeInputs inputs = PacedInputs();
   CHECK(ChooseMode(inputs).mode == PacingMode::kPaced);
 
@@ -72,9 +71,13 @@ TEST_CASE("Paced needs the waitable, statistics and an agreeing sampler",
     CHECK(choice.mode == PacingMode::kStandard);
     CHECK(choice.reason.find("waitable") != std::string_view::npos);
   }
-  SECTION("no present statistics") {
+  SECTION("no present statistics: misses from the latency wait") {
+    // A window DWM composes on D3D12, or Vulkan without display timing
+    // (ADR-066).
     inputs.caps.present_stats = false;
-    CHECK(ChooseMode(inputs).mode == PacingMode::kStandard);
+    const ModeChoice choice = ChooseMode(inputs);
+    CHECK(choice.mode == PacingMode::kPaced);
+    CHECK(choice.reason.find("latency wait") != std::string_view::npos);
   }
   SECTION("no valid sampler") {
     inputs.sampler.valid = false;
@@ -437,6 +440,152 @@ int RunFor(HalfRatePolicy& policy, double sec, std::uint32_t miss_every,
     if (policy.OnFrame(Frame165(missed, planned, cost95))) return i + 1;
   }
   return -1;
+}
+
+// The latency-wait source (ADR-066) on a 100 Hz grid whose vblank k is at
+// kGrid0 + k * 10 ms: the target of a present and the wait's return.
+constexpr std::uint64_t kGrid0 = 20'000'000'000ULL;
+constexpr std::uint64_t kMs = 1'000'000;
+
+std::uint64_t Vblank(std::uint64_t k) { return kGrid0 + k * 10 * kMs; }
+
+TEST_CASE("Wait misses: a blocked wait at the target's vblank is a hit",
+          "[pacer]") {
+  WaitTracker tracker;
+  for (std::uint64_t k = 1; k <= 10; ++k) {
+    tracker.OnPresentIssued(Vblank(k));
+    // The wait returns 0.4 ms after the vblank that took the present.
+    const auto result =
+        tracker.OnWait(true, true, Vblank(k) + 400'000, 1, kPeriod100);
+    REQUIRE(result.resolved == 1);
+    REQUIRE(result.missed == 0);
+    REQUIRE(result.blocked);
+    REQUIRE(result.phase_ns == 400'000);
+  }
+  REQUIRE(tracker.Pending() == 0);
+  REQUIRE(MissSourceName(MissSource::kLatencyWait).find("wait") !=
+          std::string_view::npos);
+}
+
+TEST_CASE("Wait misses: a return one vblank late is a miss", "[pacer]") {
+  WaitTracker tracker;
+  tracker.OnPresentIssued(Vblank(1));
+  auto result = tracker.OnWait(true, true, Vblank(2) + 300'000, 1, kPeriod100);
+  REQUIRE(result.resolved == 1);
+  REQUIRE(result.missed == 1);
+  REQUIRE(result.late_refreshes == 1);
+  REQUIRE(result.phase_ns == 300'000);
+  // Three vblanks late (a 30 ms frame), then on time again.
+  tracker.OnPresentIssued(Vblank(3));
+  result = tracker.OnWait(true, true, Vblank(6) + 200'000, 1, kPeriod100);
+  REQUIRE(result.missed == 1);
+  REQUIRE(result.late_refreshes == 3);
+  tracker.OnPresentIssued(Vblank(7));
+  result = tracker.OnWait(true, true, Vblank(7) + 200'000, 1, kPeriod100);
+  REQUIRE(result.missed == 0);
+}
+
+TEST_CASE(
+    "Wait misses: every present one late (the one-refresh-late "
+    "equilibrium) counts every one",
+    "[pacer]") {
+  WaitTracker tracker;
+  std::uint32_t missed = 0;
+  for (std::uint64_t k = 1; k <= 20; ++k) {
+    tracker.OnPresentIssued(Vblank(k));
+    missed += tracker.OnWait(true, true, Vblank(k + 1) + 500'000, 1, kPeriod100)
+                  .missed;
+  }
+  REQUIRE(missed == 20);
+}
+
+TEST_CASE("Wait misses: the sampler's stamp may trail the return", "[pacer]") {
+  WaitTracker tracker;
+  // The target is the sampler's stamp, 1 ms after the true vblank; the
+  // wait returns 0.3 ms after the true vblank: still that vblank.
+  tracker.OnPresentIssued(Vblank(1) + kMs);
+  auto result = tracker.OnWait(true, true, Vblank(1) + 300'000, 1, kPeriod100);
+  REQUIRE(result.resolved == 1);
+  REQUIRE(result.missed == 0);
+  REQUIRE(result.phase_ns == -700'000);
+  // With the same stamp lag, a present taken one vblank later is a miss.
+  tracker.OnPresentIssued(Vblank(2) + kMs);
+  result = tracker.OnWait(true, true, Vblank(3) + 300'000, 1, kPeriod100);
+  REQUIRE(result.missed == 1);
+  // A return just before the next stamp is after the next true vblank.
+  tracker.OnPresentIssued(Vblank(4));
+  result = tracker.OnWait(true, true, Vblank(5) - 100'000, 1, kPeriod100);
+  REQUIRE(result.missed == 1);
+}
+
+TEST_CASE("Wait misses: a wait that tells nothing never counts as a hit",
+          "[pacer]") {
+  WaitTracker tracker;
+  SECTION("ready at once") {
+    tracker.OnPresentIssued(Vblank(1));
+    const auto result =
+        tracker.OnWait(true, false, Vblank(1) - kMs, 1, kPeriod100);
+    REQUIRE(result.resolved == 0);
+    REQUIRE(result.unresolved == 1);
+  }
+  SECTION("a timeout") {
+    tracker.OnPresentIssued(Vblank(1));
+    const auto result = tracker.OnWait(false, true, Vblank(6), 1, kPeriod100);
+    REQUIRE(result.resolved == 0);
+    REQUIRE(result.unresolved == 1);
+  }
+  SECTION("no target (no vblank grid)") {
+    tracker.OnPresentIssued(0);
+    const auto result =
+        tracker.OnWait(true, true, Vblank(1) + 400'000, 1, kPeriod100);
+    REQUIRE(result.resolved == 0);
+    REQUIRE(result.unresolved == 1);
+  }
+  SECTION("no present to wait for") {
+    const auto result =
+        tracker.OnWait(true, true, Vblank(1) + 400'000, 1, kPeriod100);
+    REQUIRE(result.resolved == 0);
+    REQUIRE(result.unresolved == 0);
+  }
+  REQUIRE(tracker.Pending() == 0);
+}
+
+TEST_CASE("Wait misses: latency 2 reports the present before the newest",
+          "[pacer]") {
+  WaitTracker tracker;
+  tracker.OnPresentIssued(Vblank(1));
+  // One present in the queue: the latency-2 wait is for none of them.
+  auto result = tracker.OnWait(true, true, Vblank(0) + kMs, 2, kPeriod100);
+  REQUIRE(result.resolved == 0);
+  REQUIRE(tracker.Pending() == 1);
+  tracker.OnPresentIssued(Vblank(2));
+  // Present 1 was taken at vblank 2: one late.
+  result = tracker.OnWait(true, true, Vblank(2) + 400'000, 2, kPeriod100);
+  REQUIRE(result.resolved == 1);
+  REQUIRE(result.missed == 1);
+  REQUIRE(tracker.Pending() == 1);
+  tracker.OnPresentIssued(Vblank(3));
+  result = tracker.OnWait(true, true, Vblank(2) + 500'000, 2, kPeriod100);
+  REQUIRE(result.missed == 0);
+}
+
+TEST_CASE("Wait misses: presents without a wait of their own are dropped",
+          "[pacer]") {
+  WaitTracker tracker;
+  // Two Modal frames presented without waiting, then a frame that waits.
+  tracker.OnPresentIssued(Vblank(1));
+  tracker.OnPresentIssued(Vblank(2));
+  tracker.OnPresentIssued(Vblank(3));
+  const auto result =
+      tracker.OnWait(true, true, Vblank(3) + 400'000, 1, kPeriod100);
+  REQUIRE(result.unresolved == 2);
+  REQUIRE(result.resolved == 1);
+  REQUIRE(result.missed == 0);
+  // A full queue keeps the newest presents.
+  for (std::uint64_t k = 10; k < 10 + 2 * WaitTracker::kCapacity; ++k) {
+    tracker.OnPresentIssued(Vblank(k));
+  }
+  REQUIRE(tracker.Pending() == WaitTracker::kCapacity);
 }
 
 TEST_CASE("HalfRate: entry by misses over 2 s, exit after 4 s of margin",

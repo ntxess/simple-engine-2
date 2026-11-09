@@ -10,8 +10,10 @@
 // the previous present (the flip queue); LatePresents(n) makes the next n
 // presents show one refresh late, as DXGI flip model can (red team P1).
 // GetPresentStats names the newest present shown by now and the newest
-// vblank as the sync pair. The waitable and the swapchain wait return when
-// the newest present has been shown (frame latency 1).
+// vblank as the sync pair (with caps.present_stats; a composed window has
+// none). The waitable and the swapchain wait return when the newest
+// present has been shown (frame latency 1), wake_latency_ns after its
+// vblank; a zero-timeout waitable call polls.
 
 #ifndef TESTS_SUPPORT_FAKE_PRESENT_PORT_H_
 #define TESTS_SUPPORT_FAKE_PRESENT_PORT_H_
@@ -102,6 +104,7 @@ class FakePresentPort final : public PresentPort {
   std::vector<int> latencies;
   std::vector<SwapchainMode> present_modes;
   std::uint32_t waitable_waits = 0;
+  std::uint32_t waitable_polls = 0;
   std::uint32_t swapchain_waits = 0;
   std::uint32_t represents = 0;
   std::uint32_t fence_polls = 0;
@@ -114,6 +117,7 @@ class FakePresentPort final : public PresentPort {
     std::uint64_t refresh = 0;
   };
   void WaitForNewestShown();
+  [[nodiscard]] bool NewestShown() const;
 
   FakePacerClock* clock_;
   double period_ns_;

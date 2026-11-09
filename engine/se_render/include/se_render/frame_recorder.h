@@ -23,13 +23,13 @@
 //      (TakeFence) and runs the retire queue.
 //
 // Steps 2 to 5 are noexcept: buffers are pre-sized in step 1 and only
-// engine code runs. M5's present mode and swapchain wait are unchanged:
-// VSYNC, and SDL_WaitForGPUSwapchain before the acquire; the FramePacer
-// (M6) replaces the wait at integration. The M6 hooks are marked
-// INTEGRATION(M6) in frame_recorder.cc: BeginGpuTiming after the frame
-// command buffer is acquired, EndGpuTiming before its submit, ReadGpuTime
-// when its fence has signalled. Every step consults FrameFaults (the
-// --inject-frame-fault test hook).
+// engine code runs. The swapchain is acquired after SDL_WaitForGPUSwapchain,
+// which returns at once after the FramePacer's own waits (M6). The frame
+// command buffer is timed with se::present (BeginGpuTiming after it is
+// acquired, EndGpuTiming right before its submit, outside any pass);
+// Renderer2D reads the duration once the fence has signalled (M6/M7
+// integration). Every step consults FrameFaults (the --inject-frame-fault
+// test hook).
 
 #ifndef SE_RENDER_FRAME_RECORDER_H_
 #define SE_RENDER_FRAME_RECORDER_H_

@@ -4,7 +4,8 @@ frames").
 
   fault_test.py --rampage EXE --render-shot EXE --driver NAME --work DIR
                 --step none|build|vertices|upload|prepare|copy_pass|
-                       viewport_pass|acquire|swapchain_pass|submit
+                       viewport_pass|acquire|swapchain_pass|submit|
+                       device_lost
 
 Every run uses a synthetic 120 Hz frame clock (--fixed-frame-dt), so frame
 140 is the same tick in every run, reloads the player texture at frame 10
@@ -19,6 +20,11 @@ With --inject-frame-fault STEP:1:100 (frames 1 to 100):
     (exit 0), and its frame-140 readback, 40 frames after the fault
     stopped, matches the reference within the golden tolerance
     (render_shot --compare).
+With --inject-device-lost 100 (step device_lost; the M6/M7 integration,
+ADR-068) the device status reports removed once at the start of frame
+100: the app enters DeviceLost, releases every GPU object, recreates the
+device on main, re-uploads its textures and runs on (exit 0); its frame-140
+readback matches the reference the same way.
 Every run must release every GPU object ("0 alive"), never trip an
 SE_ASSERT (the frame guard asserts it never cancels after an acquire) and,
 under ASan, report nothing. A driver the machine lacks skips (exit 77).
@@ -36,6 +42,7 @@ FRAMES = 150
 READBACK_FRAME = 140
 FAULT_UNTIL = 100
 BUILD_STEPS = {"build", "vertices"}
+DEVICE_LOST_FRAME = 100
 SKIP = 77
 
 
@@ -75,7 +82,9 @@ def main():
                "--pref-dir", str(work / "pref"), "--fixed-frame-dt", "8.3333",
                "--frames", str(FRAMES), "--reload-texture", "player@10",
                "--readback", f"{READBACK_FRAME}:{readback}"]
-    if args.step != "none":
+    if args.step == "device_lost":
+        command += ["--inject-device-lost", str(DEVICE_LOST_FRAME)]
+    elif args.step != "none":
         command += ["--inject-frame-fault", f"{args.step}:1:{FAULT_UNTIL}"]
     status, output = run(command)
 
@@ -108,6 +117,13 @@ def main():
                "the app did not keep running to the end")
         expect(rf"readback of frame {READBACK_FRAME} \(tick \d+",
                "no readback")
+        if args.step == "device_lost":
+            expect(rf"removed \(iterate {DEVICE_LOST_FRAME}\): DeviceLost",
+                   "the injected loss did not enter DeviceLost")
+            expect(r"device recovered: '[a-z0-9]+' recreated",
+                   "the device was not recreated")
+            expect(r"device losses recovered: 1",
+                   "no recovery in the shutdown summary")
         if args.step != "none":
             match = re.search(r"renderer: (\d+) frames", output)
             if not match:

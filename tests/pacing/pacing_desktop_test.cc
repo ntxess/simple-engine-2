@@ -6,7 +6,8 @@
 // SetCursorPos. Timing-sensitive tests report the foreign input
 // (GetLastInputInfo) and CPU load they saw and fail only when there was
 // none. Tests that need the SDL presentation patch (M6a) skip with the
-// reason until the integration.
+// reason in an unpatched build, and the Paced tests skip when the display
+// is asleep (no vblank sampler, so no Paced; ADR-056).
 //
 //   sampler_measures_window_monitor  the sampler's period matches the
 //                      window's monitor within 0.5%
@@ -17,8 +18,11 @@
 //                      sampler thread running
 //   vrr_deadline       --pacing vrr: frame starts within 0.5 ms p99 of the
 //                      120 Hz deadline over 10 s
-//   paced_misses       Paced misses under 1% of vblanks over 20 s (M6a)
-//   late_frame_drains  an injected late frame drains within 2 frames (M6a)
+//   paced_misses       Paced misses under 1% of vblanks over 20 s, on D3D12
+//                      and on Vulkan; prints where the misses came from
+//                      (present statistics, or the frame-latency wait on
+//                      the vblank grid in a composed window: ADR-066)
+//   late_frame_drains  an injected late frame drains within 2 frames
 
 #include <SDL3/SDL_events.h>
 #include <SDL3/SDL_init.h>
@@ -36,6 +40,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -512,85 +517,159 @@ struct PacedRun {
   PacingMode mode = PacingMode::kStandard;
   std::string reason;
   PresentCaps caps;
+  std::string driver;
   // Every frame after the first second, and the iterate of each.
   std::vector<PacerFrame> frames;
   std::vector<std::uint64_t> iterates;
   double vblank_period_sec = 0.0;
+  double display_hz = 0.0;
 };
 
-// Runs rampage with --pacing paced for |seconds| after a 1 s warm-up.
-PacedRun RunPaced(double seconds, std::vector<std::string> args) {
+// Runs rampage with --pacing paced on |driver| for |seconds| after a 1 s
+// warm-up (the sampler measures and the pacer promotes to Paced in it).
+PacedRun RunPaced(std::string_view driver, double seconds,
+                  std::vector<std::string> args) {
   PacedRun run;
+  run.driver = std::string(driver);
   std::uint64_t start_ns = 0;
+  bool paced_seen = false;
   GameSetup setup = RampageSetup();
   setup.on_frame = [&](App& app, const FrameReport& report) {
     AssertMainThread();
     run.mode = app.Pacer().Mode();
     run.reason = std::string(app.Pacer().ModeReason());
     run.caps = app.Pacer().Caps();
-    if (!run.caps.frame_latency_waitable || !run.caps.present_stats) {
+    run.display_hz = app.Pacer().DisplayHz();
+    if (!run.caps.frame_latency_waitable) {
       app.RequestQuit();
       return;
     }
     if (start_ns == 0) start_ns = report.now_ns;
     const double elapsed = static_cast<double>(report.now_ns - start_ns) * 1e-9;
+    if (run.mode == PacingMode::kPaced) paced_seen = true;
+    // No Paced within 3 s: the sampler has no valid reading (the test
+    // skips with the pacer's reason).
+    if (elapsed >= 3.0 && !paced_seen) {
+      if (!app.Quit().Pending()) app.RequestQuit();
+      return;
+    }
     if (elapsed < 1.0) return;
     run.frames.push_back(report.pacer);
     run.iterates.push_back(report.iterate);
     run.vblank_period_sec = report.pacer.vblank_period_sec;
     if (elapsed >= 1.0 + seconds && !app.Quit().Pending()) app.RequestQuit();
   };
-  args.insert(args.end(),
-              {"--content-root", SE_SOURCE_DIR, "--pacing", "paced"});
+  args.insert(args.end(), {"--content-root", SE_SOURCE_DIR, "--pacing", "paced",
+                           "--gpu-driver", run.driver});
   REQUIRE(RunTestApp(std::move(setup), std::move(args)) == 0);
   return run;
 }
 
-void SkipWithoutPatch(const PacedRun& run) {
-  if (!run.caps.frame_latency_waitable || !run.caps.present_stats) {
+// Paced needs the patch's waitable, and a vblank sampler measuring the
+// window's output (none while the display sleeps: WaitForVBlank returns at
+// once, ADR-056).
+void SkipWithoutPaced(const PacedRun& run) {
+  if (!run.caps.frame_latency_waitable) {
     SKIP(
         "needs the SDL presentation patch (M6a): no frame-latency waitable "
-        "or present statistics in this build; runs after the integration");
+        "on "
+        << run.driver << " in this build");
+  }
+  if (run.mode != PacingMode::kPaced) {
+    SKIP("Paced did not run on " << run.driver << ": " << run.reason
+                                 << " (the display may be asleep)");
   }
 }
 
-TEST_CASE("paced_misses", "[desktop][pacing]") {
+// Where the Paced frames' results came from, and the latency wait's
+// phase: how long after the vblank that took a present the wait returned.
+std::string DescribeSources(const PacedRun& run) {
+  std::uint64_t by_statistics = 0;
+  std::uint64_t by_wait = 0;
+  std::uint64_t unresolved = 0;
+  std::vector<double> phases_ms;
+  for (const PacerFrame& frame : run.frames) {
+    if (frame.mode != PacingMode::kPaced) continue;
+    if (frame.miss_source == MissSource::kStatistics) {
+      by_statistics += frame.resolved;
+    } else if (frame.miss_source == MissSource::kLatencyWait) {
+      by_wait += frame.resolved;
+    }
+    unresolved += frame.unresolved;
+    if (frame.wait_blocked) {
+      phases_ms.push_back(static_cast<double>(frame.wait_phase_ns) * 1e-6);
+    }
+  }
+  std::sort(phases_ms.begin(), phases_ms.end());
+  const auto at = [&](double p) {
+    if (phases_ms.empty()) return 0.0;
+    const auto rank = static_cast<std::size_t>(
+        std::ceil(p * static_cast<double>(phases_ms.size())));
+    return phases_ms[std::clamp<std::size_t>(rank, 1, phases_ms.size()) - 1];
+  };
+  return std::format(
+      "misses from {}: {} presents by present statistics, {} by the "
+      "frame-latency wait on the vblank grid, {} waits unresolved; wait "
+      "return after the vblank min {:.3f} ms, p50 {:.3f} ms, p99 {:.3f} ms, "
+      "max {:.3f} ms",
+      by_statistics > 0 && by_wait == 0
+          ? "present statistics"
+          : (by_wait > 0 && by_statistics == 0
+                 ? "the frame-latency wait on the vblank grid"
+                 : "both"),
+      by_statistics, by_wait, unresolved, at(0.0), at(0.5), at(0.99), at(1.0));
+}
+
+void PacedMisses(std::string_view driver) {
   const Desktop desktop;
-  const PacedRun run = RunPaced(20.0, {});
-  SkipWithoutPatch(run);
-  Print("pacing: " + std::string(PacingModeName(run.mode)) + " (" + run.reason +
-        ")");
-  REQUIRE(run.mode == PacingMode::kPaced);
+  const PacedRun run = RunPaced(driver, 20.0, {});
+  SkipWithoutPaced(run);
+  Print("pacing on " + run.driver + ": " +
+        std::string(PacingModeName(run.mode)) + " (" + run.reason + ")");
+  std::uint64_t paced_frames = 0;
   std::uint64_t resolved = 0;
   std::uint64_t missed = 0;
+  std::uint64_t late_vblanks = 0;
   for (const PacerFrame& frame : run.frames) {
+    if (frame.mode != PacingMode::kPaced) continue;
+    ++paced_frames;
     resolved += frame.resolved;
     missed += frame.missed;
+    late_vblanks += frame.late_vblanks;
   }
   Print(std::format(
-      "Paced at {:.3f} Hz: {} frames counted, {} presents resolved, {} "
-      "missed ({:.2f}%); {}",
-      1.0 / run.vblank_period_sec, run.frames.size(), resolved, missed,
+      "Paced at {:.3f} Hz (display mode {:.3f} Hz) on {}: {} frames counted "
+      "({} Paced), {} presents resolved, {} missed ({:.2f}%, {} vblanks "
+      "late); {}; {}",
+      1.0 / run.vblank_period_sec, run.display_hz, run.driver,
+      run.frames.size(), paced_frames, resolved, missed,
       resolved > 0
           ? 100.0 * static_cast<double>(missed) / static_cast<double>(resolved)
           : 0.0,
-      desktop.Report()));
-  REQUIRE(resolved > 0);
+      late_vblanks, DescribeSources(run), desktop.Report()));
+  // Paced the whole time after the warm-up, and most presents resolved.
+  CHECK(paced_frames * 10 >= run.frames.size() * 9);
+  REQUIRE(resolved * 10 >= paced_frames * 8);
   const bool under = missed * 100 < resolved;
-  if (!under && desktop.ForeignInput()) {
-    WARN("misses above 1% with foreign input: " << desktop.Report());
+  if (!under && desktop.Busy()) {
+    WARN("misses above 1% with a busy desktop: " << desktop.Report());
   } else {
     CHECK(under);
   }
 }
 
+TEST_CASE("paced_misses", "[desktop][pacing]") { PacedMisses("direct3d12"); }
+
+TEST_CASE("paced_misses_vulkan", "[desktop][pacing]") { PacedMisses("vulkan"); }
+
 TEST_CASE("late_frame_drains", "[desktop][pacing]") {
   const Desktop desktop;
   constexpr std::uint64_t kLateAt = 400;
   const PacedRun run =
-      RunPaced(3.0, {"--inject-late-frame", std::format("{}:30", kLateAt)});
-  SkipWithoutPatch(run);
-  REQUIRE(run.mode == PacingMode::kPaced);
+      RunPaced("direct3d12", 3.0,
+               {"--inject-late-frame", std::format("{}:30", kLateAt)});
+  SkipWithoutPaced(run);
+  Print(DescribeSources(run));
   // The frames from the late one on: misses in at most 2 consecutive
   // frames, then none.
   int run_length = 0;

@@ -128,6 +128,9 @@ struct FrameResult {
   bool submitted = false;
   bool presented = false;
   bool null_acquire = false;
+  // SDL_SubmitGPUCommandBufferAndAcquireFence failed (the App then checks
+  // the device status).
+  bool submit_failed = false;
   // The build phase threw; nothing was recorded.
   std::optional<Error> build_fault;
   // The frame was skipped for another reason (the command buffer, or a
@@ -152,6 +155,10 @@ struct Renderer2DStats {
   // Inside the swapchain wait and acquire (not CPU work).
   std::uint64_t swapchain_wait_ns = 0;
   std::uint64_t submit_ns = 0;
+  // The GPU duration of the newest earlier frame whose timing arrived at
+  // this frame's start (se::present timestamps; FrameCosts' g).
+  bool gpu_timed = false;
+  std::uint64_t gpu_ns = 0;
 };
 
 struct Renderer2DTotals {
@@ -170,6 +177,8 @@ struct Renderer2DTotals {
   std::uint64_t upload_command_failures = 0;
   std::uint64_t vertex_growths = 0;
   std::uint64_t readbacks = 0;
+  // Frames whose GPU duration was read.
+  std::uint64_t gpu_timings = 0;
 };
 
 struct Renderer2DConfig {
@@ -230,7 +239,7 @@ class Renderer2D {
       const ViewportTarget* viewport = nullptr) SE_REQUIRES(g_main);
 
   // The fence of the frame submitted |frames_back| frames ago (1: the
-  // last), or null. INTEGRATION(M6): the pacer's N-L wait reads it.
+  // last), or null: the pacer's N-L wait (RenderPresentPort).
   [[nodiscard]] SDL_GPUFence* FrameFence(
       std::size_t frames_back) const noexcept;
 
@@ -290,8 +299,13 @@ class Renderer2D {
       SE_REQUIRES(g_main);
   void Blit(FrameRecorder& recorder, SDL_GPUTexture* swapchain,
             const ClearColor& clear) noexcept SE_REQUIRES(g_main);
-  void KeepFence(SDL_GPUFence* fence) noexcept SE_REQUIRES(g_main);
+  // |timed|: a Frame() submission, whose GPU duration CollectGpuTimes
+  // reads (not RepresentLast's blit).
+  void KeepFence(SDL_GPUFence* fence, bool timed) noexcept SE_REQUIRES(g_main);
   void ReleaseFences() noexcept SE_REQUIRES(g_main);
+  // Frame start: the GPU durations of the kept frames whose fences have
+  // signalled; the newest goes into last_.
+  void CollectGpuTimes() SE_REQUIRES(g_main);
   void CountRecord(const FrameRecorder& recorder, FrameResult& result) noexcept;
 
   GpuDevice* device_;
@@ -327,6 +341,8 @@ class Renderer2D {
   std::uint64_t planned_upload_bytes_ = 0;
 
   std::array<SDL_GPUFence*, kFenceRing> fences_{};
+  // The kept frame's GPU duration has yet to be read.
+  std::array<bool, kFenceRing> fence_timed_{};
   std::size_t fence_head_ = 0;
 
   Renderer2DStats last_;

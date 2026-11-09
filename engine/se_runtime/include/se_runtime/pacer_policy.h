@@ -18,6 +18,9 @@
 //                   120 Hz panel).
 //   PresentTracker  hits and misses from present statistics: a present
 //                   shown after its target refresh is a miss.
+//   WaitTracker     hits and misses from the frame-latency wait on the
+//                   vblank grid, where the presentation path gives no
+//                   statistics (a composed window; ADR-066).
 //   HalfRatePolicy  HalfRate above 100 Hz with hysteresis.
 //   LatencyPolicy   frame latency 1, or 2 when CPU and GPU each fit in the
 //                   period but their sum does not.
@@ -93,10 +96,11 @@ struct ModeChoice {
   std::string_view reason;
 };
 
-// Paced when requested or the platform default, and the waitable, present
-// statistics and a valid fixed-refresh sampler that agrees with the
-// display mode all exist; VRR when requested and tearing is supported;
-// Standard otherwise.
+// Paced when requested or the platform default, and the waitable and a
+// valid fixed-refresh sampler that agrees with the display mode exist (its
+// misses come from present statistics when the presentation path produces
+// them, else from the latency wait on the sampler's grid: ADR-066); VRR
+// when requested and tearing is supported; Standard otherwise.
 [[nodiscard]] ModeChoice ChooseMode(const ModeInputs& inputs) noexcept;
 
 enum class PeriodSource : std::uint8_t {
@@ -235,6 +239,68 @@ class PresentTracker {
   PresentStatistics last_;
   std::uint64_t dropped_ = 0;
   std::uint64_t resets_ = 0;
+};
+
+// Where a frame's hits and misses come from (ADR-066): present statistics
+// when the presentation path produces them (D3D12 in independent flip,
+// Vulkan with VK_GOOGLE_display_timing); else the frame-latency wait on the
+// vblank sampler's grid (a window DWM composes: D3D12's waitable, Vulkan's
+// present_wait); else nothing (no waitable, no sampler, VRR, a synthetic
+// clock).
+enum class MissSource : std::uint8_t { kNone, kStatistics, kLatencyWait };
+[[nodiscard]] std::string_view MissSourceName(MissSource source) noexcept;
+
+// Hits and misses from the frame-latency wait (ADR-066). With frame
+// latency L, the wait after a present returns once the present L - 1
+// before it has been taken from the present queue: DXGI signals the
+// waitable when the compositor (or, in independent flip, the display)
+// takes the present at a vblank, and vkWaitForPresentKHR returns when the
+// present has been presented. Each issued present is registered with its
+// target vblank. A wait that blocked (it was not ready when it started)
+// returned at the vblank its present was taken at, plus the wake-up: the
+// present was taken floor((ready - target + slack) / period) vblanks after
+// its target, where the slack (kEarlySlackSec, at most a quarter period)
+// allows for the sampler's stamps trailing the true vblanks; one or more
+// is a miss. A wait that was ready at once, timed out or had no target
+// tells nothing: that present is unresolved, never a hit. Presents whose
+// wait did not run (Modal frames) are dropped as unresolved. Misses are
+// counted against targets and vblanks, never frame starts.
+class WaitTracker {
+ public:
+  static constexpr std::size_t kCapacity = 8;
+  static constexpr double kEarlySlackSec = 1.5e-3;
+
+  struct Result {
+    std::uint32_t resolved = 0;
+    std::uint32_t missed = 0;
+    // Vblanks the late ones were taken after their targets, summed.
+    std::uint64_t late_refreshes = 0;
+    std::uint32_t unresolved = 0;
+    // A blocked wait resolved a present: the return's offset from the
+    // vblank the present was taken at (diagnostics: the wake-up after it).
+    bool blocked = false;
+    std::int64_t phase_ns = 0;
+  };
+
+  // A present was issued for the vblank |target_ns| (0: unknown). A full
+  // queue drops its oldest entry.
+  void OnPresentIssued(std::uint64_t target_ns) noexcept;
+  // The frame-latency wait after the newest present returned at
+  // |ready_ns|. |ready|: it returned ready (not a timeout); |blocked|: it
+  // was not ready when it started; |latency|: the frame latency it waited
+  // for; |period_ns|: the vblank period.
+  Result OnWait(bool ready, bool blocked, std::uint64_t ready_ns, int latency,
+                double period_ns) noexcept;
+  void Reset() noexcept;
+
+  [[nodiscard]] std::size_t Pending() const noexcept { return size_; }
+
+ private:
+  void PopFront() noexcept;
+
+  std::array<std::uint64_t, kCapacity> targets_{};
+  std::size_t head_ = 0;
+  std::size_t size_ = 0;
 };
 
 // HalfRate above 100 Hz, with hysteresis (docs/milestone-specs.md M6b):

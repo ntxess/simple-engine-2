@@ -102,14 +102,22 @@ void FakePresentPort::WaitForNewestShown() {
   clock_->now_ns = std::max(clock_->now_ns, shown);
 }
 
+bool FakePresentPort::NewestShown() const {
+  return presents_.empty() ||
+         VblankAt(presents_.back().refresh) + wake_latency_ns <= clock_->now_ns;
+}
+
 bool FakePresentPort::SetFrameLatency(int frames) {
   latencies.push_back(frames);
   return caps.frame_latency_waitable;
 }
 
-PresentWait FakePresentPort::WaitFrameLatency(
-    [[maybe_unused]] std::uint64_t timeout_ns) {
+PresentWait FakePresentPort::WaitFrameLatency(std::uint64_t timeout_ns) {
   if (!caps.frame_latency_waitable) return PresentWait::kUnsupported;
+  if (timeout_ns == 0) {
+    ++waitable_polls;
+    return NewestShown() ? PresentWait::kReady : PresentWait::kTimeout;
+  }
   ++waitable_waits;
   WaitForNewestShown();
   return PresentWait::kReady;

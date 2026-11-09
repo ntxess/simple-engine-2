@@ -101,8 +101,9 @@ if(TARGET rampage AND NOT CMAKE_BUILD_TYPE STREQUAL "Release")
     set_tests_properties(render.fault.${_se_dir}.reference PROPERTIES
       LABELS desktop TIMEOUT 120 SKIP_RETURN_CODE 77
       FIXTURES_SETUP render_fault_reference_${_se_dir})
+    # device_lost: --inject-device-lost (the M6/M7 integration, ADR-068).
     foreach(_se_step build vertices upload prepare copy_pass viewport_pass
-            acquire swapchain_pass submit)
+            acquire swapchain_pass submit device_lost)
       add_test(NAME render.fault.${_se_dir}.${_se_step}
         COMMAND ${_se_fault_args} --step ${_se_step})
       set_tests_properties(render.fault.${_se_dir}.${_se_step} PROPERTIES

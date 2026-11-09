@@ -6,9 +6,10 @@
 // fence wait, RepresentLast for HalfRate's Standard re-present,
 // WaitSwapchain for Standard's SDL_WaitForGPUSwapchain and OnFrameSubmitted,
 // which hands the port each frame's fence. The pacer never includes
-// present.h: until the integration writes the adapter over se::present and
-// M7's FrameRecorder, the runtime uses ClearOnlyPresentPort
-// (clear_present_port.h), and the unit tests a fake (tests/support).
+// present.h: the runtime presents through RenderPresentPort
+// (render_present_port.h, the integration's adapter over se::present and
+// M7's Renderer2D; ADR-067), and the unit tests through a fake
+// (tests/support).
 //
 // Every operation runs on the main thread. A port reports what it cannot
 // do through QueryCaps() and its return values ("unsupported" is never an

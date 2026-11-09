@@ -102,9 +102,6 @@ ModeChoice ChooseMode(const ModeInputs& inputs) noexcept {
     return {PacingMode::kStandard,
             "no frame-latency waitable (SDL without the presentation patch)"};
   }
-  if (!inputs.caps.present_stats) {
-    return {PacingMode::kStandard, "no present statistics"};
-  }
   if (!inputs.sampler.valid) {
     return {PacingMode::kStandard,
             "no valid vblank sampler for the window's output"};
@@ -121,9 +118,14 @@ ModeChoice ChooseMode(const ModeInputs& inputs) noexcept {
     return {PacingMode::kStandard,
             "the vblank intervals vary (not a fixed-refresh display)"};
   }
+  if (inputs.caps.present_stats) {
+    return {PacingMode::kPaced,
+            "waitable and the vblank sampler agree with the display mode; "
+            "misses from present statistics, else the latency wait"};
+  }
   return {PacingMode::kPaced,
-          "waitable, present statistics and the vblank sampler agree with "
-          "the display mode"};
+          "waitable and the vblank sampler agree with the display mode; "
+          "misses from the latency wait"};
 }
 
 std::string_view PeriodSourceName(PeriodSource source) noexcept {
@@ -321,6 +323,67 @@ PresentTracker::Result PresentTracker::OnStats(const PresentStatistics& stats,
   }
   last_ = stats;
   have_last_ = true;
+  return result;
+}
+
+std::string_view MissSourceName(MissSource source) noexcept {
+  switch (source) {
+    case MissSource::kNone:
+      return "none";
+    case MissSource::kStatistics:
+      return "present statistics";
+    case MissSource::kLatencyWait:
+      return "the frame-latency wait on the vblank grid";
+  }
+  return "?";
+}
+
+void WaitTracker::OnPresentIssued(std::uint64_t target_ns) noexcept {
+  if (size_ == kCapacity) PopFront();
+  targets_[(head_ + size_) % kCapacity] = target_ns;
+  ++size_;
+}
+
+void WaitTracker::PopFront() noexcept {
+  head_ = (head_ + 1) % kCapacity;
+  --size_;
+}
+
+void WaitTracker::Reset() noexcept {
+  head_ = 0;
+  size_ = 0;
+}
+
+WaitTracker::Result WaitTracker::OnWait(bool ready, bool blocked,
+                                        std::uint64_t ready_ns, int latency,
+                                        double period_ns) noexcept {
+  Result result;
+  const auto back = static_cast<std::size_t>(std::max(1, latency));
+  // Fewer presents than the latency: the wait was not for any of them.
+  if (back > size_) return result;
+  // The present the wait reports is |latency| - 1 before the newest; older
+  // ones never had a wait of their own.
+  while (size_ > back) {
+    PopFront();
+    ++result.unresolved;
+  }
+  const std::uint64_t target_ns = targets_[head_];
+  PopFront();
+  if (!ready || !blocked || target_ns == 0 || !(period_ns > 0.0)) {
+    ++result.unresolved;
+    return result;
+  }
+  const double slack_ns = std::min(kEarlySlackSec * 1e9, 0.25 * period_ns);
+  const double offset_ns = SignedDeltaNs(ready_ns, target_ns);
+  const double late = std::floor((offset_ns + slack_ns) / period_ns);
+  ++result.resolved;
+  result.blocked = true;
+  result.phase_ns = static_cast<std::int64_t>(
+      std::llround(offset_ns - std::max(0.0, late) * period_ns));
+  if (late >= 1.0) {
+    ++result.missed;
+    result.late_refreshes = static_cast<std::uint64_t>(late);
+  }
   return result;
 }
 

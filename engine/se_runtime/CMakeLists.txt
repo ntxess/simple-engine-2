@@ -5,21 +5,22 @@
 # RoleScope, crash capture and its dump streams, the log worker, the
 # watchdog) plug in through include/se_runtime/integration.h. M6b adds the
 # FramePacer (frame_pacer.h, over the pure PacerPolicy) and the PresentPort
-# it presents through (present_port.h; ClearOnlyPresentPort until the
-# integration's adapter over se::present).
+# it presents through (present_port.h); the M6/M7 integration the adapter
+# over se::present and Renderer2D (render_present_port.h) and device-loss
+# recovery.
 
 se_add_module(se_runtime KIND STATIC
   SOURCES
     src/app.cc
     src/app_config.cc
     src/basic_input.cc
-    src/clear_present_port.cc
     src/frame_clock.cc
     src/frame_pacer.cc
     src/integration.cc
     src/lifecycle.cc
     src/pacer_policy.cc
     src/quit.cc
+    src/render_present_port.cc
     src/sdl_app.cc
   PUBLIC_DEPS
     se_core
@@ -35,6 +36,7 @@ se_add_module(se_runtime KIND STATIC
 target_include_directories(se_runtime PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 
 # Test hooks (--fail-init-step, --inject-throw, --inject-null-acquire,
-# --inject-late-frame) in every build but Release.
+# --inject-late-frame, --inject-device-lost, M7's) in every build but
+# Release.
 target_compile_definitions(se_runtime PUBLIC
   $<IF:$<CONFIG:Release>,SE_RUNTIME_TEST_HOOKS=0,SE_RUNTIME_TEST_HOOKS=1>)
