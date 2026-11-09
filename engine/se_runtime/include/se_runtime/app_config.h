@@ -10,7 +10,8 @@
 //   --gpu-driver NAME      SDL_GPU driver (default: SE_GPU_DRIVER, else
 //                          direct3d12 on Windows, vulkan on Linux)
 //   --sim-driver inline    the M17 switch; only "inline" is accepted
-//   --profile              start the profiler (Tracy, wired at integration)
+//   --profile              start the profiler (Tracy; it listens on
+//                          localhost for a client, builds with SE_TRACY)
 //   --headless             no window and no GPU device (SDL's dummy video
 //                          driver; tests and tools)
 //   --no-activate          show the window without taking focus (tests)
@@ -20,6 +21,9 @@
 //                          default there is to end the process after the
 //                          final flush)
 //   --log-level LEVEL      trace, debug, info, warn or error
+//   --no-crash-capture     do not start the crash handler (tests that boot
+//                          many apps in one process; the dump streams are
+//                          still registered)
 //
 // Test hooks, in builds with SE_RUNTIME_TEST_HOOKS (every build but
 // Release):
@@ -28,6 +32,11 @@
 //                          (default 1) of SITE: iterate or event
 //   --inject-null-acquire FROM:COUNT  frames FROM .. FROM+COUNT-1 acquire
 //                          NULL swapchain textures
+//   --crash-test after-ticks:N  an access violation on main right after
+//                          tick N (the M4 exit crash dump)
+//   --dump-test after-ticks:N  after tick N the watchdog writes a dump; the
+//                          ticks stop until it is written, then the app
+//                          quits through the two-phase quit
 
 #ifndef SE_RUNTIME_APP_CONFIG_H_
 #define SE_RUNTIME_APP_CONFIG_H_
@@ -67,6 +76,7 @@ struct AppConfig {
   std::string pref_dir;
   bool terminate_on_quit = kReleaseBuild;
   LogLevel log_level = LogLevel::kInfo;
+  bool crash_capture = true;
 
   // Test hooks.
   int fail_init_step = 0;
@@ -74,6 +84,8 @@ struct AppConfig {
   std::int64_t throw_on_call = 1;
   std::int64_t null_acquire_from = 0;
   std::int64_t null_acquire_count = 0;
+  std::int64_t crash_test_after_ticks = 0;
+  std::int64_t dump_test_after_ticks = 0;
 
   // The arguments after "--".
   std::vector<std::string> game_args;

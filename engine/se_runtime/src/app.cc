@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <expected>
 #include <format>
 #include <limits>
@@ -24,6 +25,7 @@
 #include "se_core/error.h"
 #include "se_core/jobs.h"
 #include "se_core/log.h"
+#include "se_core/profile.h"
 #include "se_core/thread_role.h"
 #include "se_core/time.h"
 #include "se_core/world.h"
@@ -51,9 +53,11 @@ namespace se {
 // The simulation side of the App (boot step 10). Not movable: the stack and
 // the driver keep pointers into the module instance and the pool.
 struct GameRuntime {
-  GameRuntime(const GameModule& module, const StateEnv& env)
+  GameRuntime(const GameModule& module, const StateEnv& env,
+              const jobs::ForkJoinPool::Config& pool_config)
       : instance(module),
         states(instance.Factory(), WithRegistry(env, instance)),
+        pool(pool_config),
         driver(instance.MutableSchedule(), pool),
         input(module.actions) {}
   GameRuntime(const GameRuntime&) = delete;
@@ -66,8 +70,8 @@ struct GameRuntime {
 
   ModuleInstance instance;
   GameStateStack states;
-  // W = 0 in M5 (INTEGRATION(M4a) sizes it from the CPU topology; M14
-  // starts workers).
+  // No workers (W = 0) until M14; the most it may start comes from the CPU
+  // topology (boot step 8).
   jobs::ForkJoinPool pool;
   SimDriver driver;
   SessionLog session;
@@ -89,6 +93,15 @@ void InjectedThrow(std::string_view site) {
   SE_LOG_WARN("injecting a throw in {}", site);
   const int never = empty.at(site.size());
   SE_LOG_ERROR("the injected throw did not happen ({})", never);
+}
+
+// An access violation on the calling thread (the --crash-test hook): the
+// crash handler takes it and writes the dump out of process. A C++ catch
+// (/EHsc) never sees it.
+[[noreturn]] void FaultForCrashTest() {
+  volatile int* volatile target = nullptr;
+  *target = 42;
+  std::abort();  // not reached
 }
 
 std::string GpuDriverFromEnvironment() {
@@ -140,21 +153,33 @@ std::expected<void, Error> App::BootStep(int step) const {
 }
 
 std::expected<void, Error> App::Boot() {
-  // 1. The crash handler, before logging and SDL.
+  boot_start_ns_ = integration::BootClockNs();
+  // 1. The crash handler, before logging and SDL. Its database and the log
+  // file are under the pref path, which SDL resolves without SDL_Init.
   if (auto ok = BootStep(1); !ok) {
     return ok;
   }
-  auto crash = integration::StartCrashCapture(config_);
+  if (auto pref = ResolvePrefPath(); !pref) {
+    return pref;
+  }
+  auto crash = integration::StartCrashCapture(
+      paths_.pref + "crashdb", setup_.app, config_.crash_capture);
   if (!crash) return std::unexpected(std::move(crash.error()));
   crash_.emplace(*crash);
 
-  // 2. The log sinks, before any other engine thread exists.
+  // 2. The log worker and its sinks, before any other engine thread
+  // exists; then the profiler (--profile).
   if (auto ok = BootStep(2); !ok) {
     return ok;
   }
-  auto logging = integration::StartLogging(config_);
+  auto logging = integration::StartLogging(
+      config_, paths_.pref + "logs/" + setup_.app + ".log");
   if (!logging) return std::unexpected(std::move(logging.error()));
   logging_.emplace(std::move(*logging));
+  SE_LOG_INFO("{}; log file {}", crash_->Status(),
+              logging_->FilePath().empty() ? std::string("none")
+                                           : logging_->FilePath());
+  if (config_.profile) StartProfiler();
 
   // 3. SDL.
   if (auto ok = BootStep(3); !ok) {
@@ -230,17 +255,28 @@ std::expected<void, Error> App::Boot() {
   auto cpu = integration::ReadCpuTopology();
   if (!cpu) return std::unexpected(std::move(cpu.error()));
   cpu_ = *cpu;
+  SE_LOG_INFO(
+      "CPU: {} logical, {} physical cores ({}); fork pool up to {} workers "
+      "({} for PerformanceOnly sites), none started",
+      cpu_.logical_cores, cpu_.physical_cores,
+      cpu_.homogeneous ? "homogeneous" : "hybrid", cpu_.fork_pool_size,
+      cpu_.performance_only);
 
-  // 9. The helper threads.
+  // 9. The helper threads: the watchdog, with only the boot budget until
+  // the first iterate arms it.
   if (auto ok = BootStep(9); !ok) {
     return ok;
   }
+  // The App's own flags only: the watchdog runs until shutdown step 17,
+  // after the window is gone. The subclass reports Modal changes to the
+  // App (OnModalChanged) as it sets its own flag.
   integration::WatchdogInputs inputs;
   inputs.iterate_counter = &iterate_counter_;
-  inputs.modal = window_ ? &window_->ModalFlag() : &modal_flag_;
+  inputs.modal = &modal_flag_;
   inputs.suspended = &suspended_flag_;
   inputs.heartbeat = &heartbeat_flag_;
-  auto helpers = integration::StartHelperThreads(config_, inputs);
+  auto helpers =
+      integration::StartHelperThreads(config_, inputs, boot_start_ns_);
   if (!helpers) return std::unexpected(std::move(helpers.error()));
   helpers_.emplace(std::move(*helpers));
 
@@ -253,7 +289,9 @@ std::expected<void, Error> App::Boot() {
   }
 
   quit_.SetRecoveryHook(setup_.recovery);
-  quit_.SetDeadlineHook([] { integration::StartShutdownDeadline(); });
+  quit_.SetDeadlineHook([this] {
+    if (helpers_) helpers_->StartShutdownDeadline();
+  });
   for (QuitProvider* provider : setup_.quit_providers) {
     quit_.AddProvider(provider);
   }
@@ -286,6 +324,10 @@ std::expected<void, Error> App::ResolvePaths() {
   } else {
     paths_.content_root = fs::Normalize(paths_.base);
   }
+  return {};
+}
+
+std::expected<void, Error> App::ResolvePrefPath() {
   if (!config_.pref_dir.empty()) {
     if (auto made = fs::CreateDirectories(config_.pref_dir); !made) {
       return made;
@@ -299,11 +341,28 @@ std::expected<void, Error> App::ResolvePaths() {
   return {};
 }
 
+void App::StartProfiler() {
+  if (!profile::Available()) {
+    SE_LOG_WARN("--profile: this build has no profiler (SE_TRACY is off)");
+    return;
+  }
+  profiling_ = profile::Start();
+  if (profiling_) {
+    SE_LOG_INFO("profiler started: Tracy listens on localhost for a client");
+  } else {
+    SE_LOG_WARN("--profile: the profiler did not start");
+  }
+}
+
 std::expected<void, Error> App::StartGame() {
   StateEnv env;
   env.seed = setup_.seed;
   env.tick_rate = setup_.tick_rate;
-  game_ = std::make_unique<GameRuntime>(*setup_.module, env);
+  jobs::ForkJoinPool::Config pool_config;
+  pool_config.max_workers = cpu_.fork_pool_size;
+  game_ = std::make_unique<GameRuntime>(*setup_.module, env, pool_config);
+  // Every latched InputFrame goes into the process's ring, a dump stream.
+  game_->driver.AttachInputRing(&integration::DumpInputRing());
   for (const std::string& key : game_->input.UnknownKeys()) {
     SE_LOG_WARN("binding to unknown key '{}' ignored", key);
   }
@@ -523,7 +582,6 @@ SDL_AppResult App::Iterate() {
   }
   suspended_flag_.store(lifecycle_.Suspended(), std::memory_order_release);
   modal_flag_.store(lifecycle_.Modal(), std::memory_order_release);
-  heartbeat_flag_.store(true, std::memory_order_release);
 
   FrameReport report;
   report.iterate = iterates_;
@@ -543,11 +601,13 @@ SDL_AppResult App::Iterate() {
 
   const FrameClock frame_clock =
       clock_.Next(now, refresh_hz_, lifecycle_.Modal());
-  report.gameplay_ran = lifecycle_.GameplayRuns() && game_->states.SimRunning();
+  report.gameplay_ran = lifecycle_.GameplayRuns() &&
+                        game_->states.SimRunning() && !exit_test_hold_;
   report.plan =
       stepper_.Plan(frame_clock, costs_.Current(), report.gameplay_ran,
                     /*debugger=*/false, /*editor_play=*/false);
   report.first_tick = game_->driver.NextTick();
+  if (kRuntimeTestHooks) StopPlanAtExitTestTick(report.plan, report.first_tick);
   const std::uint64_t ticks_start = SDL_GetTicksNS();
   game_->driver.TickInline(game_->states, report.plan, game_->input,
                            game_->session, game_->recorder, game_->audio);
@@ -558,11 +618,15 @@ SDL_AppResult App::Iterate() {
     costs_.AddTick(ticks_sec / report.plan.steps);
   }
   report.next_tick = game_->driver.NextTick();
+  if (kRuntimeTestHooks) RunExitTests(report.next_tick);
 
   if (!report.rendered && lifecycle_.ShouldRender()) {
     report.rendered = RenderClear(report.presented, render_sec);
   }
-  if (report.presented) ++presented_frames_;
+  if (report.presented) {
+    ++presented_frames_;
+    SE_PROFILE_FRAME();
+  }
   stepper_.OnPresentResult(/*missed=*/false, lifecycle_.Modal());
 
   // The non-tick CPU cost, without the swapchain wait and submit (M6's
@@ -589,6 +653,51 @@ SDL_AppResult App::Iterate() {
   }
   if (setup_.on_frame) setup_.on_frame(*this, report);
   return SDL_APP_CONTINUE;
+}
+
+std::int64_t App::ExitTestTick() const noexcept {
+  return config_.crash_test_after_ticks > 0 ? config_.crash_test_after_ticks
+                                            : config_.dump_test_after_ticks;
+}
+
+void App::StopPlanAtExitTestTick(StepPlan& plan, Tick first_tick) const {
+  const std::int64_t target = ExitTestTick();
+  if (target <= 0 || exit_test_fired_ || plan.steps <= 0) return;
+  const auto first = static_cast<std::int64_t>(first_tick);
+  if (first + plan.steps - 1 > target) {
+    plan.steps =
+        static_cast<int>(std::max<std::int64_t>(0, target - first + 1));
+  }
+}
+
+void App::RunExitTests(Tick next_tick) {
+  const std::int64_t target = ExitTestTick();
+  if (target <= 0) return;
+  const std::int64_t ran = static_cast<std::int64_t>(next_tick) - 1;
+  if (!exit_test_fired_ && ran >= target) {
+    exit_test_fired_ = true;
+    if (config_.crash_test_after_ticks > 0) {
+      SE_LOG_WARN("crash test: an access violation on main after tick {}", ran);
+      FaultForCrashTest();
+    }
+    // The ticks stop here, so the dump shows main at this tick.
+    exit_test_hold_ = true;
+    dumps_before_test_ = helpers_ ? helpers_->DumpsFinished() : 0;
+    SE_LOG_WARN("dump test: the watchdog writes a dump after tick {}", ran);
+    if (!helpers_ ||
+        !helpers_->RequestDump(std::format("dump test after tick {}", ran))) {
+      SE_LOG_ERROR("dump test: the watchdog did not take the request");
+      quit_.Request(QuitReason::kRequested);
+      SyncQuitState();
+    }
+    return;
+  }
+  if (exit_test_hold_ && !quit_.Pending() && helpers_ &&
+      helpers_->DumpsFinished() > dumps_before_test_) {
+    SE_LOG_INFO("dump test: the watchdog finished the dump");
+    quit_.Request(QuitReason::kRequested);
+    SyncQuitState();
+  }
 }
 
 void App::UpdateTitle(std::uint64_t now_ns) {
@@ -626,8 +735,8 @@ void App::Teardown() {
   torn_down_ = true;
   lifecycle_.OnShutdownStarted();
   // Step 3: normally started when the quit drain ended.
-  if (booted_ && !quit_.DeadlineStarted()) {
-    integration::StartShutdownDeadline();
+  if (booted_ && !quit_.DeadlineStarted() && helpers_) {
+    helpers_->StartShutdownDeadline();
   }
   // Step 4: no more diverted events; the GPU finishes its work.
   if (filter_) filter_->Remove();
@@ -650,10 +759,19 @@ void App::Teardown() {
   SDL_ResetHint(SDL_HINT_MAIN_CALLBACK_RATE);
   // Step 15: SDL_QuitSubSystem(GAMEPAD | VIDEO).
   sdl_.reset();
-  // Steps 16-17: the log worker, then the watchdog (the last thread).
+  // Step 16: SDL's log output to stderr, then drain and stop the log
+  // worker (spdlog::shutdown); SE_LOG_* is synchronous from here on.
+  if (logging_) logging_->Stop();
+  // Step 17: the watchdog, the last engine thread.
   if (helpers_) helpers_->Stop();
   helpers_.reset();
   logging_.reset();
+  // Every profiled engine thread has been joined.
+  if (profiling_) {
+    profile::Stop();
+    profiling_ = false;
+  }
+  // Crash capture stays until the process exits (integration.h).
   crash_.reset();
   lifecycle_.OnExited();
 }

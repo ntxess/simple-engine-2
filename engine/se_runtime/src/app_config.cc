@@ -145,6 +145,18 @@ std::expected<void, Error> ParseNullAcquire(std::string_view text,
   return {};
 }
 
+// "after-ticks:N", N >= 1 (the M4 exit hooks).
+std::expected<std::int64_t, Error> ParseAfterTicks(std::string_view option,
+                                                   std::string_view text) {
+  constexpr std::string_view kPrefix = "after-ticks:";
+  if (text.starts_with(kPrefix)) {
+    const auto n = ParseNumber<std::int64_t>(text.substr(kPrefix.size()));
+    if (n && *n >= 1) return *n;
+  }
+  return Bad(
+      std::format("{}: bad value '{}' (expected after-ticks:N)", option, text));
+}
+
 std::expected<void, Error> NeedTestHooks(std::string_view option) {
   if (kRuntimeTestHooks) return {};
   return Bad(
@@ -219,6 +231,11 @@ std::expected<AppConfig, Error> ParseAppConfig(
         return std::unexpected(ok.error());
       }
       config.activate_when_shown = false;
+    } else if (option == "--no-crash-capture") {
+      if (auto ok = flag(); !ok) {
+        return std::unexpected(ok.error());
+      }
+      config.crash_capture = false;
     } else if (option == "--return-on-quit") {
       if (auto ok = flag(); !ok) {
         return std::unexpected(ok.error());
@@ -266,6 +283,19 @@ std::expected<AppConfig, Error> ParseAppConfig(
       if (!value) return std::unexpected(value.error());
       if (auto ok = ParseNullAcquire(*value, config); !ok) {
         return std::unexpected(ok.error());
+      }
+    } else if (option == "--crash-test" || option == "--dump-test") {
+      if (auto ok = NeedTestHooks(option); !ok) {
+        return std::unexpected(ok.error());
+      }
+      auto value = reader.Value(option);
+      if (!value) return std::unexpected(value.error());
+      auto ticks = ParseAfterTicks(option, *value);
+      if (!ticks) return std::unexpected(ticks.error());
+      if (option == "--crash-test") {
+        config.crash_test_after_ticks = *ticks;
+      } else {
+        config.dump_test_after_ticks = *ticks;
       }
     } else {
       return Bad(std::format("unknown option '{}'", option));

@@ -1,11 +1,9 @@
 # se_runtime: the App on SDL's main callbacks (docs/milestone-specs.md, M5):
 # the Booting steps, the frame, the lifecycle and two-phase quit state
 # machines, BasicInputService and the noexcept callbacks (sdl_app.cc, a
-# fault boundary). Not deterministic.
-#
-# The spec's dependency list also names se_os, se_log and se_crash; the
-# integration step adds them, filling in the hooks of
-# include/se_runtime/integration.h.
+# fault boundary). Not deterministic. The M4 parts (the main thread's
+# RoleScope, crash capture and its dump streams, the log worker, the
+# watchdog) plug in through include/se_runtime/integration.h.
 
 se_add_module(se_runtime KIND STATIC
   SOURCES
@@ -20,6 +18,9 @@ se_add_module(se_runtime KIND STATIC
   PUBLIC_DEPS
     se_core
     se_sim
+    se_os
+    se_log
+    se_crash
     se_platform
     se_render
   FORBID

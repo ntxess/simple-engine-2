@@ -117,6 +117,9 @@ int RunTestApp(GameSetup setup, std::vector<std::string> args) {
   NextSetup() = std::move(setup);
   args.emplace_back("--return-on-quit");
   args.emplace_back("--no-activate");
+  // Many apps boot in one test process: no crashpad handler for them (the
+  // crash.* tests start it).
+  args.emplace_back("--no-crash-capture");
   args.emplace_back("--pref-dir");
   args.emplace_back(std::string(SE_TEST_OUT_DIR) + "/pref");
   CallbackLoop loop;

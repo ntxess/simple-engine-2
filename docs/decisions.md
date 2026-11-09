@@ -668,6 +668,7 @@ HelperThreads::ArmWatchdog (after the first iterate), StartShutdownDeadline
 EngineThreadsRunning and ShutdownLoggingOnly. In M5 they keep M2's
 behaviour (RegisterMainThread, synchronous logging) and start no thread.
 se_runtime's link list gains se_os, se_log and se_crash at integration.
+The integration filled them in (ADR-042, ADR-043).
 
 **Why.** Three tracks edit in parallel; one file of documented no-ops makes
 the integration a fill-in rather than a search through the App.
@@ -753,3 +754,78 @@ exclude.
 **Why.** The inbox, wake, lifecycle, quit and callback tests must run under
 TSan and ASan, and WSL has no window-system development packages (installing
 them is out of scope for M5; docs/gates.md).
+
+## ADR-042 How the M4 parts run in the App (2026-11-08)
+
+**Decision.** The hooks of ADR-037 are filled in as follows.
+- Main thread: EnterMainThread calls RegisterMainThread and holds
+  `RoleScope{kMain, "main", Qos::kHigh}` (registry slot 0, its 4096-record
+  ring) until the end of SDL_AppQuit. It applies no CPU set: main's set
+  matters once fork workers exist (M14).
+- Boot step 1 resolves the pref path first (SDL_GetPrefPath and
+  SDL_CreateDirectory need no SDL_Init), because the crash database
+  (`<pref>/crashdb`) and the log file (`<pref>/logs/<app>.log`) live under
+  it; step 5 now resolves only the content root.
+- Crash capture is per process, not per App. The first StartCrashCapture
+  registers the dump streams (the ThreadRegistry hook: the breadcrumb table,
+  every slot's log ring as it is first allocated, the library ring as
+  `LogRingStream(64)`; and one never-destroyed InputFrameRing that every
+  App's SimDriver writes) and starts crashpad's handler from next to the
+  executable. The CrashGuard is then kept until the process exits:
+  crashpad cannot uninstall its filter or launch a second handler, and the
+  SDL_AppInit catch-all, which runs after a failed App has been torn down,
+  must still be able to request a dump. Later boots in the process report
+  the same state. `--no-crash-capture` skips the handler (the in-process
+  App tests, which boot many Apps in one process); the streams are still
+  registered.
+- The log worker starts at boot step 2, not step 9: LogWorker::Start
+  configures the sinks and starts its thread together, and no other engine
+  thread exists yet, which is what the design requires. A log file that
+  cannot be opened is logged and the worker runs without it; it is not a
+  boot failure. Step 9 starts the watchdog. Shutdown: Logging::Stop
+  (SDL's log output to stderr, drain, spdlog::shutdown) at step 16, the
+  watchdog join at step 17, then profile::Stop when `--profile` started it.
+- The log worker's stderr sink writes through se::WriteConsoleLine, so a
+  sink a test installed with SetLogSink receives the worker's lines as it
+  receives synchronous ones (the callback tests read the fault lines that
+  way).
+- A fault in a callback, or in SDL_AppInit, requests its dump with
+  DumpWithoutCrash on the faulting thread, so the dump shows that thread as
+  it was; the watchdog's queue is for dumps its own thread writes.
+- Boot step 8 reads the CPU topology and gives the (still empty) fork pool
+  `max_workers = ForkPoolSize(topology)`.
+- Test builds add the M4 exit hooks `--crash-test after-ticks:N` (an access
+  violation on main right after tick N) and `--dump-test after-ticks:N`
+  (the watchdog writes a dump after tick N; the ticks stop until it is
+  written, then the App quits). The frame's StepPlan is cut so that the
+  last tick it runs is N.
+- The heartbeat flag is no longer set on every iterate: it marks long work
+  on main that still makes progress (M9's loads, M12), so a flag that is
+  always set would excuse every hang.
+
+**Why.** Each point follows from a constraint the parts brought: crashpad's
+one launch per process, LogWorker::Start's single call, SDL_AppQuit after a
+failed boot, and in-process tests that boot repeatedly.
+
+## ADR-043 The watchdog skeleton (2026-11-08)
+
+**Decision.** `se::crash::Watchdog` (se_crash, which now links se_os) runs
+as role kWatchdog through StartThread. It waits on a binary_semaphore with
+a 1 s timeout (requests, the deadline start and the stop also release it,
+at most once per wait) and measures periods on the unbiased clock. Each
+period goes into the pure `HangDetector`: until Arm() (the first iterate)
+only the 30 s boot budget applies, which is reported once with a dump and
+never while a debugger is attached; armed, a period without iterate
+progress that Suspended, Modal, the heartbeat or a debugger does not excuse
+is a stall, and 5 in a row are a hang, once per episode, but only with
+`declare_hangs`, which stays off until M12. `RequestDump(reason)` is main
+only (an SPSC queue of 8): the watchdog thread writes one dump per request,
+and Stop still writes the ones queued. `StartShutdownDeadline()` starts the
+5 s deadline; on expiry the watchdog requests a dump, has the log worker
+flush (se::FlushLog, 1 s) and ends the process with TerminateProcess
+(exit code 3). The dump function is injectable for tests.
+
+**Why.** The design's watchdog reads only atomics and never waits on main,
+and main never waits on it; a queue main fills and a semaphore it releases
+keep both true. Declaring hangs needs M12's GPU and compositor labels, so
+M4 gives the interface and the boot budget only, as the spec asks.

@@ -44,6 +44,7 @@ se_add_module(se_platform_tests KIND EXECUTABLE
     sdl_context_test.cc
     wake_test.cc
     window_test.cc
+    ../support/tracy_inert_listener.cc
   PRIVATE_DEPS
     se_core
     se_platform
@@ -90,7 +91,8 @@ if(TARGET rampage)
     COMMAND Python3::Interpreter "${_se_run_app}" --expect-exit 0
             --expect "booted 'rampage'"
             --expect "shutdown [(]success[)]: [0-9]+ iterates, 300 presented frames, ran [1-9][0-9][0-9]+ ticks"
-            --reject "SE_ASSERT failed|ERROR|E t=[0-9]+ "
+            --expect "log file .*rampage_pref/logs/rampage[.]log"
+            --reject "SE_ASSERT failed|ERROR|E t=[0-9]+ | [EF] [a-z-]+ t=[0-9]+ "
             -- $<TARGET_FILE:rampage> --frames 300 --no-activate
             --pref-dir "${_se_rampage_pref}")
   set_tests_properties(rampage.frames_300 PROPERTIES

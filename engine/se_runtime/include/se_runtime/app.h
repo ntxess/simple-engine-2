@@ -6,17 +6,22 @@
 //
 // App::Create runs the Booting steps in the design's order, each undone by
 // RAII when a later one fails:
-//    1 crash-handler   the crash handler (integration hook)
-//    2 logging         the log sinks (integration hook)
+//    1 crash-handler   the pref path, then crash capture with its database
+//                      under it and the dump streams (integration.h)
+//    2 logging         the log worker, its file under the pref path; then
+//                      the profiler with --profile
 //    3 sdl             SDL_Init(VIDEO | GAMEPAD), SDL's log routed to SE_LOG
 //    4 event-filter    the event filter and Inbox; the wake event
-//    5 content-paths   the content root and the pref path
+//    5 content-paths   the content root
 //    6 window          the window and its Win32 subclass
 //    7 gpu-device      the SDL_GPU device, claiming the window with VSYNC
-//    8 cpu-topology    (integration hook)
-//    9 helper-threads  log worker and watchdog (integration hooks)
+//    8 cpu-topology    the CPU topology and the pool sizes it gives
+//    9 helper-threads  the watchdog (boot budget until the first iterate)
 //   10 game            the GameModule's registry and storages, the
-//                      GameStateStack with the start state pushed
+//                      GameStateStack with the start state pushed, the
+//                      SimDriver writing the process's InputFrame ring
+// The main thread runs inside its RoleScope from SDL_AppInit to the end of
+// SDL_AppQuit (integration::EnterMainThread).
 // --headless skips the window and the GPU device (steps 6 and 7 do
 // nothing) and uses SDL's dummy video driver.
 //
@@ -27,10 +32,15 @@
 // SimDriver::TickInline with BasicInputService's frames, record the
 // clear-only frame and present it with VSYNC.
 //
-// Shutdown follows the design's order for the parts that exist: remove the
-// event filter, SDL_WaitForGPUIdle, destroy the Worlds, release the device,
-// remove the subclass and destroy the window, SDL_QuitSubSystem, then the
-// helper threads (log worker, watchdog) and the logging and crash scopes.
+// Shutdown follows the design's order for the parts that exist: the
+// watchdog's deadline starts when the quit drain ends; remove the event
+// filter, SDL_WaitForGPUIdle, destroy the Worlds, release the device,
+// remove the subclass and destroy the window, SDL_QuitSubSystem, stop the
+// log worker (step 16), join the watchdog (step 17), stop the profiler.
+//
+// Test builds add the M4 exit hooks: --crash-test after-ticks:N faults on
+// main right after tick N; --dump-test after-ticks:N has the watchdog write
+// a dump after tick N, holds the ticks until it is written, then quits.
 
 #ifndef SE_RUNTIME_APP_H_
 #define SE_RUNTIME_APP_H_
@@ -194,6 +204,8 @@ class App final : public WindowListener {
   std::expected<void, Error> Boot() SE_REQUIRES(g_main);
   std::expected<void, Error> BootStep(int step) const;
   std::expected<void, Error> ResolvePaths();
+  std::expected<void, Error> ResolvePrefPath();
+  void StartProfiler();
   std::expected<void, Error> StartGame() SE_REQUIRES(g_main);
   void Teardown() SE_REQUIRES(g_main);
 
@@ -205,6 +217,11 @@ class App final : public WindowListener {
   bool RenderClear(bool& presented, double& render_sec) SE_REQUIRES(g_main);
   void UpdateTitle(std::uint64_t now_ns) SE_REQUIRES(g_main);
   void LogProgress(std::uint64_t now_ns);
+  // The M4 exit hooks (test builds): the tick they act after (0: none),
+  // the frame's plan cut so that it ends at that tick, and the action.
+  [[nodiscard]] std::int64_t ExitTestTick() const noexcept;
+  void StopPlanAtExitTestTick(StepPlan& plan, Tick first_tick) const;
+  void RunExitTests(Tick next_tick) SE_REQUIRES(g_main);
 
   AppConfig config_;
   GameSetup setup_;
@@ -230,11 +247,18 @@ class App final : public WindowListener {
   CostTracker costs_;
   double refresh_hz_ = 0.0;
 
-  // Read by the watchdog (integration).
+  // Read by the watchdog (integration). The heartbeat flag is for long
+  // work on main that still makes progress (M9's loads, M12); nothing in
+  // M5 raises it.
   std::atomic<std::uint64_t> iterate_counter_{0};
   std::atomic<bool> suspended_flag_{false};
   std::atomic<bool> modal_flag_{false};
   std::atomic<bool> heartbeat_flag_{false};
+  std::uint64_t boot_start_ns_ = 0;
+  bool profiling_ = false;
+  bool exit_test_fired_ = false;
+  bool exit_test_hold_ = false;
+  std::uint64_t dumps_before_test_ = 0;
 
   CallbackRate applied_rate_ = CallbackRate::kFull;
   bool quit_pending_seen_ = false;

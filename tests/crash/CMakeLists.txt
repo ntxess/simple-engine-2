@@ -63,6 +63,31 @@ else()
   set_tests_properties(crash.stub PROPERTIES LABELS unit)
 endif()
 
+# The M4 exit dumps through the real stack (docs/milestone-specs.md,
+# "Integration (M4a + M4b + M5)"): rampage --crash-test after-ticks:240 and
+# --dump-test after-ticks:240, each dump decoded with read_dump.py and
+# checked for main's breadcrumb at tick 240, the log tail with the line
+# logged just before and the InputFrame ring up to that tick; and a fault
+# caught by the SDL_AppIterate boundary (--inject-throw), whose dump main
+# requests. Labels desktop (rampage opens its window, without activating
+# it; scripts/ci.ps1 -Desktop runs them) and crash. Test builds only:
+# Release has no test hooks.
+if(TARGET rampage AND _se_crash_backend STREQUAL "crashpad" AND
+   NOT CMAKE_BUILD_TYPE STREQUAL "Release")
+  foreach(_se_scenario crash dump fault)
+    add_test(NAME crash.rampage_${_se_scenario}
+      COMMAND Python3::Interpreter
+              "${CMAKE_CURRENT_SOURCE_DIR}/rampage_dump_test.py"
+              --rampage "$<TARGET_FILE:rampage>"
+              --read-dump "${_se_read_dump}"
+              --work "${_se_crash_work}/rampage_${_se_scenario}"
+              --scenario ${_se_scenario})
+    set_tests_properties(crash.rampage_${_se_scenario} PROPERTIES
+      LABELS "desktop;crash;rampage" TIMEOUT 90
+      ENVIRONMENT "SE_NO_MESSAGE_BOX=1")
+  endforeach()
+endif()
+
 # read_dump.py on synthetic minidumps (any platform).
 add_test(NAME minidump.read_dump
   COMMAND Python3::Interpreter
