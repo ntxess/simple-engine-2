@@ -2,8 +2,8 @@
 #
 #   se_rampage_tests      Catch2: serialization, broadphase, effects, path,
 #                         boundary, JSON, scenes, the legacy scenarios, the
-#                         projection and determinism (golden
-#                         determinism_rampage)
+#                         projection, sprites and the view, and
+#                         determinism (golden determinism_rampage)
 #   replay.rampage.*      se_replay runs the module (tools)
 #   ref.sandbox.NAME      label reference: se_replay runs the legacy scenario
 #                         NAME with its inputs for 3600 ticks, and
@@ -56,10 +56,12 @@ se_add_module(se_rampage_tests KIND EXECUTABLE
     projection_test.cc
     scene_test.cc
     serialization_test.cc
+    view_test.cc
   PRIVATE_DEPS
     game_rampage
     rampage_test_support
     se_core
+    se_render_core
     se_sim
     se_test_support
     Catch2::Catch2WithMain

@@ -28,7 +28,10 @@
 // override can change one stat), and an effect's stat as its name
 // ("stat": "HP"). The loader turns these into StatIds and records the names
 // in the World's StatNames; the registry form ({"values": [{"id": ...}]})
-// is accepted as well. SaveScene writes the named form.
+// is accepted as well. SaveScene writes the named form. A SpriteRenderer's
+// texture is written by name too ("texture": "player", a key of
+// config/texture.json) and stored as its TextureKeyOf key, the names going
+// to the World's TextureNames.
 
 #ifndef GAME_RAMPAGE_SCENE_H_
 #define GAME_RAMPAGE_SCENE_H_
@@ -91,8 +94,8 @@ struct SceneSettings {
   RulesVersion rules = RulesVersion::kV2;
 };
 
-// Puts the settings, an empty StatNames and the collision scratch into the
-// World's ctx.
+// Puts the settings, empty StatNames and TextureNames and the collision
+// scratch into the World's ctx.
 void ApplySceneSettings(World& world, const SceneSettings& settings)
     SE_REQUIRES(g_sim_owner);
 

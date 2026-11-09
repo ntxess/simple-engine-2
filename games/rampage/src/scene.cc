@@ -25,6 +25,7 @@
 #include "se_core/error.h"
 #include "se_core/guid.h"
 #include "se_core/world.h"
+#include "se_render_core/render_components.h"
 
 namespace se::rampage {
 namespace {
@@ -150,6 +151,36 @@ void StatIdsToNames(std::string_view component, json::Value& value,
   }
 }
 
+// SpriteRenderer's texture is written by name ("texture": "player", a key of
+// config/texture.json) and stored as its key (TextureKeyOf).
+std::expected<void, Error> TextureNameToKey(std::string_view component,
+                                            json::Value& value,
+                                            TextureNames& textures) {
+  if (component != "SpriteRenderer") return {};
+  json::Value* texture = value.Find("texture");
+  if (texture == nullptr || !texture->IsString()) return {};
+  const std::string name = texture->Text();
+  if (name.empty()) return FailAt("texture", "empty texture name");
+  const std::uint32_t key = TextureKeyOf(name);
+  if (textures.Add(name) != key || textures.Name(key) != name) {
+    return FailAt(name, "texture key collision");
+  }
+  *texture = json::Value::NumberOf(static_cast<std::int64_t>(key));
+  return {};
+}
+
+// The reverse for SaveScene, when the name is known.
+void TextureKeyToName(std::string_view component, json::Value& value,
+                      const TextureNames& textures) {
+  if (component != "SpriteRenderer") return;
+  json::Value* texture = value.Find("texture");
+  if (texture == nullptr) return;
+  const auto key = texture->AsInt64();
+  if (!key) return;
+  const std::string_view name = textures.Name(static_cast<std::uint32_t>(*key));
+  if (!name.empty()) *texture = json::Value::String(std::string(name));
+}
+
 struct PrefabCache {
   std::map<std::string, json::Value, std::less<>> components;
 };
@@ -197,7 +228,8 @@ std::expected<const json::Value*, Error> PrefabComponents(
 std::expected<void, Error> CreateEntity(World& world, const json::Value& entity,
                                         std::size_t index,
                                         const SceneLoadOptions& options,
-                                        PrefabCache& cache, StatNames& names)
+                                        PrefabCache& cache, StatNames& names,
+                                        TextureNames& textures)
     SE_REQUIRES(g_sim_owner) {
   const std::string where = std::format("entities[{}]", index);
   if (!entity.IsObject()) return FailAt(where, "expected an object");
@@ -254,6 +286,9 @@ std::expected<void, Error> CreateEntity(World& world, const json::Value& entity,
     if (auto named = StatNamesToIds(c.key, c.value, names); !named) {
       return FailAt(where + ".components." + c.key, named.error());
     }
+    if (auto keyed = TextureNameToKey(c.key, c.value, textures); !keyed) {
+      return FailAt(where + ".components." + c.key, keyed.error());
+    }
   }
 
   const entt::entity e = world.Create(*guid);
@@ -303,6 +338,7 @@ void ApplySceneSettings(World& world, const SceneSettings& settings) {
   ctx.insert_or_assign(SceneSeed{settings.seed});
   ctx.insert_or_assign(RulesConfig{settings.rules});
   if (ctx.find<StatNames>() == nullptr) ctx.emplace<StatNames>();
+  if (ctx.find<TextureNames>() == nullptr) ctx.emplace<TextureNames>();
 }
 
 void FinishLoad(World& world) {
@@ -413,11 +449,12 @@ std::expected<SceneSummary, Error> LoadScene(World& world,
   if (!settings) return std::unexpected(settings.error());
   ApplySceneSettings(world, *settings);
   StatNames& names = world.Reg().ctx().get<StatNames>();
+  TextureNames& textures = world.Reg().ctx().get<TextureNames>();
   PrefabCache cache;
   if (entities != nullptr) {
     for (std::size_t i = 0; i < entities->Items().size(); ++i) {
       if (auto made = CreateEntity(world, entities->Items()[i], i, options,
-                                   cache, names);
+                                   cache, names, textures);
           !made) {
         return std::unexpected(made.error());
       }
@@ -452,6 +489,10 @@ std::expected<std::string, Error> SaveScene(const World& world,
   const auto* stat_names = ctx.find<StatNames>();
   const StatNames no_names;
   const StatNames& names = stat_names != nullptr ? *stat_names : no_names;
+  const auto* texture_names = ctx.find<TextureNames>();
+  const TextureNames no_textures;
+  const TextureNames& textures =
+      texture_names != nullptr ? *texture_names : no_textures;
 
   json::Value doc = json::Value::Object();
   doc.Set("format", json::Value::String(std::string(kSceneFormat)));
@@ -497,6 +538,7 @@ std::expected<std::string, Error> SaveScene(const World& world,
       auto value = json::Parse(*text);
       if (!value) return std::unexpected(value.error());
       StatIdsToNames(info.name, *value, names);
+      TextureKeyToName(info.name, *value, textures);
       components.Set(info.name, std::move(*value));
     }
     entity.Set("components", std::move(components));

@@ -11,15 +11,26 @@
 #define SE_RENDER_CORE_RENDER_COMPONENTS_H_
 
 #include <cstdint>
+#include <string_view>
 
 #include "se_core/component_registry.h"
+#include "se_core/hash.h"
 #include "se_core/types.h"
 
 namespace se {
 
+// The interned key of the texture named |name| (a key of
+// config/texture.json): its 32-bit FNV-1a hash, until M9's asset handles.
+// Scenes write the name; SpriteRenderer stores the key.
+[[nodiscard]] constexpr std::uint32_t TextureKeyOf(
+    std::string_view name) noexcept {
+  return Fnv1a32(name);
+}
+
 // A textured quad drawn at the entity's Transform.
 struct SpriteRenderer {
-  // The texture: an interned asset key until M9's asset handles.
+  // The texture: an interned asset key (TextureKeyOf) until M9's asset
+  // handles.
   std::uint32_t texture = 0;
   // The texels to draw, in texture pixels. Its size is the sprite's size
   // before Transform::scale.

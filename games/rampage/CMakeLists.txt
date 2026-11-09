@@ -1,7 +1,7 @@
 # game_rampage: the headless port of the legacy Sandbox's gameplay
 # (docs/milestone-specs.md, M3b). Simulation code: DETERMINISTIC, no
-# platform, renderer, audio or crash libraries. The spec adds se_render_core
-# (for SpriteRenderer) at integration.
+# platform, GPU, audio or crash libraries. se_render_core (headless) only
+# for SpriteRenderer, Camera2D and the sandbox's camera.
 
 se_add_module(game_rampage KIND STATIC
   SOURCES
@@ -16,8 +16,10 @@ se_add_module(game_rampage KIND STATIC
     src/rampage_components.cc
     src/scene.cc
     src/stats.cc
+    src/view.cc
   PUBLIC_DEPS
     se_core
+    se_render_core
     se_sim
   FORBID
     SDL3::SDL3-static se_imgui miniaudio sentry lz4_static

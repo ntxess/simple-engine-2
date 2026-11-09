@@ -13,9 +13,11 @@
 #include "game_rampage/legacy_scenario.h"
 #include "game_rampage/scene.h"
 #include "game_rampage/systems.h"
+#include "se_core/component_registry.h"
 #include "se_core/error.h"
 #include "se_core/log.h"
 #include "se_core/world.h"
+#include "se_render_core/render_components.h"
 #include "se_sim/game_module.h"
 #include "se_sim/game_state.h"
 
@@ -65,6 +67,14 @@ class SandboxState final : public GameState {
   std::array<World*, 1> worlds_{};
 };
 
+// game_rampage's components, then the renderer's it draws with
+// (SpriteRenderer, and Camera2D for scenes that place a camera). Neither
+// render component is hashed, so they do not change the world hash.
+void RegisterComponents(ComponentRegistry& registry) {
+  RegisterRampageComponents(registry);
+  RegisterRenderComponents(registry);
+}
+
 std::unique_ptr<GameState> MakeSandbox(const StateEnv& env) {
   return std::make_unique<SandboxState>(env);
 }
@@ -96,7 +106,7 @@ constexpr std::array<ActionBinding, 14> kBindings = {{
 const GameModule& RampageModule() {
   static const GameModule kModule = {
       .name = "rampage",
-      .register_components = &RegisterRampageComponents,
+      .register_components = &RegisterComponents,
       .register_systems = &RegisterRampageSystems,
       .register_states = &RegisterStates,
       .start_state = kSandboxState,

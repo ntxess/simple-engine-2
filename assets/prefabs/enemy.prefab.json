@@ -4,6 +4,9 @@
   "components": {
     "Transform": {},
     "Collider": {"half_extents": {"x": 24, "y": 24}},
+    "SpriteRenderer": {"texture": "player",
+                       "region": {"x": 0, "y": 0, "w": 48, "h": 48},
+                       "origin": {"x": 24, "y": 24}},
     "Team": {"id": "enemy"},
     "Stats": {"HP": 100, "Speed": 500},
     "Path": {"points": [], "loop": true}

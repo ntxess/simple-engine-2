@@ -207,22 +207,29 @@ struct RulesConfig {
   RulesVersion version = RulesVersion::kV2;
 };
 
-// Stat names by id, for the projection and, later, the editor.
-class StatNames {
+// Names by their 32-bit FNV-1a id (Fnv1a32: StatIdOf, TextureKeyOf).
+class NameTable {
  public:
   // Records |name| and returns its id.
-  StatId Add(std::string_view name);
+  std::uint32_t Add(std::string_view name);
   // The name of |id|, or empty.
-  [[nodiscard]] std::string_view Name(StatId id) const noexcept;
-  [[nodiscard]] const std::vector<std::pair<StatId, std::string>>& All()
+  [[nodiscard]] std::string_view Name(std::uint32_t id) const noexcept;
+  [[nodiscard]] const std::vector<std::pair<std::uint32_t, std::string>>& All()
       const noexcept {
     return names_;
   }
 
  private:
   // Sorted by id.
-  std::vector<std::pair<StatId, std::string>> names_;
+  std::vector<std::pair<std::uint32_t, std::string>> names_;
 };
+
+// Stat names by id, for the projection and, later, the editor.
+class StatNames : public NameTable {};
+
+// Texture names by key (SpriteRenderer::texture), recorded by the loaders so
+// SaveScene writes names back.
+class TextureNames : public NameTable {};
 
 }  // namespace se::rampage
 

@@ -26,6 +26,7 @@
 #include "se_core/hash.h"
 #include "se_core/types.h"
 #include "se_core/world.h"
+#include "se_render_core/render_components.h"
 
 namespace se::rampage {
 namespace {
@@ -409,13 +410,21 @@ class Textures {
   std::vector<std::pair<std::string, Vec2>> sizes_;
 };
 
+// The legacy Sprite: the whole texture, its origin at the centre
+// (core/component/Sprite.cpp), and the collider of R4.
 entt::entity CreateBase(World& world, Guid guid, Vec2 position, float rotation,
-                        Vec2 half, TeamId team) SE_REQUIRES(g_sim_owner) {
+                        std::string_view texture, Vec2 half, TeamId team)
+    SE_REQUIRES(g_sim_owner) {
   const entt::entity e = world.Create(guid);
   entt::registry& reg = world.Reg();
   reg.emplace<Transform>(e, position, rotation, Vec2{1.0F, 1.0F}, Tick{0});
   reg.emplace<Collider>(e, half);
   reg.emplace<Team>(e, team);
+  SpriteRenderer sprite;
+  sprite.texture = reg.ctx().get<TextureNames>().Add(texture);
+  sprite.region = {0.0F, 0.0F, half.x * 2.0F, half.y * 2.0F};
+  sprite.origin = half;
+  reg.emplace<SpriteRenderer>(e, sprite);
   return e;
 }
 
@@ -492,7 +501,7 @@ std::expected<LegacyScenarioSummary, Error> LoadLegacyScenario(
     const LegacyPlayer& p = scenario->player;
     const entt::entity e = CreateBase(world, LegacyGuid(name, 0),
                                       p.position.value_or(Vec2{200.0F, 200.0F}),
-                                      0.0F, *half, TeamId::kFriendly);
+                                      0.0F, "player", *half, TeamId::kFriendly);
     reg.emplace<Name>(e, "player");
     reg.emplace<PlayerControl>(e, std::uint8_t{0}, 120.0F);
     reg.emplace<MoveIntent>(e);
@@ -539,7 +548,7 @@ std::expected<LegacyScenarioSummary, Error> LoadLegacyScenario(
         le.rotation != 0.0F ? RotationFromHeading(le.rotation) : 0.0F;
     const entt::entity e =
         CreateBase(world, LegacyGuid(name, static_cast<std::uint32_t>(i + 1)),
-                   position, rotation, *half, le.team);
+                   position, rotation, le.texture, *half, le.team);
     Stats stats;
     for (const auto& [stat, value] : le.stats) {
       SetStat(stats, names.Add(stat), value);

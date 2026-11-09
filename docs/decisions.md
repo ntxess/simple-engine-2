@@ -319,3 +319,29 @@ projection shows (stat arithmetic, effect timing, the watchdog, spawn
 order, the player's movement, rotation normalisation, the line format)
 independently of the three new rules, and it stays a regression test after
 M3a moves the main goldens on.
+
+## ADR-026 game_rampage draws with SpriteRenderer; scenes name textures (2026-11-08)
+
+**Decision.** game_rampage depends on se_render_core. Its GameModule
+registers RegisterRampageComponents, then RegisterRenderComponents
+(SpriteRenderer, Camera2D), so the render components come after every
+hashed gameplay component and are themselves not hashed. Scenes and
+prefabs write a sprite's texture by name, a key of config/texture.json
+(`"SpriteRenderer": {"texture": "player", ...}`); the loader stores its
+`TextureKeyOf` key (Fnv1a32 of the name, se_render_core/render_components.h)
+and records the name in the World's `TextureNames` (a `NameTable` like
+`StatNames`), and SaveScene writes the name back. The player and enemy
+prefabs draw the legacy Sprite: the whole 48 x 48 `player` texture with its
+origin at the centre; LoadLegacyScenario gives every entity the same from
+its scenario texture and the PNG IHDR size. The sandbox scene places no
+camera: `SandboxCamera(world)` returns the World's primary Camera2D if a
+scene places one, otherwise `ArenaCamera`, the whole arena at zoom 1.
+
+**Why.** The legacy Sandbox drew every entity with the `player` texture
+into a scene render texture of the configured resolution, which is what
+ArenaCamera describes. A camera entity in the sandbox scene would change
+the world hash and add a line to every projection tick, breaking the
+scene's exact match with the legacy `stress` scenario; the camera only
+matters once something renders (M7). Authors cannot write FNV hashes, so
+textures are named as stats are (ADR-024). With nothing hashed added, the
+determinism_rampage goldens and the reference projections are unchanged.
