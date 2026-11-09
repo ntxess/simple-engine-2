@@ -360,8 +360,10 @@ std::expected<void, Error> StatNamesToIds(std::string_view component,
                                           StatNames& names) {
   if (component == "Stats") {
     if (!value.IsObject()) return FailAt("Stats", "expected an object");
+    // The registry form; the component's JSON hook sorts its values and
+    // rejects repeated ids.
     const json::Value* values = value.Find("values");
-    if (values != nullptr && values->IsArray()) return {};  // registry form
+    if (values != nullptr && values->IsArray()) return {};
     std::vector<std::pair<StatId, json::Value>> stats;
     for (const json::Member& member : value.Members()) {
       if (!member.value.IsNumber()) {

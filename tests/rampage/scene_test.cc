@@ -2,9 +2,10 @@
 //
 // Scenes and prefabs (se-scene-v1): the sandbox scene and the prefabs load;
 // merge patches override values and replace arrays whole; saving and
-// reloading a World gives the same hash; malformed scenes are errors; and
-// the sandbox scene (the Sandbox after one press of the editor's Generate
-// button with seed 1) plays exactly like the legacy `stress` scenario.
+// reloading a World gives the same hash; malformed scenes and repeated stat
+// ids are errors; registry-form stats load sorted; and the sandbox scene
+// (the Sandbox after one press of the editor's Generate button with seed 1)
+// plays exactly like the legacy `stress` scenario.
 
 #include "game_rampage/scene.h"
 
@@ -242,6 +243,43 @@ TEST_CASE("Malformed scenes are errors", "[rampage][scene]") {
   CHECK_FALSE(Loads(Scene("{" + guid + R"(, "prefab": "bad"})"), prefabs));
   CHECK_FALSE(Loads(Scene("{" + guid + R"(, "prefab": "missing"})"), prefabs));
   CHECK_FALSE(Loads(Scene("{" + guid + R"(, "colour": "red"})"), prefabs));
+
+  // A repeated id in the registry form of Stats.
+  const auto with = [&guid](std::string_view components) {
+    return Scene("{" + guid + R"(, "components": )" + std::string(components) +
+                 "}");
+  };
+  CHECK(Loads(with(R"({"Stats": {"values": [{"id": 5, "value": 1}]}})"),
+              prefabs));
+  CHECK_FALSE(Loads(with(R"({"Stats": {"values": [{"id": 5, "value": 1},
+                                                  {"id": 5, "value": 2}]}})"),
+                    prefabs));
+}
+
+TEST_CASE("Registry-form stats in any order load sorted", "[rampage][scene]") {
+  const testing::MainThreadScope main_thread;
+  const InlineOwnerScope owner(OnMainThread());
+  testing::RampageTestWorld w;
+  // HP's id (1894470373) is larger than Speed's (174817312).
+  REQUIRE(LoadScene(w.Get(), Scene(R"(
+    {"guid": "00000000-0000-0001-0000-000000000001", "name": "walker",
+     "components": {
+       "Transform": {},
+       "Collider": {"half_extents": {"x": 24, "y": 24}},
+       "Team": {"id": "enemy"},
+       "Stats": {"values": [{"id": 1894470373, "value": 100},
+                            {"id": 174817312, "value": 500}]},
+       "Path": {"points": [{"x": 500, "y": 700}, {"x": 900, "y": 700}]}}})"),
+                    SceneLoadOptions{}));
+  const entt::entity walker = ByName(w.Get(), "walker");
+  REQUIRE(w.Stat(walker, "HP") != nullptr);
+  CHECK(*w.Stat(walker, "HP") == 100.0F);
+  REQUIRE(w.Stat(walker, "Speed") != nullptr);
+  CHECK(*w.Stat(walker, "Speed") == 500.0F);
+  // Alive after a tick (DeathRule finds its HP), and on its way.
+  w.Step();
+  REQUIRE(w.Alive(walker));
+  CHECK(w.Get().CReg().get<Transform>(walker).pos.x > 500.0F);
 }
 
 // The projection of every tick of a session.

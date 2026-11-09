@@ -28,8 +28,9 @@
 // override can change one stat), and an effect's stat as its name
 // ("stat": "HP"). The loader turns these into StatIds and records the names
 // in the World's StatNames; the registry form ({"values": [{"id": ...}]})
-// is accepted as well. SaveScene writes the named form. A SpriteRenderer's
-// texture is written by name too ("texture": "player", a key of
+// is accepted as well, in any order (the Stats hook sorts it; a repeated id
+// is an error). SaveScene writes the named form. A SpriteRenderer's texture
+// is written by name too ("texture": "player", a key of
 // config/texture.json) and stored as its TextureKeyOf key, the names going
 // to the World's TextureNames.
 

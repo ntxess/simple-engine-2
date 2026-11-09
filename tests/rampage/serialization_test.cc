@@ -6,7 +6,9 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include <cstddef>
+#include <cstdint>
 #include <entt/entity/registry.hpp>
+#include <expected>
 #include <map>
 #include <string>
 #include <string_view>
@@ -15,6 +17,8 @@
 #include "game_rampage/components.h"
 #include "se_core/component_registry.h"
 #include "se_core/core_components.h"
+#include "se_core/error.h"
+#include "se_core/guid.h"
 #include "se_core/hash.h"
 
 namespace se::rampage {
@@ -139,6 +143,109 @@ TEST_CASE("Rampage component flags", "[rampage][serialization]") {
   REQUIRE(moved != nullptr);
   CHECK_FALSE(HasFlag(moved->flags, ComponentFlags::kSerialized));
   CHECK(moved->empty);
+}
+
+// A component read by the registry hook of |name|: from |json|, or from
+// the BEVE form of |value|; the hook's error when it fails.
+template <class T>
+std::expected<T, Error> ReadJsonHook(const ComponentRegistry& registry,
+                                     std::string_view name,
+                                     std::string_view json) {
+  const ComponentInfo* info = registry.FindByName(name);
+  REQUIRE(info != nullptr);
+  entt::registry reg;
+  for (const ComponentInfo& each : registry.All()) each.precreate(reg);
+  const entt::entity e = reg.create();
+  if (auto read = info->read_json(reg, e, json); !read) {
+    return std::unexpected(read.error());
+  }
+  return reg.get<T>(e);
+}
+
+template <class T>
+std::expected<T, Error> ReadBeveHook(const ComponentRegistry& registry,
+                                     std::string_view name, const T& value) {
+  const ComponentInfo* info = registry.FindByName(name);
+  REQUIRE(info != nullptr);
+  entt::registry reg;
+  for (const ComponentInfo& each : registry.All()) each.precreate(reg);
+  const entt::entity from = reg.create();
+  reg.emplace<T>(from, value);
+  const auto beve = info->write_beve(reg, from);
+  REQUIRE(beve.has_value());
+  const entt::entity to = reg.create();
+  if (auto read = info->read_beve(reg, to, *beve); !read) {
+    return std::unexpected(read.error());
+  }
+  return reg.get<T>(to);
+}
+
+std::vector<StatId> Ids(const Stats& stats) {
+  std::vector<StatId> ids;
+  ids.reserve(stats.values.size());
+  for (const StatValue& value : stats.values) ids.push_back(value.id);
+  return ids;
+}
+
+std::vector<Guid> Receivers(const PairCooldowns& cooldowns) {
+  std::vector<Guid> receivers;
+  receivers.reserve(cooldowns.pairs.size());
+  for (const PairCooldown& pair : cooldowns.pairs) {
+    receivers.push_back(pair.receiver);
+  }
+  return receivers;
+}
+
+TEST_CASE("Sorted lists are sorted on read; repeated keys are errors",
+          "[rampage][serialization]") {
+  const ComponentRegistry registry = Registry();
+  // Stats by id, which FindStat's binary search needs: HP's id is larger
+  // than Speed's.
+  const auto stats =
+      ReadJsonHook<Stats>(registry, "Stats",
+                          R"({"values":[{"id":1894470373,"value":100},)"
+                          R"({"id":174817312,"value":500}]})");
+  REQUIRE(stats.has_value());
+  CHECK(Ids(*stats) == std::vector<StatId>{kStatSpeed, kStatHp});
+  const float* hp = FindStat(*stats, kStatHp);
+  REQUIRE(hp != nullptr);
+  REQUIRE(*hp == 100.0F);
+  CHECK_FALSE(ReadJsonHook<Stats>(
+      registry, "Stats",
+      R"({"values":[{"id":5,"value":1},{"id":5,"value":2}]})"));
+  const auto beve =
+      ReadBeveHook(registry, "Stats", Stats{{{9, 1.0F}, {2, 2.0F}}});
+  REQUIRE(beve.has_value());
+  CHECK(Ids(*beve) == std::vector<StatId>{2, 9});
+  CHECK_FALSE(ReadBeveHook(registry, "Stats", Stats{{{9, 1.0F}, {9, 2.0F}}}));
+
+  // PairCooldowns by receiver Guid, which R2's lookup needs.
+  const auto pairs = ReadJsonHook<PairCooldowns>(
+      registry, "PairCooldowns",
+      R"({"pairs":[{"receiver":{"hi":2,"lo":0},"last":1},)"
+      R"({"receiver":{"hi":1,"lo":9},"last":2}]})");
+  REQUIRE(pairs.has_value());
+  CHECK(Receivers(*pairs) == std::vector<Guid>{{1, 9}, {2, 0}});
+  REQUIRE(pairs->pairs[0].last == 2);
+  const PairCooldowns twice{{{Guid{1, 1}, 1}, {Guid{1, 1}, 2}}};
+  CHECK_FALSE(ReadBeveHook(registry, "PairCooldowns", twice));
+  const PairCooldowns unsorted{{{Guid{3, 0}, 1}, {Guid{1, 1}, 2}}};
+  const auto beve_pairs = ReadBeveHook(registry, "PairCooldowns", unsorted);
+  REQUIRE(beve_pairs.has_value());
+  CHECK(Receivers(*beve_pairs) == std::vector<Guid>{{1, 1}, {3, 0}});
+
+  // ActiveEffects by seq (R8); equal seqs keep their order.
+  const auto active = ReadJsonHook<ActiveEffects>(
+      registry, "ActiveEffects",
+      R"({"effects":[{"applied":3,"seq":7},{"applied":1,"seq":2},)"
+      R"({"applied":2,"seq":2}]})");
+  REQUIRE(active.has_value());
+  std::vector<std::uint32_t> applied;
+  applied.reserve(active->effects.size());
+  for (const ActiveEffect& effect : active->effects) {
+    applied.push_back(effect.applied);
+  }
+  CHECK(applied == std::vector<std::uint32_t>{1, 2, 3});
 }
 
 TEST_CASE("Enums serialize by name and reject unknown names",

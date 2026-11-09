@@ -302,6 +302,15 @@ merge patch changes one stat (`"overrides": {"Stats": {"Speed": 250}}`)
 where an array would be replaced whole. glaze stays confined: the
 translation is JSON to JSON, in game_rampage's scene loader.
 
+**Review (M3).** The registry form went to glaze unchecked, so a scene
+could load `Stats.values` out of id order, and FindStat's binary search
+then missed stats that were there (an entity with HP read it as absent and
+died in tick 1, R10). The JSON and BEVE hooks of `Stats`, `PairCooldowns`
+and `ActiveEffects` (rampage_components.cc) now sort what they read, by
+stat id, receiver Guid and seq, and reject a repeated stat id or receiver,
+so scenes, snapshots and session-log edits all keep the order the systems
+rely on.
+
 ## ADR-025 The legacy comparison keeps both reference rule sets (2026-11-08)
 
 **Decision.** game_rampage implements R11 to R13 by default. The World
