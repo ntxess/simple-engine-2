@@ -65,6 +65,8 @@ se_add_module(se_tests KIND EXECUTABLE
     kernel/serialization_test.cc
     kernel/session_log_test.cc
     kernel/sim_clock_test.cc
+    kernel/spsc_ring_test.cc
+    kernel/thread_registry_test.cc
     kernel/thread_role_test.cc
     kernel/world_test.cc
   PRIVATE_DEPS

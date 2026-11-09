@@ -10,14 +10,17 @@ se_add_module(se_core KIND STATIC
     src/component_registry.cc
     src/core_components.cc
     src/detmath.cc
+    src/dump_stream.cc
     src/fp.cc
     src/guid.cc
     src/hash.cc
     src/jobs.cc
     src/log.cc
+    src/log_ring.cc
     src/profile_clock.cc
     src/schedule.cc
     src/sim_clock.cc
+    src/thread_registry.cc
     src/thread_role.cc
     src/time.cc
     src/world.cc

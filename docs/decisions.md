@@ -424,3 +424,29 @@ across a save and reload, and here it also dropped the tick-1 contacts of
 event-driven sources. Leaving Moved out of the hash would only hide that
 difference, and a scene-level `moving` flag would say through a new key
 what the component registry already expresses.
+
+## ADR-031 Breadcrumbs and rings live in dump-stream memory (2026-11-08)
+
+**Decision.** The ThreadRegistry's table, every log ring and the InputFrame
+ring are the plain-data layouts of docs/milestone-specs.md "Dump stream
+layout" (se_core/dump_stream.h, pinned by static_assert), and the live
+counters are those fields: `head`, `dropped`, a slot's `packed` breadcrumb
+and `state`. Fields other threads read while they change are accessed
+through `std::atomic_ref` (`AtomicLoad`, `AtomicStore`, and byte-wise
+relaxed stores for names), never through a second copy. A thread's
+`Breadcrumb` (se_core/breadcrumb.h) keeps its API but becomes a handle: it
+writes its own word until a `ThreadSlotScope` binds it to the slot's
+`packed` word, and it carries the value over on bind and unbind. The
+registry hands every region to an optional `DumpStreamHook` (the
+breadcrumb table, the library ring, and each slot's ring when it is
+allocated), which the integration points at se_crash's RegisterStream.
+Rings and the table are allocated once and never freed; the InputFrame ring
+a process registers must likewise never be destroyed. Registry names keep 16
+characters.
+
+**Why.** A crash dump must show the real state, so the memory the threads
+write is the memory the handler reads; a copy refreshed by the producer
+would lag exactly when it matters. `std::atomic_ref` over plain structs
+keeps the layout checkable with `offsetof` and the accesses race-free under
+TSan. Binding the existing Breadcrumb rather than replacing it leaves every
+M2 call site (the Schedule, ForkScope, the tests) unchanged.
