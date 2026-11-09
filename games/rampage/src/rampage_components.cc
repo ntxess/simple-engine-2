@@ -156,8 +156,10 @@ void RegisterRampageComponents(ComponentRegistry& registry) {
   registry.Add<Path>("Path", 1, kState);
   // Derived from Path; rebuilt on load.
   registry.Add<PathCache>("PathCache", 1, kNone);
-  // Set and cleared within a tick (only a load leaves it between ticks).
-  registry.Add<Moved>("Moved", 1, kHashed);
+  // Set and cleared within a tick. Only a load leaves it between ticks (a
+  // legacy scenario's "moving" entities), and then it decides tick 1's
+  // contacts, so it is saved like the rest of the state (ADR-028).
+  registry.Add<Moved>("Moved", 1, kHashed | kSerialized);
 }
 
 }  // namespace se::rampage

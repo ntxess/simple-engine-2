@@ -405,3 +405,22 @@ none of which the reference projections can tell apart:
 the legacy code handled with undefined or endless behaviour; fixing them
 now would change kernel contracts (M2's drain) or the legacy reference
 without a rule to state the new behaviour.
+
+## ADR-028 Moved is serialized (2026-11-08)
+
+**Decision.** game_rampage registers `Moved` as hashed and serialized,
+where the M3b spec says "not serialized". Between ticks only a load leaves
+it: LoadLegacyScenario sets it on a scenario's `"moving"` entities (the
+legacy UpdateEntityEvent at spawn), and it decides which event-driven
+sources act in tick 1 (R2). SaveScene therefore writes `"Moved": {}` for
+such an entity and LoadScene reads it back, so saving a World straight
+after a load and reloading it gives the same hash and the same ticks
+(tests/rampage/scene_test.cc, on the `effects` scenario). A scene may also
+mark an entity as moved for its first tick. Cleanup removes every Moved at
+the end of a tick, so scenes saved later are unchanged.
+
+**Why.** A hashed component that is not serialized changes the world hash
+across a save and reload, and here it also dropped the tick-1 contacts of
+event-driven sources. Leaving Moved out of the hash would only hide that
+difference, and a scene-level `moving` flag would say through a new key
+what the component registry already expresses.

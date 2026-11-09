@@ -127,22 +127,20 @@ TEST_CASE("Rampage component flags", "[rampage][serialization]") {
   const ComponentRegistry registry = Registry();
   for (const std::string_view name :
        {"Team", "Stats", "EffectSource", "PairCooldowns", "ActiveEffects",
-        "Collider", "KinematicBody", "MoveIntent", "PlayerControl", "Path"}) {
+        "Collider", "KinematicBody", "MoveIntent", "PlayerControl", "Path",
+        "Moved"}) {
     INFO(name);
     const ComponentInfo* info = registry.FindByName(name);
     REQUIRE(info != nullptr);
     CHECK(HasFlag(info->flags, ComponentFlags::kHashed));
     CHECK(HasFlag(info->flags, ComponentFlags::kSerialized));
   }
-  // The derived path cache is neither; Moved is not saved.
+  // The derived path cache is neither.
   const ComponentInfo* cache = registry.FindByName("PathCache");
   REQUIRE(cache != nullptr);
   CHECK_FALSE(HasFlag(cache->flags, ComponentFlags::kHashed));
   CHECK_FALSE(HasFlag(cache->flags, ComponentFlags::kSerialized));
-  const ComponentInfo* moved = registry.FindByName("Moved");
-  REQUIRE(moved != nullptr);
-  CHECK_FALSE(HasFlag(moved->flags, ComponentFlags::kSerialized));
-  CHECK(moved->empty);
+  CHECK(registry.FindByName("Moved")->empty);
 }
 
 // A component read by the registry hook of |name|: from |json|, or from

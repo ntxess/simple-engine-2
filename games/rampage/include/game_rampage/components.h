@@ -175,8 +175,10 @@ struct PathCache {
   std::vector<float> totals;
 };
 
-// The entity moved this tick (set by Movement, removed by Cleanup; not
-// serialized): what makes an event-driven source act (R2, R8).
+// The entity moved this tick (set by Movement, removed by Cleanup): what
+// makes an event-driven source act (R2, R8). Between ticks only a load
+// leaves it (a legacy scenario's "moving" entities, or "Moved": {} in a
+// scene), for tick 1; it is hashed and serialized (ADR-028).
 struct Moved {};
 
 // Registers the components above.

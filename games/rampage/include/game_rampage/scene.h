@@ -32,7 +32,9 @@
 // well, in any order (the Stats hook sorts it; a repeated id is an error).
 // SaveScene writes the named form. A SpriteRenderer's texture is written by
 // name too ("texture": "player", a key of config/texture.json) and stored
-// as its TextureKeyOf key, the names going to the World's TextureNames.
+// as its TextureKeyOf key, the names going to the World's TextureNames. An
+// entity loaded as moved (a legacy scenario's "moving" entities) is saved
+// with "Moved": {}, which marks it moved for its first tick (ADR-028).
 
 #ifndef GAME_RAMPAGE_SCENE_H_
 #define GAME_RAMPAGE_SCENE_H_

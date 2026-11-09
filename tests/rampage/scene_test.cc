@@ -2,10 +2,11 @@
 //
 // Scenes and prefabs (se-scene-v1): the sandbox scene and the prefabs load;
 // merge patches override values and replace arrays whole; saving and
-// reloading a World gives the same hash; malformed scenes, unnameable stats
-// and repeated stat ids are errors; registry-form stats load sorted; and the
-// sandbox scene (the Sandbox after one press of the editor's Generate
-// button with seed 1) plays exactly like the legacy `stress` scenario.
+// reloading a World gives the same hash, a World loaded from a legacy
+// scenario included; malformed scenes, unnameable stats and repeated stat
+// ids are errors; registry-form stats load sorted; and the sandbox scene
+// (the Sandbox after one press of the editor's Generate button with seed 1)
+// plays exactly like the legacy `stress` scenario.
 
 #include "game_rampage/scene.h"
 
@@ -21,6 +22,7 @@
 #include <vector>
 
 #include "game_rampage/components.h"
+#include "game_rampage/legacy_scenario.h"
 #include "game_rampage/module.h"
 #include "game_rampage/projection.h"
 #include "rampage/support/rampage_session.h"
@@ -291,6 +293,36 @@ TEST_CASE("Registry-form stats in any order load sorted", "[rampage][scene]") {
   w.Step();
   REQUIRE(w.Alive(walker));
   CHECK(w.Get().CReg().get<Transform>(walker).pos.x > 500.0F);
+}
+
+TEST_CASE("A World loaded from a legacy scenario saves and reloads exactly",
+          "[rampage][scene]") {
+  const testing::MainThreadScope main_thread;
+  const InlineOwnerScope owner(OnMainThread());
+  testing::RampageTestWorld original;
+  LegacyScenarioOptions legacy;
+  legacy.root = testing::RampageRepoRoot();
+  REQUIRE(LoadLegacyScenario(
+      original.Get(),
+      testing::RampageFixtureDir() + "/reference/effects.scenario.json",
+      legacy));
+  // Its "moving" entities are Moved into tick 1, where the event-driven
+  // sources among them act.
+  REQUIRE_FALSE(original.Get().CReg().view<Moved>().empty());
+  const auto saved = SaveScene(original.Get(), "effects");
+  REQUIRE(saved.has_value());
+  CHECK(saved->find("\"Moved\": {}") != std::string::npos);
+  testing::RampageTestWorld reloaded;
+  REQUIRE(LoadScene(reloaded.Get(), *saved, SceneLoadOptions{}));
+  CHECK(reloaded.Get().Hash() == original.Get().Hash());
+  CHECK(reloaded.Get().Digests() == original.Get().Digests());
+  CHECK(SaveScene(reloaded.Get(), "effects").value() == *saved);
+  for (int tick = 1; tick <= 240; ++tick) {
+    original.Step();
+    reloaded.Step();
+    INFO("tick " << tick);
+    REQUIRE(reloaded.Get().Hash() == original.Get().Hash());
+  }
 }
 
 // The projection of every tick of a session.
