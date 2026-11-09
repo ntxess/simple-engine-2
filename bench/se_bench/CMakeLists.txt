@@ -68,6 +68,9 @@ endfunction()
 se_bench_suite(renderlist_10k
   SOURCES suites/renderlist_10k.cc
   DEPS se_render_core)
+se_bench_suite(render_frame_10k
+  SOURCES suites/render_frame_10k.cc
+  DEPS se_render_core)
 se_bench_suite(rampage_tick_5k
   SOURCES suites/rampage_tick_5k.cc
   DEPS game_rampage)
