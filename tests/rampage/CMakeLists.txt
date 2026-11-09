@@ -13,9 +13,6 @@
 #   ref.sandbox_v1.NAME   the same with --legacy-rules v1 against the
 #                         legacy-ref-v1 goldens kept in
 #                         tests/fixtures/reference/v1/
-#
-# Until tests/fixtures/reference/ holds the legacy-ref-v2 goldens (M3a), its
-# files equal the v1 copies, and ref.sandbox.NAME is registered disabled.
 
 # game_rampage's link-graph contract: never SDL, ImGui, audio, crash or LZ4
 # libraries (checked against every module's closure by se_check_link_graph).
@@ -81,7 +78,7 @@ set(_se_ref "${CMAKE_SOURCE_DIR}/tests/fixtures/reference")
 set(_se_refcmp "${CMAKE_SOURCE_DIR}/tools/refcmp/refcmp.py")
 
 # Legacy comparisons: run, then compare (fixtures order the two).
-function(_se_reference_test name dir rules golden disabled)
+function(_se_reference_test name dir rules golden)
   set(_out "${_se_rampage_out}/${name}.seproj")
   add_test(NAME ${name}.run
     COMMAND se_replay --module rampage
@@ -95,24 +92,12 @@ function(_se_reference_test name dir rules golden disabled)
     FIXTURES_SETUP ${name} LABELS "reference;rampage")
   set_tests_properties(${name} PROPERTIES
     FIXTURES_REQUIRED ${name} LABELS "reference;rampage")
-  if(disabled)
-    set_tests_properties(${name}.run ${name} PROPERTIES DISABLED TRUE)
-  endif()
 endfunction()
 
 foreach(_se_name stress effects patrol)
-  file(SHA256 "${_se_ref}/${_se_name}.seproj.gz" _se_v2)
-  file(SHA256 "${_se_ref}/v1/${_se_name}.seproj.gz" _se_v1)
-  set(_se_pending FALSE)
-  if(_se_v2 STREQUAL _se_v1)
-    set(_se_pending TRUE)
-    message(STATUS "ref.sandbox.${_se_name} disabled: "
-                   "tests/fixtures/reference still holds legacy-ref-v1")
-  endif()
-  _se_reference_test(ref.sandbox.${_se_name} "${_se_ref}" v2 ${_se_name}
-                     ${_se_pending})
+  _se_reference_test(ref.sandbox.${_se_name} "${_se_ref}" v2 ${_se_name})
   _se_reference_test(ref.sandbox_v1.${_se_name} "${_se_ref}/v1" v1
-                     ${_se_name} FALSE)
+                     ${_se_name})
 endforeach()
 
 # refcmp itself: a projection equals itself, and a changed stat is found.
