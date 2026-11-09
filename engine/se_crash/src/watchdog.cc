@@ -30,6 +30,7 @@
 
 #include "se_core/error.h"
 #include "se_core/log.h"
+#include "se_core/profile.h"
 #include "se_core/spsc_ring.h"
 #include "se_core/thread_role.h"
 #include "se_crash/crash.h"
@@ -123,6 +124,8 @@ void Watchdog::State::Run(const std::stop_token& stop) {
     if (wake.try_acquire_for(std::chrono::nanoseconds(wait_ns))) {
       wake_pending.exchange(false, std::memory_order_acq_rel);
     }
+    // A zone per wake, so the thread shows in a capture under its name.
+    SE_PROFILE_ZONE("Watchdog wake");
     ServeRequests();
     if (stop.stop_requested()) break;
     const std::uint64_t now = UnbiasedNowNs();

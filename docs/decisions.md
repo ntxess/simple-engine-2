@@ -949,3 +949,14 @@ own test (`checks.planted.dump_header`, on the dump_write fixture).
 "never DebugBreak"), and each gap the review found (an async launch, a
 debug trap, `<WINDOWS.H>`, an opt-out comment) passed CI; a fixture whose
 first file fires no longer hides a second form that does not.
+
+## ADR-049 The log worker and the watchdog emit a zone per wake (2026-11-09)
+
+**Decision.** `LogWorker drain` (each DrainOnce) and `Watchdog wake` (each
+watchdog wake) are profiler zones. Inert unless `--profile` started Tracy,
+they make both helper threads appear in a capture, and their first zone
+after profile::Start() applies the Tracy name RoleScope recorded before the
+start (ADR-029): the log worker starts at boot step 2, before the profiler.
+
+**Why.** Tracy names a thread only through that thread's own events, and
+neither helper had any, so the "named threads" gate could not pass.

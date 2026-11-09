@@ -40,6 +40,7 @@
 #include "se_core/error.h"
 #include "se_core/log.h"
 #include "se_core/log_ring.h"
+#include "se_core/profile.h"
 #include "se_core/profile_clock.h"
 #include "se_core/thread_registry.h"
 #include "se_core/thread_role.h"
@@ -338,6 +339,10 @@ void LogWorker::State::Park() {
 }
 
 void LogWorker::State::DrainOnce(bool everything) {
+  // A zone per wake. Its first one after profile::Start() also gives Tracy
+  // this thread's name, which RoleScope recorded before the profiler
+  // started (the worker starts at boot step 2, the profiler after it).
+  SE_PROFILE_ZONE("LogWorker drain");
   ThreadRegistry& registry = ThreadRegistry::Instance();
   // Records older than every write in progress can be written; a write in
   // progress stamps its record at or after its start.
