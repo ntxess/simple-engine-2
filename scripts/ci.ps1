@@ -14,11 +14,15 @@
   scripts/ci.ps1 -Presets legacy-msvc-debug,legacy-msvc-release
                                        # the legacy reference (build + "legacy" tests)
   scripts/ci.ps1 -Legacy               # appends both legacy presets to the selection
+  scripts/ci.ps1 -Desktop              # the desktop label (real windows on this
+                                       # desktop) on msvc-dev and msvc-asan; with
+                                       # -Presets or -Legacy, after those
 #>
 param(
   [string[]]$Presets = @('msvc-dev', 'msvc-asan', 'clangcl-dev'),
   [switch]$Milestone,
-  [switch]$Legacy
+  [switch]$Legacy,
+  [switch]$Desktop
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
@@ -36,6 +40,17 @@ if ($Milestone) {
 }
 if ($Legacy) {
   $Presets = @($Presets) + @('legacy-msvc-debug', 'legacy-msvc-release')
+}
+# Desktop tests (label desktop) open real windows, so the commit-gate test
+# presets exclude them; -Desktop runs them on msvc-dev and msvc-asan, and
+# -Milestone includes them. Alone, -Desktop runs nothing else.
+$desktopPresets = @()
+if ($Desktop -or $Milestone) {
+  $desktopPresets = @('msvc-dev', 'msvc-asan')
+  if ($Desktop -and -not $Milestone -and -not $Legacy -and
+      -not $PSBoundParameters.ContainsKey('Presets')) {
+    $Presets = @()
+  }
 }
 function ConvertTo-WslPath([string]$Path) {
   $full = [System.IO.Path]::GetFullPath($Path)
@@ -63,8 +78,18 @@ foreach ($preset in $Presets) {
   }
   if ($LASTEXITCODE -ne 0) { $failed += $preset }
 }
+foreach ($preset in $desktopPresets) {
+  Write-Host "=== desktop: $preset ===" -ForegroundColor Cyan
+  # No message box may wait for a click during a desktop test.
+  $env:SE_NO_MESSAGE_BOX = '1'
+  $msvc = "`"$repo\scripts\with-msvc.cmd`""
+  $tree = "`"$repo\out\build\$preset`""
+  & cmd.exe /c "$msvc cmake --preset $preset && $msvc cmake --build --preset $preset && $msvc ctest --test-dir $tree -L desktop --output-on-failure"
+  if ($LASTEXITCODE -ne 0) { $failed += "desktop:$preset" }
+}
 if ($failed.Count -gt 0) {
   Write-Host "FAILED: $($failed -join ', ')" -ForegroundColor Red
   exit 1
 }
-Write-Host "All presets passed: $($Presets -join ', ')" -ForegroundColor Green
+$passed = @($Presets) + @($desktopPresets | ForEach-Object { "desktop:$_" })
+Write-Host "All presets passed: $($passed -join ', ')" -ForegroundColor Green

@@ -30,6 +30,7 @@ behaviour reference until every rule and editor operation is ported.
 | se_sim | engine/se_sim | Game modules, GameStateStack, SessionLog, replays, SimDriver (M2) |
 | se_render_core | engine/se_render_core | Headless renderer half: SpriteRenderer, Camera2D, BuildRenderList; depends on se_core only (M3) |
 | game_rampage | games/rampage | The legacy Sandbox's gameplay on the kernel: components, systems, scenes and prefabs (assets/), legacy scenarios, projections (M3) |
+| se_platform | engine/se_platform | SDL3 on the main thread: SDL's initialisation, the event filter and Inbox, WakeMain, the window and its Win32 subclass (Modal, session end, power), se::fs on SDL's filesystem API (M5) |
 | se_replay | tools/se_replay | Headless runs of a game module: per-tick hashes, replays, projections |
 | refcmp | tools/refcmp/refcmp.py | Compares two `.seproj` projections within the M3 tolerances (Python 3, stdlib only) |
 | se_bench | bench/se_bench | Benchmark suites and their Release gates (`bench.*`) |
@@ -78,5 +79,8 @@ bench/thresholds.json; run them on an otherwise idle machine.
 
 `scripts/ci.ps1` runs the commit gate (msvc-dev, msvc-asan, clangcl-dev,
 including the `lint` and `checks` test labels); `scripts/ci.ps1 -Milestone`
-adds Debug, Release and the WSL Linux sanitizer presets. The legacy tree
+adds Debug, Release, the WSL Linux sanitizer presets and the desktop
+tests. `scripts/ci.ps1 -Desktop` runs only the desktop tests (label
+`desktop`: real windows on this machine's desktop, opened without taking
+focus) on msvc-dev and msvc-asan. The legacy tree
 builds with the `legacy-msvc-debug` and `legacy-msvc-release` presets.

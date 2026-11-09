@@ -226,7 +226,7 @@
       "configurePreset": "msvc-debug",
       "filter": {
         "exclude": {
-          "label": "slow|lint|bench"
+          "label": "slow|lint|bench|desktop"
         }
       }
     },
@@ -236,7 +236,7 @@
       "configurePreset": "msvc-dev",
       "filter": {
         "exclude": {
-          "label": "bench"
+          "label": "bench|desktop"
         }
       }
     },
@@ -246,7 +246,7 @@
       "configurePreset": "msvc-release",
       "filter": {
         "exclude": {
-          "label": "lint"
+          "label": "lint|desktop"
         }
       }
     },
@@ -256,7 +256,7 @@
       "configurePreset": "msvc-asan",
       "filter": {
         "exclude": {
-          "label": "lint|bench"
+          "label": "lint|bench|desktop"
         }
       }
     },
@@ -266,7 +266,7 @@
       "configurePreset": "clangcl-dev",
       "filter": {
         "exclude": {
-          "label": "bench"
+          "label": "bench|desktop"
         }
       }
     },

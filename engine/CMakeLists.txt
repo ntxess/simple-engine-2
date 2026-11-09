@@ -4,3 +4,9 @@
 add_subdirectory(se_core)
 add_subdirectory(se_sim)
 add_subdirectory(se_render_core)
+
+# The SDL3 platform, the renderer and the runtime (M5). Window and GPU
+# tests carry the desktop and gpu labels.
+if(SE_BUILD_PLATFORM)
+  add_subdirectory(se_platform)
+endif()
