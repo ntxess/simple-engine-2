@@ -1684,10 +1684,10 @@ on 2026-11-09:
   floor((submit - target - slack) / period) + 1 vblanks late), and
   unresolved otherwise, never a hit. Presents without a target or whose
   wait never ran (Modal frames) are unresolved.
-- The offset is 0, measured: the waits return 0.35 ms (D3D12) and 0.31 ms
-  (Vulkan) after the target's sampler stamp at p50, 1.2 and 1.1 ms at
-  p99, never more than 1.5 ms; a one-vblank offset would have shown as
-  every present late.
+- The offset is 0, measured over six 20 s runs: the waits return after
+  the target's sampler stamp at p50 0.02 to 0.35 ms and p99 0.12 to
+  1.2 ms on both backends, at most 2.4 ms, against a 6.06 ms period; a
+  one-vblank offset would have shown as every present late.
 - Targets lie ahead of now by the same slack (EarlySlackNs): PlanPacedWake
   takes the first grid vblank after now + slack, and Standard's target is
   one interval after the grid vblank at or before now + slack (its frame
@@ -1706,7 +1706,7 @@ on 2026-11-09:
 - In Standard's HalfRate the re-presented composite is registered and
   waited for like the frame's own present (one wait per present).
 - Measured with the display awake (desktop tests, 20 s of rampage, Paced
-  at 165 Hz): D3D12 0 of 3298 presents late; the injected 30 ms frame one
+  at 165 Hz): D3D12 0 or 1 of about 3298 presents late (0.03% at most); the injected 30 ms frame one
   miss (submitted 28 ms after its target), on time from the next frame.
   Vulkan 50 to 82 of about 2250 (2.2% to 3.6%) one vblank late, with the
   same submit lead as the hits (p50 2.3 ms against 2.2 ms): NVIDIA's
