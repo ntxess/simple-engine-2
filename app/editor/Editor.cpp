@@ -839,16 +839,14 @@ void Editor::updateWayPointComponent(const entt::entity& entityID, ComponentProp
         {
             // Sprite with a waypoint component but no next waypoint will still have the initial position of the sprite as its sole waypoint
             std::unique_ptr<WayPoint> root = std::make_unique<WayPoint>(sf::Vector2f{ sprite.getPosition().x, sprite.getPosition().y });
-            movement.currentPath = root.get();
-            movement.distance = 0.f;
+            movement.restart();
             m_selectedSceneData->getRegistry().emplace_or_replace<MovementPattern>(entityID, std::move(root), true);
         }
         else
         {
             // Always reset the current movement progress to keep sprite position consistant 
             WayPoint* current = movement.movePattern.get();
-            movement.currentPath = movement.movePattern.get();
-            movement.distance = 0.f;
+            movement.restart();
             sprite.setPosition({ current->coordinate.x, current->coordinate.y });
 
             // Find last and second to last waypoint
@@ -883,7 +881,7 @@ void Editor::updateWayPointComponent(const entt::entity& entityID, ComponentProp
                 {
                     // Reset movement pattern to the current pos of sprite if last waypoint is removed
                     movement.movePattern = std::make_unique<WayPoint>(sf::Vector2f{ sprite.getPosition().x, sprite.getPosition().y });
-                    movement.currentPath = movement.movePattern.get();
+                    movement.restart();
                 }
             }
         }

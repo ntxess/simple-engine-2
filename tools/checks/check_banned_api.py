@@ -11,6 +11,10 @@ Rules (docs/style.md and docs/decisions.md):
       SDL_GetTicks
     - no unseeded randomness: random_device, rand()
     - no CRT transcendentals (sin, cos, atan2, exp, pow, ...): use se::dm
+    - no mutable static variables (a `static` declaration that is not const,
+      constexpr or constinit): state shared by every World and thread, and
+      a non-trivial one is also destroyed at exit (Google C++ style); a
+      never-destroyed singleton is `static T* const k = new T`
 
 A line may opt out of one rule with `// se-allow(<rule>): <reason>`.
 Test modules (kind "test") are exempt.
@@ -41,6 +45,11 @@ DETERMINISM_RULES = [
     ("random", re.compile(r"\brandom_device\b|(?<![\w.>:])(std::)?rand\s*\(")),
     ("math", re.compile(
         r"(?<![\w.>])(?:std::|::)?(?:" + TRANSCENDENTALS + r")[fl]?\s*\(")),
+    # `static <type> <name>` followed by = ; { or [ (a variable, not a
+    # function), with no const, constexpr or constinit before the name.
+    ("static", re.compile(
+        r"(?:^|[;{}])\s*static\s+(?![^=;{(]*\bconst(?:expr|init)?\b)"
+        r"[\w:<>,\s*&]*?[\w>*&]\s*\b[A-Za-z_]\w*\s*(?:=|;|\{|\[)")),
 ]
 CATCH_RE = re.compile(r"\bcatch\s*\(")
 FAULT_BOUNDARY = "se-fault-boundary"

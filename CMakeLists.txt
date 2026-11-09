@@ -38,8 +38,12 @@ enable_testing()
 
 if(SE_BUILD_ENGINE)
   add_subdirectory(engine)
+  add_subdirectory(games)
   if(SE_BUILD_TESTS)
     add_subdirectory(tests)
+  endif()
+  if(SE_BUILD_BENCH)
+    add_subdirectory(bench)
   endif()
 endif()
 

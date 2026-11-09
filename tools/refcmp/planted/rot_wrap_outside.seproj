@@ -1,0 +1,14 @@
+# seproj v1 rate=120
+# t <tick> <fnv1a64 of the block>, then per entity in SpawnIndex order:
+# <spawn> <x> <y> <rotation> <HP> [<stat>=<value> ...] (%.9g, '-' = absent)
+t 0 0123456789abcdef
+0 200 200 0 100 Charge=10
+1 500.25 300 0.0006 64
+2 10 20 90 - Speed=500
+3 0 0 0 1
+t 1 0123456789abcdef
+0 201 200 0 100 Charge=10
+1 500.5 300 0.0004 64
+2 11 20 90 - Speed=500
+3 0 0 0 1
+# run 2 0123456789abcdef

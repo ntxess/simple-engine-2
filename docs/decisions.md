@@ -226,3 +226,201 @@ packed arrays the chunks index. The signals see every structural path,
 typed or type-erased, and only the captured storages count, so unrelated
 structural changes (a DestroyRequest, a new Name) do not invalidate a view.
 Release builds connect nothing.
+
+## ADR-022 RenderList conventions: degrees, canvas pixels, texel UVs (2026-11-08)
+
+**Decision.** se_render_core (M3c) fixes the conventions the M3 spec leaves
+open, so game modules, the GPU backend (M7) and the editor (M10) agree:
+- `Transform::rot` and `PrevTransform::rot` are degrees, clockwise on screen
+  (y grows downwards), as in the legacy tree's sf::Sprite and in the
+  rotations game_rampage projects (R12's heading). The renderer converts
+  them to radians for `se::dm::SinCos`. *Superseded at the M3 integration
+  by ADR-023: the unit is radians, still clockwise on screen.*
+- `SpriteQuad::pos` is in canvas pixels of the camera (0..virtual_size,
+  y down): `(world - center) * zoom + virtual_size / 2`. The backend maps the
+  canvas to the window (letterboxing, `Camera2D::integer_scale`).
+- `SpriteQuad::uv` is texel coordinates inside the texture
+  (`region.x .. region.x + region.w`); only the backend knows texture sizes.
+- Corners are ordered top-left, top-right, bottom-right, bottom-left of the
+  unrotated sprite. `SpriteRenderer::origin` is the pivot of position,
+  rotation and scale (sf::Sprite's origin), and `flip_x`/`flip_y` mirror the
+  sprite about it, keeping the corner order (the texture coordinates swap).
+- Culling keeps a sprite only when its rotated bounds overlap the canvas with
+  a positive area; touching an edge is culled.
+- Interpolation uses PrevTransform only when it is from the tick before the
+  World's current tick and `teleport_tick` is not the current tick; a half
+  turn between ticks goes the negative way.
+- `RenderList` carries a `scratch` member (sort items and unsorted quads)
+  beside the spec's `quads`, `batches` and `stats`, so `BuildRenderList` keeps
+  the spec's signature and still allocates nothing once warm.
+
+**Why.** The spec gives the types but not the units. Degrees match the
+reference the M3 comparison runs against and the `.seproj` rotations;
+canvas pixels and texel UVs keep the headless list free of GPU and asset
+knowledge until M7 and M9. (The rotation unit was settled the other way by
+ADR-023 when M3b and M3c were merged.)
+
+## ADR-023 Transform::rot is in radians, the way sf::Angle stores it (2026-11-08)
+
+**Decision.** `Transform::rot` and `PrevTransform::rot` hold radians.
+game_rampage keeps them in [0, 2 pi): a heading in degrees becomes
+`degrees * (pi / 180)` wrapped by sf::Angle's `positiveRemainder`, with
+SFML's float constants and operation order (`RotationFromHeading`), and the
+projection prints `rot * (180 / pi)` normalised to [0, 360). Editors and
+scene authors may show degrees; components store radians.
+
+**Why.** se::dm's SinCos and Atan2 work in radians (the kernel test module
+already stores Atan2's result), the RenderList (M3c) rotates corners with
+`dm::SinCos(rot)`, and copying sf::Angle's operations made the engine's
+legacy-ref-v1 projections bit-identical to the reference's (refcmp reports
+zero deviation on all three scenarios), rotation included.
+
+**Integration (M3).** M3b and M3c were written in parallel and chose
+different units: ADR-022's first bullet (M3c) said degrees. Radians win,
+and that bullet is superseded: the kernel test module, se::dm and
+game_rampage already store radians, the determinism goldens hash them, and
+the reference comparison is exact with them, while the RenderList needed
+only its conversion factor removed. `BuildRenderList` now passes
+`Transform::rot` to `dm::SinCos` unchanged, and the shorter arc of the
+interpolation is taken in [-pi, pi) (a half turn still goes the negative
+way). Positive angles still turn clockwise on screen (y down), as
+sf::Sprite's do, so RotationFromHeading's values draw the legacy headings.
+
+## ADR-024 Scene files name stats; components store their ids (2026-11-08)
+
+**Decision.** In se-scene-v1 scenes and prefabs, `Stats` is written as an
+object of named values (`"Stats": {"HP": 100, "Speed": 500}`) and an
+effect's stat as its name (`"stat": "HP"`). The loader turns them into the
+registry form (`{"values": [{"id": <Fnv1a32 of the name>, ...}]}`, sorted
+by id) before the component's JSON hook reads it, and records the names in
+the World's StatNames; SaveScene writes the named form back. The registry
+form is accepted as well. An entity with a Path whose Transform sets no
+position starts at the path's first point (R12).
+
+**Why.** Authors cannot write FNV hashes, and with stats as an object a
+merge patch changes one stat (`"overrides": {"Stats": {"Speed": 250}}`)
+where an array would be replaced whole. glaze stays confined: the
+translation is JSON to JSON, in game_rampage's scene loader.
+
+**Review (M3).** The registry form went to glaze unchecked, so a scene
+could load `Stats.values` out of id order, and FindStat's binary search
+then missed stats that were there (an entity with HP read it as absent and
+died in tick 1, R10). The JSON and BEVE hooks of `Stats`, `PairCooldowns`
+and `ActiveEffects` (rampage_components.cc) now sort what they read, by
+stat id, receiver Guid and seq, and reject a repeated stat id or receiver,
+so scenes, snapshots and session-log edits all keep the order the systems
+rely on. Stat names, in scenes and legacy scenarios alike, must be
+non-empty and have distinct ids (`InternStatName`): two names with one
+Fnv1a32 id would be one stat, and an empty name could not be printed in
+the projection.
+
+## ADR-025 The legacy comparison keeps both reference rule sets (2026-11-08)
+
+**Decision.** game_rampage implements R11 to R13 by default. The World
+setting `RulesConfig::version = kV1` (`se_replay --legacy-rules v1`)
+restores the legacy-ref-v1 boundary clamp and path stepping, nothing else.
+`ref.sandbox_v1.NAME` compares that build against the legacy-ref-v1
+goldens, kept with their scenarios and inputs in
+tests/fixtures/reference/v1/; `ref.sandbox.NAME` compares the default build
+against tests/fixtures/reference/ (legacy-ref-v2 once M3a re-baselines it).
+CMake registers `ref.sandbox.NAME` disabled while the two directories'
+goldens are identical, that is until M3a's goldens arrive. (At the M3
+integration M3a's goldens arrived and that condition was removed: both
+comparisons always run, so a golden mix-up fails instead of disabling a
+test.)
+
+**Why.** The v1 comparison proves the port of R1 to R10 and everything the
+projection shows (stat arithmetic, effect timing, the watchdog, spawn
+order, the player's movement, rotation normalisation, the line format)
+independently of the three new rules, and it stays a regression test after
+M3a moves the main goldens on.
+
+## ADR-026 game_rampage draws with SpriteRenderer; scenes name textures (2026-11-08)
+
+**Decision.** game_rampage depends on se_render_core. Its GameModule
+registers RegisterRampageComponents, then RegisterRenderComponents
+(SpriteRenderer, Camera2D), so the render components come after every
+hashed gameplay component and are themselves not hashed. Scenes and
+prefabs write a sprite's texture by name, a key of config/texture.json
+(`"SpriteRenderer": {"texture": "player", ...}`); the loader stores its
+`TextureKeyOf` key (Fnv1a32 of the name, se_render_core/render_components.h)
+and records the name in the World's `TextureNames` (a `NameTable` like
+`StatNames`), and SaveScene writes the name back. The player and enemy
+prefabs draw the legacy Sprite: the whole 48 x 48 `player` texture with its
+origin at the centre; LoadLegacyScenario gives every entity the same from
+its scenario texture and the PNG IHDR size. The sandbox scene places no
+camera: `SandboxCamera(world)` returns the World's primary Camera2D if a
+scene places one, otherwise `ArenaCamera`, the whole arena at zoom 1.
+
+**Why.** The legacy Sandbox drew every entity with the `player` texture
+into a scene render texture of the configured resolution, which is what
+ArenaCamera describes. A camera entity in the sandbox scene would change
+the world hash and add a line to every projection tick, breaking the
+scene's exact match with the legacy `stress` scenario; the camera only
+matters once something renders (M7). Authors cannot write FNV hashes, so
+textures are named as stats are (ADR-024). With nothing hashed added, the
+determinism_rampage goldens and the reference projections are unchanged.
+
+## ADR-027 M3 behaviours the spec did not fix, accepted at integration (2026-11-08)
+
+**Decision.** The M3 integration keeps these behaviours of the merged parts,
+none of which the reference projections can tell apart:
+- Cleanup drains destroy requests in Guid order (`World::DrainDestroyRequests`,
+  M2), not in spawn-serial order as the M3b table says. game_rampage never
+  creates entities after a load and nothing reads the order, and the world
+  hash does not depend on it. Revisit when gameplay spawns at run time.
+- Opposite directions held together (Up+Down, Left+Right) move the player
+  by their net intent, 0, where the legacy Movement applied two sequential
+  steps, `(y - s) + s`, which can differ in the last bit at non-integer
+  positions. No reference input holds opposite keys.
+- Degenerate paths (corrected after the M3 review). AdvancePath follows
+  R12's loop with the legacy WayPointSystem's own guard and nothing else: at
+  each wrap of a repeating path, a remaining step that is not smaller than
+  at the previous wrap (a round lost in float rounding, or a NaN or infinite
+  speed) becomes 0, so the step ends at the start of the path. A step can
+  go round many times in one tick, as in the reference: a 1 px loop at
+  2e7 px/s passes 166666 segments, a loop of 2^-14 px segments at the
+  stress speed of 500 px/s passes 68266. The integration first stopped
+  after 65536 iterations and extrapolated past the segment's end, which
+  left the polyline at those inputs; the claim that its guard fired only
+  near 1e9 px/s was wrong. One difference remains: a segment of NaN length,
+  which only infinite coordinates (beyond 3.4e38) produce, is skipped like
+  one of length 0, where the legacy code moves to NaN or, on a loop, goes
+  round for ever. A path whose segment is out of range (after an edit)
+  starts over, as in the legacy code. RotationFromHeading returns 0 for
+  non-finite or enormous headings (an undefined int cast in the legacy
+  code).
+- LoadLegacyScenario rejects what the World cannot represent, which the
+  legacy loader accepts: an empty stat name (the projection cannot print
+  it, ADR-024) and two stat names with the same Fnv1a32 id (they would be
+  one stat). The legacy Sandbox prints the empty name as `=<value>`.
+- `se_replay --module rampage` rejects `--edits` and `--det-crosscheck`:
+  World::Clone does not copy the registry ctx that holds the scene settings
+  (a kernel question for M10 and M14).
+- The PathCache is rebuilt when a path's point or segment count changes; an
+  edit that moves a point without changing the count (M10) must rebuild it
+  explicitly.
+
+**Why.** Each is either unobservable in M3's content or a guard for input
+the legacy code handled with undefined or endless behaviour; fixing them
+now would change kernel contracts (M2's drain) or the legacy reference
+without a rule to state the new behaviour.
+
+## ADR-028 Moved is serialized (2026-11-08)
+
+**Decision.** game_rampage registers `Moved` as hashed and serialized,
+where the M3b spec says "not serialized". Between ticks only a load leaves
+it: LoadLegacyScenario sets it on a scenario's `"moving"` entities (the
+legacy UpdateEntityEvent at spawn), and it decides which event-driven
+sources act in tick 1 (R2). SaveScene therefore writes `"Moved": {}` for
+such an entity and LoadScene reads it back, so saving a World straight
+after a load and reloading it gives the same hash and the same ticks
+(tests/rampage/scene_test.cc, on the `effects` scenario). A scene may also
+mark an entity as moved for its first tick. Cleanup removes every Moved at
+the end of a tick, so scenes saved later are unchanged.
+
+**Why.** A hashed component that is not serialized changes the world hash
+across a save and reload, and here it also dropped the tick-1 contacts of
+event-driven sources. Leaving Moved out of the hash would only hide that
+difference, and a scene-level `moving` flag would say through a new key
+what the component registry already expresses.

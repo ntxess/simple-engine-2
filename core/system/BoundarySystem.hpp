@@ -11,9 +11,8 @@
 #include "interface/ISystem.hpp"
 
 /**
- * @brief Keeps every sprite inside the scene bounds, after movement and before collision
- * (rule R9, docs/rules/gameplay-rules.md). The correction itself is the legacy one
- * (Sandbox::checkBoundary), kept literally.
+ * @brief Keeps every sprite's collider inside the scene bounds, after movement and before
+ * collision (rules R9 and R11, docs/rules/gameplay-rules.md).
 */
 class BoundarySystem : public ISystem
 {

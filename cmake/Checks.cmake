@@ -18,6 +18,35 @@ function(_se_real_target out name)
   set(${out} "${_n}" PARENT_SCOPE)
 endfunction()
 
+# Collects the targets <tgt> links directly (aliases resolved; generator
+# expressions other than $<LINK_ONLY:...> and link flags skipped) into <out>.
+function(_se_direct_deps out tgt)
+  _se_real_target(_t "${tgt}")
+  get_target_property(_type "${_t}" TYPE)
+  set(_deps "")
+  if(NOT _type STREQUAL "INTERFACE_LIBRARY")
+    get_target_property(_l "${_t}" LINK_LIBRARIES)
+    if(_l)
+      list(APPEND _deps ${_l})
+    endif()
+  endif()
+  get_target_property(_i "${_t}" INTERFACE_LINK_LIBRARIES)
+  if(_i)
+    list(APPEND _deps ${_i})
+  endif()
+  set(_result "")
+  foreach(_d ${_deps})
+    string(REGEX REPLACE "^\\$<LINK_ONLY:(.*)>$" "\\1" _d "${_d}")
+    if(_d MATCHES "^\\$<" OR _d MATCHES "^-")
+      continue()
+    endif()
+    _se_real_target(_d "${_d}")
+    list(APPEND _result "${_d}")
+  endforeach()
+  list(REMOVE_DUPLICATES _result)
+  set(${out} "${_result}" PARENT_SCOPE)
+endfunction()
+
 # Collects the transitive link closure of <tgt> into <out>.
 function(_se_link_closure out tgt)
   set(_seen "")
@@ -66,6 +95,32 @@ function(se_check_link_graph)
         string(APPEND _errors "  ${_m} reaches forbidden target ${_f}\n")
       endif()
     endforeach()
+    # ALLOW_ONLY: direct links within the list (plus the flag targets), and
+    # nothing in the closure that the allowed targets do not already reach.
+    get_target_property(_allow ${_m} SE_ALLOW_ONLY)
+    if(_allow)
+      set(_allowed se_warnings se_determinism)
+      set(_reachable ${_m} se_warnings se_determinism)
+      foreach(_a ${_allow})
+        _se_real_target(_ra "${_a}")
+        list(APPEND _allowed "${_ra}")
+        _se_link_closure(_ac "${_ra}")
+        list(APPEND _reachable ${_ac})
+      endforeach()
+      _se_direct_deps(_direct ${_m})
+      foreach(_d ${_direct})
+        if(NOT _d IN_LIST _allowed)
+          string(APPEND _errors
+            "  ${_m} links ${_d}, which is not in its ALLOW_ONLY list\n")
+        endif()
+      endforeach()
+      foreach(_c ${_closure})
+        if(NOT _c IN_LIST _reachable)
+          string(APPEND _errors
+            "  ${_m} reaches ${_c}, outside what its ALLOW_ONLY list reaches\n")
+        endif()
+      endforeach()
+    endif()
     # Legacy and new targets must never meet.
     foreach(_legacy core_engine editor_app legacy_replay)
       if(_legacy IN_LIST _closure)
@@ -117,6 +172,9 @@ function(se_register_checks)
   add_test(NAME checks.planted.catch
     COMMAND Python3::Interpreter "${_tools}/check_banned_api.py"
             --planted "${_planted}/catch")
+  add_test(NAME checks.planted.static
+    COMMAND Python3::Interpreter "${_tools}/check_banned_api.py"
+            --planted "${_planted}/static")
   add_test(NAME checks.planted.link_graph
     COMMAND "${CMAKE_COMMAND}"
             -S "${CMAKE_SOURCE_DIR}/tests/checks/link_violation"
@@ -126,9 +184,22 @@ function(se_register_checks)
   # --planted inverts a checker: it succeeds only if it finds a violation, so a
   # checker that crashes or finds nothing fails the test.
   set_tests_properties(checks.planted.include checks.planted.banned_api
-    checks.planted.throw checks.planted.catch PROPERTIES LABELS checks)
+    checks.planted.throw checks.planted.catch checks.planted.static
+    PROPERTIES LABELS checks)
   set_tests_properties(checks.planted.link_graph PROPERTIES LABELS checks
     PASS_REGULAR_EXPRESSION "Link-graph violations")
+  # A module that links a target outside its ALLOW_ONLY list.
+  add_test(NAME checks.planted.link_allow_only
+    COMMAND "${CMAKE_COMMAND}"
+            -S "${CMAKE_SOURCE_DIR}/tests/checks/link_allow_only_violation"
+            -B "${CMAKE_BINARY_DIR}/planted_link_allow_only_violation"
+            -G "${CMAKE_GENERATOR}"
+            -DSE_REPO_ROOT=${CMAKE_SOURCE_DIR})
+  set_tests_properties(checks.planted.link_allow_only PROPERTIES
+    LABELS checks
+    PASS_REGULAR_EXPRESSION
+      "headless_render links extra_dep, which is not in its ALLOW_ONLY list"
+    FAIL_REGULAR_EXPRESSION "headless_control")
 
   # Linters.
   find_program(SE_CLANG_FORMAT clang-format)

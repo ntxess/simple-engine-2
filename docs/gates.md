@@ -10,7 +10,7 @@ block a milestone; each lists the exact command to run once the setup exists.
 | Linux debug build and tests | M0 | WSL toolchain above | `wsl -d Ubuntu -- bash -lc "bash /mnt/d/Dev/simple-engine-2/scripts/wsl-build.sh linux-clang-debug"` | passing (M0) |
 | ThreadSanitizer | M0, M4, M14, M17 | WSL toolchain above | `... scripts/wsl-build.sh linux-clang-tsan` | passing (M0); re-run at every milestone |
 | ASan + UBSan on Linux | every milestone | WSL toolchain above | `... scripts/wsl-build.sh linux-clang-asan` | passing (M0) |
-| Linux determinism goldens (detmath, determinism_kernel) | M2 | WSL toolchain above | `SE_UPDATE_GOLDENS=1 bash scripts/wsl-build.sh linux-clang-debug`, then compare tests/golden/linux-clang/*.txt with tests/golden/windows-msvc and commit them | done 2026-11-08: bit-identical to windows-msvc and windows-clangcl |
+| Linux determinism goldens (detmath, determinism_kernel, determinism_rampage) | M2, M3 | WSL toolchain above | `SE_UPDATE_GOLDENS=1 bash scripts/wsl-build.sh linux-clang-debug`, then compare tests/golden/linux-clang/*.txt with tests/golden/windows-msvc and commit them | done 2026-11-08 (M2; determinism_rampage in M3): bit-identical to windows-msvc and windows-clangcl apart from the header line naming the platform |
 | Legacy live recording replays headless (`legacy.selfdet.live_replay`) | M1 | an interactive desktop session (a visible window for about 5 s); the legacy test presets exclude label `desktop` | `scripts/ci.ps1 -Presets legacy-msvc-debug`, then `ctest --test-dir out/build/legacy-msvc-debug -L desktop` | passed by hand 2026-11-08; rerun after changes to core/Engine.cpp or core/util/LegacyInput.* |
 | SPIR-V shader compilation | M7 | glslang-tools in WSL (installed) | rebuild the `se_shaders` target | ready for M7 |
 | Modal drag keeps ticking | M5 | an interactive desktop session | `ctest --preset msvc-dev -L desktop -R modal` | pending |
@@ -21,6 +21,7 @@ block a milestone; each lists the exact command to run once the setup exists.
 | Sampling at 250 Hz on battery | M8 | a laptop on battery | as above | pending |
 | Sleep/resume and debugger do not trigger the watchdog | M12 | manual sleep and debugger attach | procedure in tests/platform/watchdog_manual.md | pending |
 | E-core calibration | M14 | a 2P+8E hybrid CPU | `se_bench --calibrate-ecores` | pending |
+| Release bench gates on an idle machine (`bench.renderlist_10k`, `bench.rampage_tick_5k`) | M3 | no other builds or benchmarks running: other processes widen p95 (renderlist_10k measured 1.2-2.5 ms p95 under parallel builds against 0.45-0.59 ms idle) | `scripts/ci.ps1 -Presets msvc-release`; results in out/build/msvc-release/bench_out/*.json | passing 2026-11-08 at the M3 integration (renderlist_10k p95 0.45 ms of 1.0; rampage_tick_5k p95 2.88 ms of 6.22); rerun idle at every milestone |
 | Thresholds on weak machines | M15 | 4-core laptop, 2P+8E laptop on battery | `se_bench --suite real-stack` | pending |
 | Linux GPU stacks | M15, M18 | Mesa/Wayland and NVIDIA/X11 machines | `se_bench --suite real-stack`, rampage smoke | pending |
 | 10-minute fork-site soak | M16 | the weakest supported machine | `se_bench --soak <site> --minutes 10` | pending |

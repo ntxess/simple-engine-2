@@ -27,6 +27,7 @@ struct Name {
 
 struct Transform {
   Vec2 pos;
+  // Radians, clockwise on screen (y grows downwards); ADR-023.
   float rot = 0.0F;
   Vec2 scale{1.0F, 1.0F};
   // The tick of the last teleport; the renderer does not interpolate across

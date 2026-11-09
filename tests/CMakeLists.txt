@@ -168,6 +168,9 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     FIXTURES_REQUIRED se_compile_fail LABELS checks)
 endif()
 
+add_subdirectory(rampage)
+add_subdirectory(render)
+
 # tools/se_replay links the kernel test module from tests/support, so it is
 # built with the tests.
 add_subdirectory("${CMAKE_SOURCE_DIR}/tools/se_replay"

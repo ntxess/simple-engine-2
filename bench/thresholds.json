@@ -1,0 +1,41 @@
+{
+  "format": "se-bench-thresholds-v1",
+  "machine": "AMD Ryzen 7 7700X (8 cores, 16 threads), Windows 11, preset msvc-release",
+  "notes": "Gates for CTest bench.<suite> (bench/se_bench/CMakeLists.txt reads n, iterations, warmup and p95_ms). Thresholds hold for Release builds on this machine; other machines are pending gates (docs/gates.md).",
+  "suites": {
+    "renderlist_10k": {
+      "n": 10000,
+      "iterations": 1000,
+      "warmup": 50,
+      "p95_ms": 1.0,
+      "source": "M3 exit gate: RenderList of 10k sprites, p95 <= 1 ms in Release (docs/milestone-specs.md M3c)",
+      "measured": {
+        "date": "2026-11-08",
+        "build": "msvc-release, MSVC 19.51",
+        "runs": 5,
+        "median_ms": [0.387, 0.418],
+        "p95_ms": [0.448, 0.590],
+        "p99_ms": [0.509, 1.019],
+        "max_ms": [0.602, 15.231],
+        "note": "Ranges over 5 runs of 1000 warm iterations (7556 of 10000 sprites visible, 32 batches) while other builds shared the machine; the p99 and max outliers are that load."
+      }
+    },
+    "rampage_tick_5k": {
+      "n": 5000,
+      "iterations": 1000,
+      "warmup": 50,
+      "p95_ms": 6.22,
+      "source": "The measured p95 with 2x headroom (docs/milestone-specs.md M3c): 2 x 3.109 ms, the median of five runs' p95; the design's tick budget is 1/160 s = 6.25 ms",
+      "measured": {
+        "date": "2026-11-08",
+        "build": "msvc-release, MSVC 19.51",
+        "runs": 5,
+        "median_ms": [2.697, 2.727],
+        "p95_ms": [3.021, 3.240],
+        "p99_ms": [3.232, 3.647],
+        "max_ms": [3.716, 4.507],
+        "note": "Ranges over 5 runs of 1000 ticks after 50 untimed ones (5000 movers and the player; deterministic: 4995 entities alive at the end, 18 contacts in the last tick). Per-system medians of one run: Cleanup (drain, FinalizeSpawns, world hash) 1.27 ms, Collision 0.91 ms, Path 0.33 ms, Boundary and PrevTransformCopy 0.03 ms each."
+      }
+    }
+  }
+}
