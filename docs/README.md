@@ -131,3 +131,10 @@ tests. `scripts/ci.ps1 -Desktop` runs only the desktop tests (label
 `desktop`: real windows on this machine's desktop, opened without taking
 focus) on msvc-dev and msvc-asan. The legacy tree
 builds with the `legacy-msvc-debug` and `legacy-msvc-release` presets.
+
+Presets set every `SE_*` option a build depends on explicitly. Deleting a
+cache variable from a preset does not reset it in an existing build tree,
+so a value the preset used to set stays in force there: until `base` set
+`SE_BUILD_PLATFORM`, the WSL clone kept the pre-M5 `OFF` and silently
+skipped the platform and runtime tests. To start a tree afresh, configure
+with `cmake --preset <name> --fresh`.
