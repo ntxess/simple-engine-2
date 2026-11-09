@@ -312,7 +312,10 @@ goldens, kept with their scenarios and inputs in
 tests/fixtures/reference/v1/; `ref.sandbox.NAME` compares the default build
 against tests/fixtures/reference/ (legacy-ref-v2 once M3a re-baselines it).
 CMake registers `ref.sandbox.NAME` disabled while the two directories'
-goldens are identical, that is until M3a's goldens arrive.
+goldens are identical, that is until M3a's goldens arrive. (At the M3
+integration M3a's goldens arrived and that condition was removed: both
+comparisons always run, so a golden mix-up fails instead of disabling a
+test.)
 
 **Why.** The v1 comparison proves the port of R1 to R10 and everything the
 projection shows (stat arithmetic, effect timing, the watchdog, spawn
@@ -345,3 +348,33 @@ scene's exact match with the legacy `stress` scenario; the camera only
 matters once something renders (M7). Authors cannot write FNV hashes, so
 textures are named as stats are (ADR-024). With nothing hashed added, the
 determinism_rampage goldens and the reference projections are unchanged.
+
+## ADR-027 M3 behaviours the spec did not fix, accepted at integration (2026-11-08)
+
+**Decision.** The M3 integration keeps these behaviours of the merged parts,
+none of which the reference projections can tell apart:
+- Cleanup drains destroy requests in Guid order (`World::DrainDestroyRequests`,
+  M2), not in spawn-serial order as the M3b table says. game_rampage never
+  creates entities after a load and nothing reads the order, and the world
+  hash does not depend on it. Revisit when gameplay spawns at run time.
+- Opposite directions held together (Up+Down, Left+Right) move the player
+  by their net intent, 0, where the legacy Movement applied two sequential
+  steps, `(y - s) + s`, which can differ in the last bit at non-integer
+  positions. No reference input holds opposite keys.
+- Degenerate paths stop by different guards: game_rampage's AdvancePath ends
+  a tick after 65536 loop iterations, the legacy WayPointSystem (R12) ends at
+  the path's first point when a wrap no longer shortens the step. Both fire
+  only for speeds near 1e9 px/s or non-finite speeds. RotationFromHeading
+  returns 0 for non-finite or enormous headings (an undefined int cast in
+  the legacy code).
+- `se_replay --module rampage` rejects `--edits` and `--det-crosscheck`:
+  World::Clone does not copy the registry ctx that holds the scene settings
+  (a kernel question for M10 and M14).
+- The PathCache is rebuilt when a path's point or segment count changes; an
+  edit that moves a point without changing the count (M10) must rebuild it
+  explicitly.
+
+**Why.** Each is either unobservable in M3's content or a guard for input
+the legacy code handled with undefined or endless behaviour; fixing them
+now would change kernel contracts (M2's drain) or the legacy reference
+without a rule to state the new behaviour.

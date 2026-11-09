@@ -19,7 +19,21 @@ behaviour reference until every rule and editor operation is ported.
 | [implementation-plan.md](implementation-plan.md) | The approved milestone plan (M0-M19) |
 | [milestone-specs.md](milestone-specs.md) | Detailed specs for M1, M2 and M3 |
 | [rules/gameplay-rules.md](rules/gameplay-rules.md) | Declared gameplay rules R1-R13 applied to the legacy reference (milestones M1b and M3a) |
-| [../tests/fixtures/reference/README.md](../tests/fixtures/reference/README.md) | The legacy reference scenarios, inputs and golden projections (legacy_replay, tests/legacy) |
+| [../tests/fixtures/reference/README.md](../tests/fixtures/reference/README.md) | The legacy reference scenarios, inputs and golden projections (legacy_replay, tests/legacy, ref.sandbox) |
+| [../bench/thresholds.json](../bench/thresholds.json) | se_bench gates and the measurements behind them |
+
+## Modules and tools
+
+| Target | Directory | What it is |
+|---|---|---|
+| se_core | engine/se_core | Kernel: World, Schedule, component registry, hashing, detmath, jobs, time (M2) |
+| se_sim | engine/se_sim | Game modules, GameStateStack, SessionLog, replays, SimDriver (M2) |
+| se_render_core | engine/se_render_core | Headless renderer half: SpriteRenderer, Camera2D, BuildRenderList; depends on se_core only (M3) |
+| game_rampage | games/rampage | The legacy Sandbox's gameplay on the kernel: components, systems, scenes and prefabs (assets/), legacy scenarios, projections (M3) |
+| se_replay | tools/se_replay | Headless runs of a game module: per-tick hashes, replays, projections |
+| refcmp | tools/refcmp/refcmp.py | Compares two `.seproj` projections within the M3 tolerances (Python 3, stdlib only) |
+| se_bench | bench/se_bench | Benchmark suites and their Release gates (`bench.*`) |
+| legacy tree | core/, app/ | The SFML reference (`SE_BUILD_LEGACY`, legacy presets) |
 
 ## Building
 
@@ -35,6 +49,32 @@ determinism cross-check:
 ```bat
 out\build\msvc-dev\bin\se_replay --module kernel_test --ticks 600 --fixed-frame-dt 16.6667 --hash-out hashes.txt
 ```
+
+The rampage module runs the sandbox scene (assets/scenes/sandbox.scene.json
+by default, or `--scene FILE`) or a legacy scenario with its recorded input,
+and writes the legacy projection format; refcmp compares it with the
+reference's golden (positions within 1e-3 px, rotations within 1e-3 degrees,
+liveness and stats exact). From the repository root:
+
+```bat
+out\build\msvc-dev\bin\se_replay --module rampage --legacy-scenario tests/fixtures/reference/effects.scenario.json --inputs tests/fixtures/reference/effects.seinput --ticks 3600 --projection-out effects.seproj
+python tools/refcmp/refcmp.py effects.seproj tests/fixtures/reference/effects.seproj.gz
+```
+
+Add `--legacy-rules v1` and use tests/fixtures/reference/v1/ to compare with
+the legacy-ref-v1 rules (R1-R10). CTest runs these as `ref.sandbox.NAME` and
+`ref.sandbox_v1.NAME` (label `reference`).
+
+Benchmarks (`--n`, `--iterations`, `--warmup`, `--json FILE`; `--list`
+names the suites; `--max-p95-ms` is the gate the `bench.*` tests pass):
+
+```bat
+out\build\msvc-release\bin\se_bench --suite renderlist_10k
+out\build\msvc-release\bin\se_bench --suite rampage_tick_5k --json rampage_tick_5k.json
+```
+
+The `bench.*` tests run only in the msvc-release preset, against
+bench/thresholds.json; run them on an otherwise idle machine.
 
 `scripts/ci.ps1` runs the commit gate (msvc-dev, msvc-asan, clangcl-dev,
 including the `lint` and `checks` test labels); `scripts/ci.ps1 -Milestone`

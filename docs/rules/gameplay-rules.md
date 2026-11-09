@@ -7,7 +7,10 @@ R11 to R13 in M3a). Each rule states the behaviour the new engine's gameplay
 golden projection hashes of the reference scenarios (tests/fixtures/reference/)
 it re-baselined. The reference at `legacy-ref-v1` follows R1 to R10, the one
 at `legacy-ref-v2` all thirteen, and M3 compares the two trees through the
-projections of `legacy-ref-v2`.
+projections of `legacy-ref-v2`: at the M3 integration game_rampage's
+projections of the three scenarios are byte-identical to these goldens over
+all 3600 ticks (`ref.sandbox.*`), and to the legacy-ref-v1 goldens with
+R11 to R13 turned off (`ref.sandbox_v1.*`).
 
 Conventions: time is counted in ticks of the 120 Hz simulation clock
 (LegacySimTime). An authored duration of `ms` milliseconds is
