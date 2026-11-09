@@ -3,7 +3,7 @@
 // The legacy scenario loader: the three reference scenarios load into the
 // World shape the systems expect (the Sandbox::init player first, then the
 // entities in file order), colliders come from the PNG IHDR sizes, and bad
-// scenarios are errors.
+// scenarios, empty stat names and stat names with the same id are errors.
 
 #include "game_rampage/legacy_scenario.h"
 
@@ -11,8 +11,10 @@
 #include <cstdint>
 #include <entt/entity/registry.hpp>
 #include <expected>
+#include <format>
 #include <fstream>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -176,6 +178,40 @@ TEST_CASE("Bad scenarios are errors", "[rampage][legacy]") {
   CHECK_FALSE(LoadText("not json"));
   testing::RampageTestWorld w;
   CHECK_FALSE(LoadLegacyScenario(w.Get(), dir + "/missing.json", Options()));
+}
+
+// The error of loading a scenario with |player| and |entities|, or empty.
+std::string ErrorOf(std::string_view player, std::string_view entities)
+    SE_REQUIRES(g_sim_owner) {
+  const auto loaded =
+      LoadText(std::format(R"({{"format": "se-legacy-scenario-v1", )"
+                           R"("name": "x", "player": {}, "entities": [{}]}})",
+                           player, entities));
+  return loaded ? std::string() : loaded.error().message;
+}
+
+TEST_CASE("Stats a World cannot name are errors", "[rampage][legacy]") {
+  const testing::MainThreadScope main_thread;
+  const InlineOwnerScope owner(OnMainThread());
+  // The legacy loader accepts these, but the World would merge the two
+  // names (Fnv1a32("costarring") == Fnv1a32("liquid")), and could not name
+  // the empty one in its projection.
+  CHECK(ErrorOf("{}", R"({"stats": {"costarring": 1}})").empty());
+  CHECK(ErrorOf("{}", R"({"stats": {"": 3}})").find("empty stat name") !=
+        std::string::npos);
+  CHECK(ErrorOf(R"({"stats": {"": 3}})", "{}").find("player.stats") !=
+        std::string::npos);
+  CHECK(ErrorOf("{}", R"({"stats": {"costarring": 1, "liquid": 2}})")
+            .find("the same id") != std::string::npos);
+  CHECK(ErrorOf("{}", R"({"stats": {"liquid": 2}, "effects": [)"
+                      R"({"type": "INSTANT", "stat": "costarring"}]})")
+            .find("entities[0].effects[0].stat") != std::string::npos);
+  CHECK_FALSE(
+      ErrorOf(R"({"effects": [{"type": "OVERTIME", "stat": ""}]})", "{}")
+          .empty());
+  // A NULLTYPE effect has no stat to name.
+  CHECK(ErrorOf("{}", R"({"effects": [{"type": "NULLTYPE", "stat": ""}]})")
+            .empty());
 }
 
 }  // namespace

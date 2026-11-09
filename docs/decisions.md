@@ -309,7 +309,10 @@ died in tick 1, R10). The JSON and BEVE hooks of `Stats`, `PairCooldowns`
 and `ActiveEffects` (rampage_components.cc) now sort what they read, by
 stat id, receiver Guid and seq, and reject a repeated stat id or receiver,
 so scenes, snapshots and session-log edits all keep the order the systems
-rely on.
+rely on. Stat names, in scenes and legacy scenarios alike, must be
+non-empty and have distinct ids (`InternStatName`): two names with one
+Fnv1a32 id would be one stat, and an empty name could not be printed in
+the projection.
 
 ## ADR-025 The legacy comparison keeps both reference rule sets (2026-11-08)
 
@@ -376,6 +379,10 @@ none of which the reference projections can tell apart:
   only for speeds near 1e9 px/s or non-finite speeds. RotationFromHeading
   returns 0 for non-finite or enormous headings (an undefined int cast in
   the legacy code).
+- LoadLegacyScenario rejects what the World cannot represent, which the
+  legacy loader accepts: an empty stat name (the projection cannot print
+  it, ADR-024) and two stat names with the same Fnv1a32 id (they would be
+  one stat). The legacy Sandbox prints the empty name as `=<value>`.
 - `se_replay --module rampage` rejects `--edits` and `--det-crosscheck`:
   World::Clone does not copy the registry ctx that holds the scene settings
   (a kernel question for M10 and M14).

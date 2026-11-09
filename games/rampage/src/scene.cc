@@ -100,9 +100,9 @@ std::expected<void, Error> EffectStatToId(json::Value& effect, StatNames& names,
                                           std::string_view where) {
   json::Value* stat = effect.Find("stat");
   if (stat == nullptr || !stat->IsString()) return {};
-  if (stat->Text().empty()) return FailAt(where, "empty stat name");
-  const StatId id = names.Add(stat->Text());
-  *stat = json::Value::NumberOf(static_cast<std::int64_t>(id));
+  const auto id = InternStatName(names, stat->Text());
+  if (!id) return FailAt(where, id.error());
+  *stat = json::Value::NumberOf(static_cast<std::int64_t>(*id));
   return {};
 }
 
@@ -355,6 +355,18 @@ void FinishLoad(World& world) {
   world.FinalizeSpawns();
 }
 
+std::expected<StatId, Error> InternStatName(StatNames& names,
+                                            std::string_view name) {
+  if (name.empty()) return Fail(ErrorCode::kParse, "empty stat name");
+  const StatId id = names.Add(name);
+  if (names.Name(id) != name) {
+    return Fail(ErrorCode::kParse,
+                std::format("the stat names \"{}\" and \"{}\" have the same id",
+                            names.Name(id), name));
+  }
+  return id;
+}
+
 std::expected<void, Error> StatNamesToIds(std::string_view component,
                                           json::Value& value,
                                           StatNames& names) {
@@ -369,12 +381,9 @@ std::expected<void, Error> StatNamesToIds(std::string_view component,
       if (!member.value.IsNumber()) {
         return FailAt(member.key, "a stat's value must be a number");
       }
-      if (member.key.empty()) return FailAt("Stats", "empty stat name");
-      const StatId id = names.Add(member.key);
-      if (names.Name(id) != member.key) {
-        return FailAt(member.key, "stat id collision");
-      }
-      stats.emplace_back(id, member.value);
+      const auto id = InternStatName(names, member.key);
+      if (!id) return FailAt("Stats", id.error());
+      stats.emplace_back(*id, member.value);
     }
     std::sort(stats.begin(), stats.end(),
               [](const auto& a, const auto& b) { return a.first < b.first; });

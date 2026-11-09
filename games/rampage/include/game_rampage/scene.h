@@ -27,12 +27,12 @@
 // Stats are written by name: "Stats": {"HP": 100, "Speed": 500} (so an
 // override can change one stat), and an effect's stat as its name
 // ("stat": "HP"). The loader turns these into StatIds and records the names
-// in the World's StatNames; the registry form ({"values": [{"id": ...}]})
-// is accepted as well, in any order (the Stats hook sorts it; a repeated id
-// is an error). SaveScene writes the named form. A SpriteRenderer's texture
-// is written by name too ("texture": "player", a key of
-// config/texture.json) and stored as its TextureKeyOf key, the names going
-// to the World's TextureNames.
+// in the World's StatNames (an empty name, or two names with one id, is an
+// error); the registry form ({"values": [{"id": ...}]}) is accepted as
+// well, in any order (the Stats hook sorts it; a repeated id is an error).
+// SaveScene writes the named form. A SpriteRenderer's texture is written by
+// name too ("texture": "player", a key of config/texture.json) and stored
+// as its TextureKeyOf key, the names going to the World's TextureNames.
 
 #ifndef GAME_RAMPAGE_SCENE_H_
 #define GAME_RAMPAGE_SCENE_H_
@@ -104,6 +104,12 @@ void ApplySceneSettings(World& world, const SceneSettings& settings)
 // (PathCache for paths, ActiveEffects for entities with Stats, PairCooldowns
 // for polled sources), then runs FinalizeSpawns.
 void FinishLoad(World& world) SE_REQUIRES(g_sim_owner);
+
+// Records the stat |name| in |names| and returns its id. An empty name, or
+// a name whose id another name already has, is an error: the World could
+// not tell the two stats apart, and the projection could not name them.
+std::expected<StatId, Error> InternStatName(StatNames& names,
+                                            std::string_view name);
 
 // Turns the named Stats and effect-stat forms of one component's JSON into
 // the registry form, recording the names. |component| is the registry name.

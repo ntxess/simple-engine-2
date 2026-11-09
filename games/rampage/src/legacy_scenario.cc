@@ -336,15 +336,38 @@ std::expected<LegacyScenario, Error> ParseScenario(std::string_view text) {
   return scenario;
 }
 
-std::vector<EffectDef> ToEffects(const std::vector<LegacyEffect>& effects,
-                                 StatNames& names) {
+std::expected<std::vector<EffectDef>, Error> ToEffects(
+    const std::vector<LegacyEffect>& effects, StatNames& names,
+    std::string_view where) {
   std::vector<EffectDef> out;
-  for (const LegacyEffect& e : effects) {
+  for (std::size_t i = 0; i < effects.size(); ++i) {
+    const LegacyEffect& e = effects[i];
     if (!e.kind) continue;  // NULLTYPE: no effect
-    out.push_back(EffectDef{*e.kind, names.Add(e.stat), e.value, e.duration_ms,
-                            e.interval_ms});
+    const auto stat = InternStatName(names, e.stat);
+    if (!stat) {
+      return Fail(std::format("{}.effects[{}].stat", where, i),
+                  stat.error().message);
+    }
+    out.push_back(
+        EffectDef{*e.kind, *stat, e.value, e.duration_ms, e.interval_ms});
   }
   return out;
+}
+
+// |stats| with a scenario's "stats" values set in file order (a repeated
+// name keeps its last value, as `values[name] = value` does in the legacy
+// loader).
+std::expected<Stats, Error> ToStats(
+    const std::vector<std::pair<std::string, float>>& values, Stats stats,
+    StatNames& names, std::string_view where) {
+  for (const auto& [name, value] : values) {
+    const auto stat = InternStatName(names, name);
+    if (!stat) {
+      return Fail(std::format("{}.stats", where), stat.error().message);
+    }
+    SetStat(stats, *stat, value);
+  }
+  return stats;
 }
 
 // config/config.json's video-settings.resolution.
@@ -520,14 +543,17 @@ std::expected<LegacyScenarioSummary, Error> LoadLegacyScenario(
       source.cooldown_ms = p.polling->cooldown_ms;
       source.ready_on_start = p.polling->ready_on_start;
     }
-    if (p.effects) source.effects = ToEffects(*p.effects, names);
-    reg.emplace<EffectSource>(e, std::move(source));
-    Stats stats;
-    SetStat(stats, hp, 100.0F);
-    for (const auto& [stat, value] : p.stats) {
-      SetStat(stats, names.Add(stat), value);
+    if (p.effects) {
+      auto effects = ToEffects(*p.effects, names, "player");
+      if (!effects) return with_path(effects.error());
+      source.effects = std::move(*effects);
     }
-    reg.emplace<Stats>(e, std::move(stats));
+    reg.emplace<EffectSource>(e, std::move(source));
+    Stats initial;
+    SetStat(initial, hp, 100.0F);
+    auto stats = ToStats(p.stats, std::move(initial), names, "player");
+    if (!stats) return with_path(stats.error());
+    reg.emplace<Stats>(e, std::move(*stats));
   }
 
   // The scenario's entities (ScenarioLoader::spawn).
@@ -549,11 +575,10 @@ std::expected<LegacyScenarioSummary, Error> LoadLegacyScenario(
     const entt::entity e =
         CreateBase(world, LegacyGuid(name, static_cast<std::uint32_t>(i + 1)),
                    position, rotation, le.texture, *half, le.team);
-    Stats stats;
-    for (const auto& [stat, value] : le.stats) {
-      SetStat(stats, names.Add(stat), value);
-    }
-    reg.emplace<Stats>(e, std::move(stats));
+    const std::string where = std::format("entities[{}]", i);
+    auto stats = ToStats(le.stats, Stats{}, names, where);
+    if (!stats) return with_path(stats.error());
+    reg.emplace<Stats>(e, std::move(*stats));
     if (!le.path.empty()) {
       Path entity_path;
       entity_path.points = le.path;
@@ -563,7 +588,11 @@ std::expected<LegacyScenarioSummary, Error> LoadLegacyScenario(
     if (le.moving) reg.emplace<Moved>(e);
     if (le.polling || le.effects) {
       EffectSource source;
-      if (le.effects) source.effects = ToEffects(*le.effects, names);
+      if (le.effects) {
+        auto effects = ToEffects(*le.effects, names, where);
+        if (!effects) return with_path(effects.error());
+        source.effects = std::move(*effects);
+      }
       if (le.polling) {
         source.polled = true;
         source.cooldown_ms = le.polling->cooldown_ms;

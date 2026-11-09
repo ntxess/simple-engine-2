@@ -2,10 +2,10 @@
 //
 // Scenes and prefabs (se-scene-v1): the sandbox scene and the prefabs load;
 // merge patches override values and replace arrays whole; saving and
-// reloading a World gives the same hash; malformed scenes and repeated stat
-// ids are errors; registry-form stats load sorted; and the sandbox scene
-// (the Sandbox after one press of the editor's Generate button with seed 1)
-// plays exactly like the legacy `stress` scenario.
+// reloading a World gives the same hash; malformed scenes, unnameable stats
+// and repeated stat ids are errors; registry-form stats load sorted; and the
+// sandbox scene (the Sandbox after one press of the editor's Generate
+// button with seed 1) plays exactly like the legacy `stress` scenario.
 
 #include "game_rampage/scene.h"
 
@@ -244,11 +244,22 @@ TEST_CASE("Malformed scenes are errors", "[rampage][scene]") {
   CHECK_FALSE(Loads(Scene("{" + guid + R"(, "prefab": "missing"})"), prefabs));
   CHECK_FALSE(Loads(Scene("{" + guid + R"(, "colour": "red"})"), prefabs));
 
-  // A repeated id in the registry form of Stats.
+  // Stats the World could not tell apart: an empty name, two names with
+  // one id (Fnv1a32("costarring") == Fnv1a32("liquid")), and a repeated id
+  // in the registry form.
   const auto with = [&guid](std::string_view components) {
     return Scene("{" + guid + R"(, "components": )" + std::string(components) +
                  "}");
   };
+  CHECK(Loads(with(R"({"Stats": {"costarring": 1}})"), prefabs));
+  CHECK_FALSE(Loads(with(R"({"Stats": {"": 1}})"), prefabs));
+  CHECK_FALSE(
+      Loads(with(R"({"Stats": {"costarring": 1, "liquid": 2}})"), prefabs));
+  CHECK_FALSE(Loads(with(R"({"Stats": {"costarring": 1},
+      "EffectSource": {"effects": [{"stat": "liquid"}]}})"),
+                    prefabs));
+  CHECK_FALSE(
+      Loads(with(R"({"EffectSource": {"effects": [{"stat": ""}]}})"), prefabs));
   CHECK(Loads(with(R"({"Stats": {"values": [{"id": 5, "value": 1}]}})"),
               prefabs));
   CHECK_FALSE(Loads(with(R"({"Stats": {"values": [{"id": 5, "value": 1},
