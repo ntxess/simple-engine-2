@@ -1,4 +1,4 @@
-# Milestone specs: M1 to M7
+# Milestone specs: M1 to M9 and M17a
 
 Detailed specs for the first milestones after M0. The milestone table and the
 exit criteria are in docs/implementation-plan.md; the design is in
@@ -1264,3 +1264,330 @@ ADRs 059-065.
 - The M6 desktop exit tests, then the full matrix (-Milestone -Legacy, which
   includes -Desktop, plus wsl:linux-clang-debug and msvc-unpatched-dev).
 - ADRs 066 and on.
+
+## M8 Input placement and audio (design build step 6)
+
+Design sources: docs/design/mt-design.md "Threads" (input sampler),
+"Input And Latency" (input path, timestamp sources, placing edges on
+ticks), "Audio And Assets" (Audio), "Platform" (SDL_UpdateGamepads from any
+thread, miniaudio rules), the API sketch (InputEdge, InputService::latch,
+tickInline), build step 6, red team P10; docs/design/costfree-end-state.md
+input and audio rows. M8 replaces M5's BasicInputService and the
+NullAudioSink.
+
+### Input (engine/se_runtime, engine/se_platform)
+
+- `se_runtime/input_service.h`: `InputService` (implements M2's
+  InputSource) replacing BasicInputService. SDL_AppEvent hands it every
+  key, mouse button, gamepad button and axis event with its SDL timestamp;
+  it keeps ordered, stamped edges (InputEdge: action, down, stamp_ns,
+  order, source), held state and axes. Focus loss and the Windows modal
+  loop clear held input (M5's lifecycle signals). No system polls the
+  keyboard.
+- `ActionMap`: keys from config/config.json "control-settings" /
+  "key-bindings" (legacy names key-up, key-left, ..., key-6), resolved to SDL
+  keycodes; default gamepad bindings in code (recorded in an ADR), both
+  mapped to ActionIds the game declares (rampage: move up/left/down/right
+  and the existing legacy actions). Unknown names are a boot Error naming
+  the key.
+- Timestamp sources: runtime builds set SDL_HINT_WINDOWS_RAW_KEYBOARD=1
+  (keys stamped on SDL's raw-input thread, SDL_GetTicksNS domain); an
+  AppConfig flag leaves it off (the editor, M10, uses Win32 message stamps).
+  Every edge records its EdgeSource, and the replay keeps it.
+- Placing edges on ticks, exactly as the design says: Locked cadence splits
+  the wall time since the previous frame start into k equal windows; Free
+  cadence ends tick i's window at frameStart - remainder - (steps-1-i)*dt;
+  edges stamped after the last window go to the last tick; in a frame with
+  no tick, edges wait for the next frame's first tick. Check that
+  StepPlan::tick_window_end_ns (M2) is computed this way and fix it if not
+  (the stepper's tests pin it). A pure `PlaceEdges` function holds the rule
+  and is unit-tested on synthetic frames (30/60/144/165 Hz, Locked and
+  Free, zero-tick frames).
+- `se_core/input_buffer.h`: the 6-12 tick buffer window (default 8, set
+  per action by the game): a press latched on tick t stays consumable until
+  t + window. Pure, unit-tested; rampage's Intent system uses it for its
+  discrete actions.
+- `se_platform/input_sampler.h`: `InputSampler`, one thread (role
+  kInputSampler, started through se_os StartThread). It calls
+  SDL_UpdateGamepads at 1000 Hz on AC and 250 Hz on battery (main reads
+  SDL_GetPowerInfo every 5 s and publishes the rate), with
+  SDL_HINT_AUTO_UPDATE_JOYSTICKS=0 (M5 sets it), waiting with SDL_DelayNS
+  and checking stop every period. It is parked (an atomic doorbell wait)
+  while the app is Suspended or Idle. SDL_UpdateGamepads pushes SDL events,
+  so the sampler obeys ADR-047: it starts after the first iterate and stops
+  before shutdown step 4, inside the WakeEventScope window. It never
+  touches World state, InputService, ImGui or the GPU.
+- Tests:
+  - unit (everywhere, TSan included): PlaceEdges; InputService latching
+    (order, held state, focus-loss clear, per-tick edges, the last-tick
+    rule, zero-tick frames); InputBuffer; the sampler's park and stop with
+    a fake poll function;
+  - desktop: key events pushed with SDL_PushEvent and explicit timestamps
+    8 ms apart land on different ticks at 60 Hz Locked; an SDL virtual
+    gamepad (SDL_AttachVirtualJoystick) whose buttons a test thread toggles
+    8 ms apart lands on different ticks through the sampler, with stamps
+    about 1 ms apart from the true toggle times; never real input;
+  - replay: a session recorded with pushed events replays headless through
+    se_replay with identical per-tick hashes, and the edge sources survive.
+- `tools/input_probe`: a small window that logs each real key event's SDL
+  and Win32 message stamps and reports their resolution (raw keyboard on
+  and off). Running it needs a person: docs/gates.md row "Win32 key stamp
+  resolution", with the command. A real gamepad is another gate row.
+
+### Audio (new module engine/se_audio)
+
+- se_audio (STATIC; deps se_core, miniaudio 0.11.26 from .deps, already
+  declared; miniaudio is confined to se_audio, enforced by the link graph
+  and an include check with a planted violation). Main owns the
+  `AudioEngine` (ma_engine) and is the only caller of ma_engine and ma_sound
+  functions; groups Music and Effects with volumes from config/config.json
+  "sound-settings" (0-100). If device init fails, it uses miniaudio's null
+  backend and logs it. A noDevice mode (frames pulled with
+  ma_engine_read_pcm_frames) serves tests and offline checks.
+- `Sound` data: decoded PCM (miniaudio's decoder: WAV and FLAC, no new
+  dependency) held by `std::shared_ptr<const Pcm>`; voices reference it
+  through an ma_audio_buffer. A voice record holds its ma_sound, the PCM
+  pointer, its group and a cosmetic flag. PCM is released only after the
+  voice's end id has drained and ma_sound_uninit has returned. Releasing a
+  scope stops and uninitialises its voices first (ma_sound_uninit is the
+  fence). Reloading a sound gives the new PCM to new voices only.
+- The end-of-sound callback (miniaudio's thread) writes the voice id into
+  an SPSC ring sized for the voice cap (256) and never waits; a per-frame
+  `Sweep()` also uninitialises voices whose ma_sound_at_end is true.
+- Scheduling: `AudioBridge` (implements SimDriver's AudioSink) drains the
+  World's audio events after each tick (an engine `AudioEvents` ctx
+  resource systems push to: sound key, group, cosmetic, position for pan)
+  and starts each sound at max(now, tick anchor + D) with
+  ma_sound_set_start_time_in_pcm_frames, mapping SDL_GetTicksNS to the
+  engine's PCM clock (recalibrated each frame). The anchor is the tick's
+  window end (TickInline already passes it); D = B + T/2 comes from the
+  pacer (B of the frame's plan, T the display period; 13.8 ms at 60 Hz
+  Paced Locked). Late gameplay sounds play at once; a per-group voice cap
+  steals the oldest voice; only cosmetic sounds more than 100 ms late are
+  dropped (counted).
+- rampage: one or two sounds (small WAV files generated by a checked-in
+  script; no downloads) emitted as audio events by rules that already
+  exist in game_rampage (for example when an effect applies damage). Audio
+  events never change simulation state, so the M3 hashes are unchanged.
+- Tests (everywhere; noDevice mode, no sound on the owner's speakers):
+  sounds from one frame's two ticks start 8.33 ms (+-1 PCM frame at 48 kHz)
+  apart, by onset detection on the mixed output; late and cosmetic rules;
+  voice-cap stealing; the end ring and the sweeper; stop, scope release and
+  reload during playback are clean under ASan and TSan (WSL); the null
+  backend fallback. A desktop test opens the real device at volume 0 for
+  1 s and closes it cleanly.
+
+ADRs 073-077.
+
+### Exit (M8)
+
+- Key presses and pad presses 8 ms apart land on different ticks (pushed
+  events and the virtual gamepad).
+- Replays reproduce, with edge sources recorded.
+- Sounds from one frame's two ticks start 8.33 ms apart.
+- Stop and reload during playback are clean under ASan (Windows and WSL)
+  and TSan (WSL).
+- Win32 stamp resolution and a real gamepad are gates.md rows with
+  commands (they need a person and hardware).
+
+## M9 Background lane and AssetRegistry (design build step 7, CF d)
+
+Design sources: docs/design/mt-design.md "Threads" (background lane),
+"Data Flow" (AssetRequest, SaveRequest, decoded payloads, uploads),
+"Audio And Assets" (Assets), "Lifecycle" (QuitPending), build step 7;
+docs/design/costfree-end-state.md assets rows. M9 moves M7's boot-time
+decoding on main to the lane and adds hot reload and durable saves.
+
+**New module engine/se_assets** (STATIC; deps se_core, se_os, se_platform
+for se::fs, lz4_static, glaze, se::stb; FORBID SDL video and GPU headers
+outside se_platform's fs).
+
+- `background_lane.h`: `BackgroundLane`, one thread (role kBackground).
+  - Requests through an SPSC ring (main to lane) and results through an
+    SPSC completion ring (lane to main); main releases a binary_semaphore
+    after pushing; the lane waits with a 500 ms timeout, which drives the
+    hot-reload scan; a stop_callback releases it.
+  - Classes: Urgent (loads someone waits on, user imports, hot reload) at
+    HighQoS and normal priority, always first; Background (autosave,
+    recovery, flushes, thumbnails, scans) at EcoQoS. QoS switches per step
+    (se_os Qos).
+  - Jobs are sequences of steps of about 2 ms or less with a stop_token
+    check between steps: file reads of at most 1 MB per step, LZ4 blocks of
+    about 256 KB per step, scenes in chunks. The lane owns a buffer until it
+    pushes the result.
+  - Durable jobs are never cancelled; quit waits for them (a QuitProvider,
+    M5's two-phase quit, reports kPending until they finish).
+  - Writes to one path form a strand (first in, first out). Each file
+    carries a revision; the lane never renames over a newer one. Writes go
+    to a unique temp file in the same directory, then rename. A rename that
+    hits another process's sharing violation retries for up to 2 s, then
+    fails and reports the Error (the document stays dirty).
+  - Engine reads open files with FILE_SHARE_DELETE on Windows (extend
+    se::fs if SDL's IOStream does not; record it in an ADR).
+  - It never touches a World, SDL video, events or GPU, ImGui or the
+    AssetRegistry tables. It may call WakeMain (inside the ADR-047 window).
+- `asset_registry.h`: `AssetRegistry` on main: typed stores (Texture,
+  Atlas, Sound, and parsed Prefab and SceneChunk payloads), `Handle<T>
+  {index, generation}`, an `AssetScope` per GameState (and later per
+  EditDocument) plus a persistent UI scope, refcounted per scope.
+  - Loading: main submits an AssetRequest (Urgent when something waits on
+    it); the lane returns a payload or an Error{code, message, path, line,
+    column}; main drains the completion ring at iterate start, creates GPU
+    objects through M7's GpuResources and queues uploads within its 8 MB
+    budget; a texture becomes resident when its fence signals (M7).
+  - A World never steps before its scope is resident: the game's sim holds
+    (no ticks planned, logged) until then, so asset timing cannot change
+    simulation results.
+- Cooked atlas pages: `tools/asset_cook` turns the textures named in
+  config/texture.json into `.seatlas` files (a small header plus
+  independently LZ4-compressed blocks of about 256 KB of RGBA8), run by
+  CMake at build time into the build tree; the runtime loads cooked pages
+  through the lane. stb_image runs only at import (the cook tool, and the
+  editor in M10). Hot reload in a dev build re-cooks a changed source on
+  the lane (Urgent).
+- Hot reload: the lane scans the watched files every 500 ms (size and
+  modification time) and wakes main on a change; a changed asset swaps at
+  frame start once resident, and the old texture goes through M7's retire
+  queue. (Editor Play's freeze of gameplay assets is M10.)
+- Sounds: M8's decoded PCM comes from the lane (miniaudio's decoder on the
+  lane thread, data only; ma_engine stays on main).
+- Saves and flushes: `SaveRequest{path, bytes, revision, durable}`;
+  replay and SessionLog flushes go through the lane as Background jobs.
+- Test hooks (test builds): an se::fs fault and delay injector (a
+  throttled disk: N ms per write step; a sharing violation on rename for
+  M ms) and `--lane-step-trace`.
+- Tests (everywhere, TSan in WSL for the rings and the lane):
+  - quit during a large job (a 64 MB read or a 200-block LZ4 decode) joins
+    within one step (measured, at most one step plus 5 ms);
+  - Durable saves survive quit on a throttled disk: the quit stays
+    QuitPending until the save is renamed into place, and the file is
+    complete and parses;
+  - out-of-order completion never renames over a newer revision (two
+    saves of one path with revisions 1 and 2, completion forced in the
+    wrong order);
+  - strands keep per-path order under interleaved Urgent and Background
+    work; Urgent always first;
+  - the sharing-violation retry succeeds within 2 s and fails cleanly after;
+  - hot reload: change a texture file while rampage runs (desktop): the
+    sprite shows the new pixels after the swap (readback), the old texture
+    is retired after the next submit (GPU objects alive count);
+  - the registry: handles, generations, scope release, a World held until
+    resident.
+- Bench: bench.lane_steps (Release): p99 step time of a 1 MB read, a
+  256 KB LZ4 block decode and a scene chunk parse, each at most 2 ms on
+  this machine (the design's estimate becomes a measured threshold).
+
+ADRs 078-082.
+
+### Exit (M9)
+
+- Quit during a large job joins within one step.
+- Durable saves survive quit on a throttled disk.
+- Out-of-order completion never renames over a newer revision.
+- Steps measure at most about 2 ms (bench.lane_steps).
+- rampage loads its textures from cooked atlas pages through the lane and
+  hot-reloads a changed texture.
+
+## M17a Dedicated sim driver, headless (design build step 13, part 1)
+
+Design sources: docs/design/dedicated-driver.md "Threads" (sim), "Data
+Flow" (InputEvent, SimCommand, Snapshot slot, returned slots, Fault),
+"Snapshot And Interpolation", "Synchronization", "Lifecycle" (sim states
+and shutdown), "Determinism And Debugging", the API sketch;
+docs/design/mt-design.md "Changes To Cost Free End State" (Escalation seam)
+and build step 13. The plan builds the threaded driver unconditionally,
+behind `--sim-driver=inline|threaded` (M17b wires it into the App after
+M10); inline stays the default. M17a is headless: no SDL.
+
+- `se_sim/sim_thread.h`: `SimThread`, one thread (role kSim, se_os
+  StartThread) that owns every running World while it runs and calls
+  SimDriver::RunTick (unchanged) on absolute deadlines.
+- `se_sim/paced_clock.h`: `PacedClock`: deadlines L_k = T0 + k*dt + phi; a
+  waitable timer (SDL-free: se_os) to the deadline minus max(0.3 ms,
+  measured overshoot p99), then a short spin with a pause instruction;
+  clock_nanosleep(TIMER_ABSTIME) on Linux. phi slews by at most 0.1 ms per
+  tick, only when the display period is a whole multiple of dt (set by the
+  platform). While paused or idle the thread waits on a doorbell
+  (std::atomic<uint32_t> sequence, atomic::wait, rung by a stop_callback).
+  A `ManualClock` drives it deterministically in tests.
+- Channels (se_core SpscRing):
+  - `InputEvent` ring (4096) from the platform; the sim's `InputFolder`
+    builds each tick's InputFrame with M8's placement rule against the
+    sim's own deadlines. For hash equality the threaded driver also runs
+    replays from recorded InputFrames (live latching differs by design).
+  - `SimCommand` ring (256, move-only, sequence-numbered) with the ops M17a
+    needs: StartGame, Pause, Resume, Step{n}, SetTimeScale, Suspend, Quit,
+    and ApplySessionEntry (M2's SessionLog entries); the snapshot header
+    acks the last applied sequence.
+  - `SnapshotChannel`: a pool of 8 slots and two SPSC rings of slot indices
+    (published 16, returned 16), exactly the design's memory orders. A
+    slot holds a header (session, generation, tick, wall anchor L_k + dt,
+    latch time, acked sequence, tick cost, dropped publishes), trivially
+    copyable `RenderItem`s (about 56 bytes: entity id and spawn serial,
+    position, rotation, scale, texture key, region, layer, z, tint, flip
+    and flag bits teleported/visible), a sparse index from entity index to
+    item, cameras (position, zoom, rotation, cut flag), and a reliable
+    section (audio events, session events, scope releases) accumulated
+    since the last successful publish. The sim fills a slot after Cleanup
+    and never waits: with no free slot it skips the render part and keeps
+    the reliable deltas for the next publish.
+- `se_render_core/snapshot_render_source.h`: `SnapshotRenderSource` on the
+  platform side: pops every published slot, applies reliable sections in
+  tick order, keeps the newest 3 and returns the rest; tau = F - D';
+  picks S_a and S_b around tau with alpha from the real anchor spacing;
+  starvation holds the newest pair at alpha 1 and raises D' elastically
+  (decay at most 5% per frame); per-entity lerp when full id, spawn serial
+  match and no teleport flag (rotation along the shorter arc), otherwise
+  S_b's state; discrete state from S_a below alpha 0.5; spawn, despawn and
+  teleport switch at the half-tick; a session or generation change
+  hard-cuts; camera cuts honour the cut flag. It produces the same
+  RenderList the inline builder makes from a World (M3's BuildRenderList)
+  for matching ticks and alpha.
+- `FaultBox` per thread: exception_ptr written, then an atomic flag with
+  release; the platform polls it with acquire after a wake. The sim's tick
+  is a fault boundary (ADR-006 list grows by one file, recorded).
+- Tests (everywhere, TSan in WSL for everything threaded):
+  - inline against threaded: per-tick hashes identical on every golden
+    replay (the M2 kernel goldens and M3's three rampage scenarios over
+    3600 ticks) at W = 0; W = 1 and 3 become checks when M14 lands (say so
+    in docs/gates.md or the plan's tracking, not as a skipped test);
+  - SnapshotChannel property tests: randomized producer and consumer
+    schedules (thousands of runs, seeded): every consumed slot is complete,
+    no slot is written while the platform holds it, reliable sections are
+    never lost or reordered, dropped publishes are counted;
+  - SnapshotRenderSource: RenderList equality with BuildRenderList for
+    matching state; spawn, despawn, teleport, id reuse with a new spawn
+    serial, generation hard cut, starvation hold and decay;
+  - PacedClock with ManualClock: the deadline grid, phi slew bound,
+    overshoot accounting; with the real clock (Release, label slow) the
+    wake error p99 is recorded;
+  - commands: Pause, Step{n} runs exactly n ticks, Resume, Quit joins.
+- Bench: bench.snapshot_publish_10k (Release): build and publish one slot
+  of 10k items; p95 recorded as a threshold.
+
+ADRs 083-086.
+
+### Exit (M17a)
+
+- Inline and threaded per-tick hashes equal on every golden replay at W =
+  0 (W = 1 and 3 after M14).
+- SnapshotChannel property tests pass; TSan clean in WSL.
+- The inline driver stays the default; nothing in the App changes until
+  M17b.
+
+## Integration (M8 + M9 + M17a)
+
+- M9's lane decodes M8's sounds; a sound hot-reloaded during playback gives
+  new voices the new PCM and frees the old PCM only after its voices end
+  (ASan desktop test).
+- rampage's textures and sounds load through the lane (cooked atlas pages),
+  and its scope must be resident before the first tick.
+- The input sampler and the background lane start and stop in the boot and
+  shutdown order with the other helpers (event pushers inside the ADR-047
+  window), appear in the ThreadRegistry and in dumps, and
+  EngineThreadsRunning counts them.
+- The pacer's D for audio scheduling comes from the real FramePacer.
+- QuitPending waits for Durable saves through the lane's QuitProvider.
+- The full matrix (-Milestone -Legacy, which includes -Desktop, plus
+  wsl:linux-clang-debug and msvc-unpatched-dev).
+- ADRs 087 and on.
