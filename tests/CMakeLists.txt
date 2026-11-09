@@ -170,6 +170,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     FIXTURES_REQUIRED se_compile_fail LABELS checks)
 endif()
 
+add_subdirectory(os)
 add_subdirectory(rampage)
 add_subdirectory(render)
 

@@ -425,6 +425,67 @@ event-driven sources. Leaving Moved out of the hash would only hide that
 difference, and a scene-level `moving` flag would say through a new key
 what the component registry already expresses.
 
+## ADR-029 se_os is the headless OS layer; Tracy is linked by se_core (2026-11-08)
+
+**Decision.** A new STATIC module, se_os (engine/se_os; ALLOW_ONLY se_core;
+not DETERMINISTIC), holds everything threads need from the OS on every
+platform: StartThread, Thread and RoleScope (OS thread names, QoS, CPU
+sets), the CPU topology and its pool-size and CPU-set rules, the unbiased
+clock, debugger detection and ExecutableDir. It may include `<windows.h>`
+and POSIX headers but never SDL, so the SDL-free WSL sanitizer builds have
+it, and it is the only module that may create a thread. Its rules:
+- The PerformanceOnly count is the P-cores on main's last-level cache minus
+  one, capped at ForkPoolSize: the spec's formula alone gives 3 on the
+  4-core laptop, where the design's table (and the pool) has 2.
+- Main's last-level cache is the one with the most P-cores (the lowest id
+  on a tie); "P-cores" are the cores of the highest efficiency class, so
+  every core on a homogeneous CPU.
+- Linux kEco raises the thread's nice value by 5, which lowers its
+  priority, as EcoQoS does on Windows; the spec's "lowers the nice value"
+  would have raised the priority of background work. Restoring the old
+  value needs CAP_SYS_NICE, so the destructor tries and stays silent.
+- CPU sets name the OS's ids (CPU set ids on Windows, CPU numbers on Linux)
+  as CpuTopology reports them, so a request needs no lookup at apply time.
+- QueryUnbiasedInterruptTimePrecise is looked up in KernelBase at run time:
+  kernel32.lib does not export it and linking mincore.lib would break the
+  ALLOW_ONLY list.
+- Tracy is a private dependency of se_core (TracyClient, SE_TRACY builds
+  only), so the profiling macros sit beside the code they measure; only
+  se_core/src/profile.cc includes Tracy. TracyClient is built with
+  TRACY_DELAYED_INIT and TRACY_MANUAL_LIFETIME (nothing starts until
+  `profile::Start()`, and every macro checks the started flag), keeps
+  TRACY_ON_DEMAND, TRACY_ONLY_LOCALHOST and TRACY_NO_BROADCAST, sets
+  TRACY_DBGHELP_LOCK=SeDbgHelp (se_core defines the lock) and
+  TRACY_NO_CRASH_HANDLER (crashpad owns crashes). Zones with run-time names
+  (schedule systems, fork sites) use `SE_PROFILE_ZONE_DYNAMIC`, an addition
+  to the spec's macro list. Thread names given before the start are applied
+  by each thread's first profiled event.
+
+**Why.** Threads must have the same names, roles and placement in the
+SDL-free test builds as in the runtime, and se_core may not include
+platform headers. Linking Tracy from se_core keeps the zone macros free of
+a dependency on a higher module; the manual lifetime is the only Tracy mode
+that guarantees no socket and no thread in tests, tools and benches.
+
+## ADR-030 Two more fault boundaries: thread creation and the log sinks (2026-11-08)
+
+**Decision.** ADR-006's list of `// se-fault-boundary` files gains:
+- se_os/src/thread.cc: `std::jthread` reports a thread the OS cannot
+  create with std::system_error, which `StartThread` returns as an Error.
+  An exception that escapes a thread's body is not caught: the entry is
+  noexcept, so std::terminate runs at the throw and the crash handler
+  records it there.
+- se_log/src/log_worker.cc: spdlog reports file errors (opening, writing,
+  rotating, flushing) with spdlog_ex. The sinks are created and called only
+  there; `LogWorker::Start` turns a failure into an Error with the path, and
+  a failure while running is counted (LogWorkerStats::sink_errors),
+  reported once on stderr, and survived.
+
+**Why.** Both are third-party throws at the edge of engine code: the
+standard library's thread constructor and spdlog's sinks. Returning
+std::expected from StartThread is the spec's contract, and a full disk must
+not take the log worker down.
+
 ## ADR-031 Breadcrumbs and rings live in dump-stream memory (2026-11-08)
 
 **Decision.** The ThreadRegistry's table, every log ring and the InputFrame

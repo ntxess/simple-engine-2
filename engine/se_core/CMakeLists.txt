@@ -17,6 +17,7 @@ se_add_module(se_core KIND STATIC
     src/jobs.cc
     src/log.cc
     src/log_ring.cc
+    src/profile.cc
     src/profile_clock.cc
     src/schedule.cc
     src/sim_clock.cc
