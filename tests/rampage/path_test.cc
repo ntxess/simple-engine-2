@@ -1,14 +1,16 @@
 // Copyright 2026 The simple-engine-2 Authors.
 //
 // Path following: R6 (zero-length segments), R12 (steps follow the
-// polyline: several waypoints in one step, the exact stop at the end) and
-// R13 (the closing segment of repeating paths, two points, coincident
-// points), plus the PathSystem's Speed binding and Moved flag, and the
-// legacy-ref-v1 behaviour kept for the v1 comparison.
+// polyline: several waypoints in one step, the exact stop at the end, loops
+// far shorter than the step, and the end of a step that a round no longer
+// shortens) and R13 (the closing segment of repeating paths, two points,
+// coincident points), plus the PathSystem's Speed binding and Moved flag,
+// and the legacy-ref-v1 behaviour kept for the v1 comparison.
 
 #include <catch2/catch_test_macros.hpp>
 #include <cmath>
 #include <entt/entity/registry.hpp>
+#include <limits>
 #include <utility>
 #include <vector>
 
@@ -151,6 +153,96 @@ TEST_CASE("R13: a loop of coincident points never moves", "[rampage][path]") {
   const PathStep step = AdvancePath(closed.path, closed.cache, 25.0F);
   REQUIRE(closed.path.segment == 0);
   CHECK(step.pos == Vec2{5.0F, 0.0F});
+}
+
+TEST_CASE("R12: a loop far shorter than the step goes round until it is used",
+          "[rampage][path]") {
+  // 2e7 px/s on a 1 px loop: the step loses exactly 1 per segment, over
+  // 166666 segments in one tick, and ends 0.671875 into segment 0.
+  Fixture probe = Make({{500, 500}, {501, 500}}, true);
+  const float fast = 2.0e7F * (1.0F / 120.0F);
+  REQUIRE(fast == 166666.671875F);
+  PathStep step = AdvancePath(probe.path, probe.cache, fast);
+  REQUIRE(probe.path.segment == 0);
+  CHECK(probe.path.u == 0.671875F);
+  CHECK(step.pos == Vec2{500.671875F, 500.0F});
+  CHECK(Heading(step) == 90.0F);
+
+  // 80000 half-pixel segments in one step.
+  Fixture half = Make({{0, 0}, {0.5F, 0}}, true);
+  step = AdvancePath(half.path, half.cache, 40000.25F);
+  REQUIRE(half.path.segment == 0);
+  CHECK(half.path.u == 0.25F);
+  CHECK(step.pos == Vec2{0.25F, 0.0F});
+}
+
+TEST_CASE("R12: a sub-pixel loop at the stress speed stays on its points",
+          "[rampage][path]") {
+  // Segments of 2^-14 px (one float step at x = 900) at 500 px/s: 68266
+  // segments per tick, each subtracted exactly.
+  const float x1 = 900.00006F;
+  Fixture f = Make({{900, 300}, {x1, 300}}, true);
+  const float len = x1 - 900.0F;
+  REQUIRE(f.cache.lengths == std::vector<float>{len, len});
+  const float rem = 500.0F * (1.0F / 120.0F);
+  PathStep step = AdvancePath(f.path, f.cache, rem);
+  REQUIRE(f.path.segment == 0);
+  CHECK(f.path.u == rem - 68266.0F * len);
+  CHECK(step.pos == Vec2{x1, 300.0F});
+  for (int tick = 0; tick < 50; ++tick) {
+    step = AdvancePath(f.path, f.cache, rem);
+    INFO("tick " << tick);
+    REQUIRE(step.active);
+    CHECK(step.pos.x >= 900.0F);
+    CHECK(step.pos.x <= x1);
+    CHECK(step.pos.y == 300.0F);
+    CHECK(f.path.u < f.cache.lengths[f.path.segment]);
+    CHECK_FALSE(f.path.done);
+  }
+}
+
+TEST_CASE("R12: a step that a round no longer shortens ends at the start",
+          "[rampage][path]") {
+  // 1e6 px on a loop of 2^-13 px segments: the subtractions vanish in
+  // rounding, so the second wrap ends the step on the first point.
+  Fixture f = Make({{1000, 0}, {1000.0001F, 0}}, true);
+  REQUIRE(f.cache.lengths[0] > 0.0F);
+  PathStep step = AdvancePath(f.path, f.cache, 1.0e6F);
+  REQUIRE(f.path.segment == 0);
+  CHECK(f.path.u == 0.0F);
+  CHECK(step.pos == Vec2{1000.0F, 0.0F});
+  CHECK(Heading(step) == 90.0F);
+
+  // So do NaN and infinite steps.
+  for (const float bad : {std::numeric_limits<float>::quiet_NaN(),
+                          std::numeric_limits<float>::infinity()}) {
+    Fixture loop = Make({{0, 0}, {10, 0}, {10, 10}}, true);
+    loop.path.segment = 1;
+    loop.path.u = 3.0F;
+    step = AdvancePath(loop.path, loop.cache, bad);
+    REQUIRE(loop.path.segment == 0);
+    CHECK(loop.path.u == 0.0F);
+    CHECK(step.pos == Vec2{0.0F, 0.0F});
+    CHECK(Heading(step) == 90.0F);
+    // A non-repeating path ends on its last point.
+    Fixture open = Make({{0, 0}, {4, 0}, {4, 4}}, false);
+    step = AdvancePath(open.path, open.cache, bad);
+    CHECK(open.path.done);
+    CHECK(step.pos == Vec2{4.0F, 4.0F});
+    CHECK(Heading(step) == 180.0F);
+  }
+}
+
+TEST_CASE("A path whose segment is out of range starts over",
+          "[rampage][path]") {
+  Fixture f = Make({{0, 0}, {4, 0}, {4, 4}}, false);
+  f.path.segment = 7;
+  f.path.u = 3.0F;
+  const PathStep step = AdvancePath(f.path, f.cache, 1.0F);
+  REQUIRE(f.path.segment == 0);
+  CHECK(f.path.u == 1.0F);
+  CHECK(step.pos == Vec2{1.0F, 0.0F});
+  CHECK_FALSE(f.path.done);
 }
 
 entt::entity Mover(RampageTestWorld& w, std::vector<Vec2> points, bool loop,

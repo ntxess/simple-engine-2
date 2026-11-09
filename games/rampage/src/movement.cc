@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <numbers>
 #include <vector>
 
@@ -28,10 +29,6 @@ constexpr float kSfmlPi = 3.141592654F;
 constexpr float kSfmlTau = kSfmlPi * 2.0F;
 // The heading's (180 / pi) of WayPointSystem and R12.
 constexpr float kRadToDeg = 180.0F / std::numbers::pi_v<float>;
-
-// A path loop that consumes nothing per iteration (lengths far below the
-// step's precision) stops here instead of spinning.
-constexpr int kMaxPathIterations = 1 << 16;
 
 RulesVersion Rules(const World& world) {
   const auto* rules = world.CReg().ctx().find<RulesConfig>();
@@ -209,21 +206,25 @@ PathStep AdvancePath(Path& path, const PathCache& cache, float rem) noexcept {
   }
   step.active = true;
   std::uint32_t i = path.segment;
-  if (path.loop && i >= segments) i = 0;
   float u = path.u;
-  bool travelled = false;
-  std::uint32_t last = 0;
+  if (i >= segments) {
+    // Out of range only after an edit that shortened the path: start over,
+    // as the legacy WayPointSystem does.
+    i = 0;
+    u = 0.0F;
+  }
   const auto heading_of = [&path, n](std::uint32_t segment) {
     const Vec2 a = path.points[segment];
     const Vec2 b = path.points[(segment + 1) % n];
     return (dm::Atan2(b.y - a.y, b.x - a.x) * kRadToDeg) + 90.0F;
   };
-  for (int iteration = 0;; ++iteration) {
-    // 1. Skip segments of length 0 (R6).
-    while (i < segments && cache.lengths[i] <= 0.0F) {
-      ++i;
-      if (path.loop && i == segments) i = 0;
-    }
+  // The last segment of positive length the step moved along, which turns
+  // the entity.
+  bool moved_along = false;
+  std::uint32_t along = 0;
+  // A loop's remaining step at its previous wrap.
+  float rem_at_wrap = std::numeric_limits<float>::infinity();
+  while (true) {
     // 2. The end of a non-repeating path: exactly on the last point, for
     // good.
     if (i >= segments) {
@@ -231,25 +232,42 @@ PathStep AdvancePath(Path& path, const PathCache& cache, float rem) noexcept {
       path.segment = segments;
       path.u = 0.0F;
       step.pos = path.points[n - 1];
-      if (travelled) {
+      if (moved_along) {
         step.has_heading = true;
-        step.heading = heading_of(last);
+        step.heading = heading_of(along);
       }
       return step;
     }
+    // 1. Segments of length 0 are skipped (R6). So are NaN lengths, which
+    // only infinite coordinates produce; the legacy code goes round them
+    // for ever or moves to NaN.
     const float length = cache.lengths[i];
-    // 3. The step ends on this segment.
-    if (u + rem < length || iteration >= kMaxPathIterations) {
-      u = u + rem;
-      break;
+    if (length > 0.0F) {
+      moved_along = true;
+      along = i;
+      // 3. The step ends on this segment.
+      if (u + rem < length) {
+        u = u + rem;
+        break;
+      }
+      // 4. On to the next segment with the rest of the step.
+      rem = (u + rem) - length;
     }
-    // 4. Continue on the next segment with the rest of the step.
-    rem = (u + rem) - length;
     u = 0.0F;
-    travelled = true;
-    last = i;
     ++i;
-    if (path.loop && i == segments) i = 0;
+    if (path.loop && i == segments) {
+      // R13: past the closing segment, start over. A step that a whole
+      // round no longer shortens (a speed so large, or NaN or infinite,
+      // that the round vanishes in float rounding) would go round for ever;
+      // it ends at the start of the path instead (R12). So the loop ends:
+      // a negative step ends on the next segment of positive length, and
+      // after the first wrap a step is finite and smaller at each later
+      // wrap until one sets it to 0, which the next segment of positive
+      // length ends.
+      i = 0;
+      if (!(rem < rem_at_wrap)) rem = 0.0F;
+      rem_at_wrap = rem;
+    }
   }
   path.segment = i;
   path.u = u;

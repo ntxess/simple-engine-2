@@ -373,12 +373,23 @@ none of which the reference projections can tell apart:
   by their net intent, 0, where the legacy Movement applied two sequential
   steps, `(y - s) + s`, which can differ in the last bit at non-integer
   positions. No reference input holds opposite keys.
-- Degenerate paths stop by different guards: game_rampage's AdvancePath ends
-  a tick after 65536 loop iterations, the legacy WayPointSystem (R12) ends at
-  the path's first point when a wrap no longer shortens the step. Both fire
-  only for speeds near 1e9 px/s or non-finite speeds. RotationFromHeading
-  returns 0 for non-finite or enormous headings (an undefined int cast in
-  the legacy code).
+- Degenerate paths (corrected after the M3 review). AdvancePath follows
+  R12's loop with the legacy WayPointSystem's own guard and nothing else: at
+  each wrap of a repeating path, a remaining step that is not smaller than
+  at the previous wrap (a round lost in float rounding, or a NaN or infinite
+  speed) becomes 0, so the step ends at the start of the path. A step can
+  go round many times in one tick, as in the reference: a 1 px loop at
+  2e7 px/s passes 166666 segments, a loop of 2^-14 px segments at the
+  stress speed of 500 px/s passes 68266. The integration first stopped
+  after 65536 iterations and extrapolated past the segment's end, which
+  left the polyline at those inputs; the claim that its guard fired only
+  near 1e9 px/s was wrong. One difference remains: a segment of NaN length,
+  which only infinite coordinates (beyond 3.4e38) produce, is skipped like
+  one of length 0, where the legacy code moves to NaN or, on a loop, goes
+  round for ever. A path whose segment is out of range (after an edit)
+  starts over, as in the legacy code. RotationFromHeading returns 0 for
+  non-finite or enormous headings (an undefined int cast in the legacy
+  code).
 - LoadLegacyScenario rejects what the World cannot represent, which the
   legacy loader accepts: an empty stat name (the projection cannot print
   it, ADR-024) and two stat names with the same Fnv1a32 id (they would be
