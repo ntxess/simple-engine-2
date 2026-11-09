@@ -100,18 +100,69 @@ TEST_CASE("The image comparison applies the golden tolerance", "[png]") {
   const testing::ImageDiff shifted = testing::CompareImages(a, b);
   CHECK(shifted.WithinFraction() == 1.0);
   CHECK_FALSE(shifted.Matches());
-  // One pixel of 100 far off on every channel: 99% within, mean
-  // 155 * 4 / 400 = 1.55: a match. Three such pixels: 97% within.
-  b = a;
-  for (int c = 0; c < 4; ++c) b.pixels[c] = 255;
-  CHECK(testing::CompareImages(a, b).WithinFraction() == 0.99);
-  CHECK(testing::CompareImages(a, b).Matches());
-  for (int c = 4; c < 12; ++c) b.pixels[c] = 255;
-  CHECK_FALSE(testing::CompareImages(a, b).Matches());
   TexturePayload smaller = a;
   smaller.width = 5;
   smaller.pixels.resize(smaller.Bytes());
   CHECK_FALSE(testing::CompareImages(a, smaller).Matches());
+
+  // A drawn column of 10 white pixels (x = 9) on the grey background.
+  TexturePayload column = a;
+  for (std::size_t y = 0; y < 10; ++y) {
+    for (std::size_t c = 0; c < 4; ++c) {
+      column.pixels[(y * 10 + 9) * 4 + c] = 255;
+    }
+  }
+  // One background pixel of 100 far off on every channel: 99% within, mean
+  // 155 * 4 / 400 = 1.55, 10 of 11 drawn pixels within: a match. Three
+  // such pixels: 97% within.
+  b = column;
+  for (std::size_t c = 0; c < 4; ++c) b.pixels[c] = 255;
+  const testing::ImageDiff one = testing::CompareImages(column, b);
+  CHECK(one.WithinFraction() == 0.99);
+  REQUIRE(one.drawn == 11);
+  REQUIRE(one.drawn_within == 10);
+  CHECK(one.Matches());
+  for (std::size_t c = 4; c < 12; ++c) b.pixels[c] = 255;
+  CHECK_FALSE(testing::CompareImages(column, b).Matches());
+}
+
+TEST_CASE("An image missing its sparse sprites does not match", "[png]") {
+  // 100 x 100 grey with two 5 x 5 white squares: 0.5% of the pixels drawn.
+  TexturePayload blank;
+  blank.width = 100;
+  blank.height = 100;
+  blank.pixels.assign(blank.Bytes(), 100);
+  TexturePayload drawn = blank;
+  for (const std::size_t left : {10U, 60U}) {
+    for (std::size_t y = 40; y < 45; ++y) {
+      for (std::size_t x = left; x < left + 5; ++x) {
+        for (std::size_t c = 0; c < 4; ++c) {
+          drawn.pixels[(y * 100 + x) * 4 + c] = 255;
+        }
+      }
+    }
+  }
+  CHECK(testing::CompareImages(drawn, drawn).Matches());
+  // Nothing drawn: 99.5% of the pixels within and a mean of 0.775/255
+  // would pass the size, 98% and mean conditions; none of the 50 drawn
+  // pixels is within.
+  const testing::ImageDiff nothing = testing::CompareImages(blank, drawn);
+  CHECK(nothing.WithinFraction() >= testing::kMinWithinFraction);
+  CHECK(nothing.mean_abs_diff <= testing::kMaxMeanAbsDiff);
+  REQUIRE(nothing.drawn == 50);
+  REQUIRE(nothing.drawn_within == 0);
+  CHECK_FALSE(nothing.Matches());
+  // One square of two: half the drawn pixels.
+  TexturePayload half = drawn;
+  for (std::size_t y = 40; y < 45; ++y) {
+    for (std::size_t x = 60; x < 65; ++x) {
+      for (std::size_t c = 0; c < 4; ++c) {
+        half.pixels[(y * 100 + x) * 4 + c] = 100;
+      }
+    }
+  }
+  CHECK(testing::CompareImages(half, drawn).DrawnWithinFraction() == 0.5);
+  CHECK_FALSE(testing::CompareImages(half, drawn).Matches());
 }
 
 TEST_CASE("Frame faults parse STEP[:EVERY[:UNTIL]]", "[faults]") {

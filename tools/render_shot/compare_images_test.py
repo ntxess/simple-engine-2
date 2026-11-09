@@ -3,8 +3,9 @@
 Writes small RGBA images with compare_images.write_png, reads them back,
 and checks the tolerance rule at its edges: identical images, a uniform
 shift inside the per-pixel tolerance that still breaks the mean, a few
-far-off pixels below and above 2%, a size mismatch, and the diff image of
-a mismatch. Python 3, stdlib only.
+far-off pixels below and above 2%, a size mismatch, an image missing its
+sparse drawn pixels, and the diff image of a mismatch. Python 3, stdlib
+only.
 """
 
 import pathlib
@@ -54,10 +55,46 @@ def main():
         check(result["within"] == 100, "a shift of 8 is within")
         check(not compare_images.matches(result),
               "a shift of 8 on three channels breaks the mean")
-        check(matches(with_pixels(base, 1, 255)), "one far-off pixel matches")
-        check(not matches(with_pixels(base, 3, 255)),
-              "three far-off pixels (97% within) do not")
         check(not matches(image(5, 10, 100)), "sizes must match")
+
+        # A drawn column of 10 white pixels (x = 9) on the grey background.
+        column = bytearray(base[2])
+        for y in range(10):
+            column[(y * 10 + 9) * 4:(y * 10 + 10) * 4] = b"\xff" * 4
+        column = (10, 10, bytes(column))
+
+        def matches_column(other):
+            return compare_images.matches(
+                compare_images.compare(column, other))
+
+        one = compare_images.compare(column, with_pixels(column, 1, 255))
+        check(one["drawn"] == 11 and one["drawn_within"] == 10,
+              "one far-off pixel: 10 of 11 drawn pixels within")
+        check(matches_column(with_pixels(column, 1, 255)),
+              "one far-off pixel matches")
+        check(not matches_column(with_pixels(column, 3, 255)),
+              "three far-off pixels (97% within) do not")
+
+        # 100 x 100 grey with two 5 x 5 white squares (0.5% drawn): a
+        # blank image passes the 98% and mean conditions but not the
+        # drawn pixels.
+        squares = bytearray([100] * (100 * 100 * 4))
+        for left in (10, 60):
+            for y in range(40, 45):
+                for x in range(left, left + 5):
+                    squares[(y * 100 + x) * 4:(y * 100 + x + 1) * 4] = (
+                        b"\xff" * 4)
+        squares = (100, 100, bytes(squares))
+        blank = image(100, 100, 100)
+        nothing = compare_images.compare(blank, squares)
+        check(nothing["within"] / nothing["pixels"] >=
+              compare_images.MIN_WITHIN_FRACTION and
+              nothing["mean_abs_diff"] <= compare_images.MAX_MEAN_ABS_DIFF,
+              "a blank image passes the 98% and mean conditions")
+        check(nothing["drawn"] == 50 and nothing["drawn_within"] == 0,
+              "none of the 50 drawn pixels is within")
+        check(not compare_images.matches(nothing),
+              "an image missing its sparse sprites does not match")
 
         b_path = root / "b.png"
         compare_images.write_png(b_path, *with_pixels(base, 3, 255))

@@ -5,8 +5,12 @@
 Two images match when they have the same size, at least 98% of their
 pixels are within 8/255 on every channel (RGBA), and the mean absolute
 difference over all channels is at most 2/255 (docs/milestone-specs.md M7,
-"Legacy image comparison"; tests/render_gpu/support/image_compare.h applies
-the same rule to the golden images). On a mismatch the per-channel
+"Legacy image comparison"), and at least 90% of the drawn pixels (more
+than 8/255 from the background, B's most frequent colour, in either image)
+are within 8/255, so that an image missing its sparse sprites does not pass
+on its background alone (ADR-065). tests/render_gpu/support/
+image_compare.h applies the same rule to the golden images and
+render_shot --compare. On a mismatch the per-channel
 difference, scaled by 8, is written as an opaque PNG (default: next to B,
 named <B>.diff.png). Exit status 0 when they match, 1 when not, 2 on a
 file error. Python 3, stdlib only (8-bit non-interlaced PNGs: grey, RGB,
@@ -14,6 +18,7 @@ palette, grey with alpha, RGBA).
 """
 
 import argparse
+import collections
 import pathlib
 import struct
 import sys
@@ -22,6 +27,7 @@ import zlib
 PIXEL_TOLERANCE = 8
 MIN_WITHIN_FRACTION = 0.98
 MAX_MEAN_ABS_DIFF = 2.0
+MIN_DRAWN_WITHIN_FRACTION = 0.90
 SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
 
@@ -131,16 +137,33 @@ def write_png(path, width, height, rgba):
         chunk(b"IDAT", zlib.compress(raw, 6)) + chunk(b"IEND", b""))
 
 
+def background(rgba):
+    """The most frequent RGBA colour (the first one on a tie)."""
+    counts = collections.Counter(
+        rgba[p:p + 4] for p in range(0, len(rgba), 4))
+    return counts.most_common(1)[0][0] if counts else bytes(4)
+
+
+def _off(pixels, p, colour):
+    return any(abs(pixels[p + c] - colour[c]) > PIXEL_TOLERANCE
+               for c in range(4))
+
+
 def compare(a, b):
-    """Statistics of two (width, height, rgba) images."""
+    """Statistics of two (width, height, rgba) images; B is the expected
+    one, whose most frequent colour is the background."""
     (wa, ha, pa), (wb, hb, pb) = a, b
     result = {"same_size": (wa, ha) == (wb, hb), "pixels": wa * ha,
-              "within": 0, "mean_abs_diff": 0.0, "max_diff": 0}
+              "within": 0, "mean_abs_diff": 0.0, "max_diff": 0,
+              "drawn": 0, "drawn_within": 0}
     if not result["same_size"]:
         return result
+    back = background(pb)
     total = 0
     within = 0
     worst_all = 0
+    drawn = 0
+    drawn_within = 0
     for p in range(0, len(pa), 4):
         worst = 0
         for c in range(4):
@@ -152,10 +175,22 @@ def compare(a, b):
             within += 1
         if worst > worst_all:
             worst_all = worst
+        if _off(pa, p, back) or _off(pb, p, back):
+            drawn += 1
+            if worst <= PIXEL_TOLERANCE:
+                drawn_within += 1
     result["within"] = within
     result["mean_abs_diff"] = total / max(1, len(pa))
     result["max_diff"] = worst_all
+    result["drawn"] = drawn
+    result["drawn_within"] = drawn_within
     return result
+
+
+def drawn_fraction(result):
+    if result["drawn"] == 0:
+        return 1.0
+    return result["drawn_within"] / result["drawn"]
 
 
 def matches(result):
@@ -163,7 +198,8 @@ def matches(result):
         return False
     fraction = result["within"] / max(1, result["pixels"])
     return (fraction >= MIN_WITHIN_FRACTION and
-            result["mean_abs_diff"] <= MAX_MEAN_ABS_DIFF)
+            result["mean_abs_diff"] <= MAX_MEAN_ABS_DIFF and
+            drawn_fraction(result) >= MIN_DRAWN_WITHIN_FRACTION)
 
 
 def describe(result):
@@ -173,7 +209,9 @@ def describe(result):
     return (f"{100 * fraction:.3f}% of {result['pixels']} pixels within "
             f"{PIXEL_TOLERANCE}/255 (need {100 * MIN_WITHIN_FRACTION:.0f}%), "
             f"mean absolute difference {result['mean_abs_diff']:.3f}/255 "
-            f"(at most {MAX_MEAN_ABS_DIFF}), largest {result['max_diff']}")
+            f"(at most {MAX_MEAN_ABS_DIFF}), largest {result['max_diff']}; "
+            f"{100 * drawn_fraction(result):.3f}% of {result['drawn']} drawn "
+            f"pixels within (need {100 * MIN_DRAWN_WITHIN_FRACTION:.0f}%)")
 
 
 def diff_image(a, b):

@@ -1180,6 +1180,19 @@ are, and the pacer's B needs them.
 - Golden images (tests/golden/render/d3d12, vulkan) are compared in C++
   with the same rule; on this machine both drivers produce identical
   files.
+- The comparison adds one condition to the spec's tolerance (same size,
+  98% of the pixels within 8/255, mean absolute difference at most
+  2/255): at least 90% of the drawn pixels are within 8/255, a drawn pixel
+  being one more than 8/255 from the background (the expected image's
+  most frequent colour) in either image. The spec's three conditions
+  alone pass an image that is missing almost all of a sparse scene: the
+  stress scenario's ships cover 4205 pixels at tick 600 (0.2% of
+  1920x1080), and an image with only the player drawn passed against the
+  sandbox (99.81% within, mean 0.294/255). With the condition the stress
+  scenario still matches at tick 600 (97.19% of the drawn pixels within,
+  on both drivers), as do the goldens and the fault-test readbacks, and a
+  blank image fails (`render_gpu.An image missing its sparse sprites does
+  not match`, tools.compare_images).
 - `checks.gpu_texture_members` (tools/checks/check_gpu_members.py) scans
   every module but se_render, tests and tools included, for an
   SDL_GPUTexture* stored in a class, struct or union (a pointer member or a
@@ -1190,4 +1203,5 @@ are, and the pacer's B needs them.
 **Why.** Rendering the reference headless keeps the comparison in the
 commit gate instead of a desktop-only test; a separate checker keeps the
 member scan (which needs brace tracking) out of the line-based banned-API
-scan.
+scan; the drawn-pixel condition makes "matches the legacy image" fail
+when the sprites are missing, which the background alone would hide.

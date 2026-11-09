@@ -5,12 +5,14 @@
 #include <SDL3/SDL_stdinc.h>
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <format>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 
 #include "se_platform/fs.h"
 #include "se_render/gpu_resources.h"
@@ -34,15 +36,59 @@ bool UpdatingImageGoldens() {
   return value != nullptr && std::string_view(value) == "1";
 }
 
+std::uint32_t PixelKey(const std::uint8_t* pixel) {
+  return std::uint32_t{pixel[0]} | (std::uint32_t{pixel[1]} << 8) |
+         (std::uint32_t{pixel[2]} << 16) | (std::uint32_t{pixel[3]} << 24);
+}
+
+// The most frequent colour of |image| (the first one on a tie), counted in
+// runs: rendered images are mostly long runs of the clear colour.
+std::array<std::uint8_t, 4> Background(const TexturePayload& image) {
+  std::unordered_map<std::uint32_t, std::uint64_t> counts;
+  std::uint32_t best = 0;
+  std::uint64_t best_count = 0;
+  const std::size_t pixels = image.pixels.size() / 4;
+  std::size_t p = 0;
+  while (p < pixels) {
+    const std::uint32_t key = PixelKey(&image.pixels[p * 4]);
+    std::size_t run = 1;
+    while (p + run < pixels && PixelKey(&image.pixels[(p + run) * 4]) == key) {
+      ++run;
+    }
+    std::uint64_t& count = counts[key];
+    count += run;
+    if (count > best_count) {
+      best = key;
+      best_count = count;
+    }
+    p += run;
+  }
+  return {static_cast<std::uint8_t>(best & 0xFFU),
+          static_cast<std::uint8_t>((best >> 8) & 0xFFU),
+          static_cast<std::uint8_t>((best >> 16) & 0xFFU),
+          static_cast<std::uint8_t>((best >> 24) & 0xFFU)};
+}
+
+int WorstChannel(const std::uint8_t* pixel,
+                 const std::array<std::uint8_t, 4>& colour) {
+  int worst = 0;
+  for (std::size_t c = 0; c < 4; ++c) {
+    worst = std::max(worst, std::abs(int{pixel[c]} - int{colour[c]}));
+  }
+  return worst;
+}
+
 }  // namespace
 
 std::string ImageDiff::Describe() const {
   if (!same_size) return "the sizes differ";
   return std::format(
       "{:.3f}% of {} pixels within {}/255 (need {:.0f}%), mean absolute "
-      "difference {:.3f}/255 (at most {:.1f}), largest {}",
+      "difference {:.3f}/255 (at most {:.1f}), largest {}; {:.3f}% of {} "
+      "drawn pixels within (need {:.0f}%)",
       100.0 * WithinFraction(), pixels, kPixelTolerance,
-      100.0 * kMinWithinFraction, mean_abs_diff, kMaxMeanAbsDiff, max_diff);
+      100.0 * kMinWithinFraction, mean_abs_diff, kMaxMeanAbsDiff, max_diff,
+      100.0 * DrawnWithinFraction(), drawn, 100.0 * kMinDrawnWithinFraction);
 }
 
 ImageDiff CompareImages(const TexturePayload& a, const TexturePayload& b) {
@@ -51,6 +97,7 @@ ImageDiff CompareImages(const TexturePayload& a, const TexturePayload& b) {
                    a.pixels.size() == a.Bytes() && b.pixels.size() == b.Bytes();
   if (!diff.same_size) return diff;
   diff.pixels = std::uint64_t{a.width} * a.height;
+  const std::array<std::uint8_t, 4> background = Background(b);
   std::uint64_t total = 0;
   for (std::size_t p = 0; p < diff.pixels; ++p) {
     int worst = 0;
@@ -60,8 +107,14 @@ ImageDiff CompareImages(const TexturePayload& a, const TexturePayload& b) {
       worst = std::max(worst, delta);
       total += static_cast<std::uint64_t>(delta);
     }
-    if (worst <= kPixelTolerance) ++diff.within;
+    const bool within = worst <= kPixelTolerance;
+    if (within) ++diff.within;
     diff.max_diff = std::max(diff.max_diff, worst);
+    if (WorstChannel(&a.pixels[p * 4], background) > kPixelTolerance ||
+        WorstChannel(&b.pixels[p * 4], background) > kPixelTolerance) {
+      ++diff.drawn;
+      if (within) ++diff.drawn_within;
+    }
   }
   diff.mean_abs_diff =
       static_cast<double>(total) / static_cast<double>(diff.pixels * 4);

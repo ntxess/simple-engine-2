@@ -4,8 +4,12 @@
 // (docs/milestone-specs.md M7, "Golden images"): two RGBA8 images match
 // when they have the same size, at least 98% of their pixels are within
 // 8/255 on every channel, and the mean absolute difference over all
-// channels is at most 2/255. tools/render_shot/compare_images.py applies
-// the same rule to the legacy comparison.
+// channels is at most 2/255. One condition is added (ADR-065): at least 90%
+// of the drawn pixels, those more than 8/255 from the background (the
+// expected image's most frequent colour) in either image, are within
+// 8/255, so that an image missing its sparse sprites does not pass on its
+// background alone. tools/render_shot/compare_images.py applies the same
+// rule.
 //
 // Goldens live in tests/golden/render/<driver>/<name>.png (driver d3d12 or
 // vulkan). CheckGoldenImage writes the image and, on a mismatch, a diff
@@ -26,6 +30,7 @@ namespace se::testing {
 inline constexpr int kPixelTolerance = 8;
 inline constexpr double kMinWithinFraction = 0.98;
 inline constexpr double kMaxMeanAbsDiff = 2.0;
+inline constexpr double kMinDrawnWithinFraction = 0.90;
 
 struct ImageDiff {
   bool same_size = false;
@@ -35,19 +40,30 @@ struct ImageDiff {
   // Mean absolute difference over every channel, in 1/255 units.
   double mean_abs_diff = 0.0;
   int max_diff = 0;
+  // Pixels more than kPixelTolerance from the background in either image,
+  // and how many of them are within kPixelTolerance.
+  std::uint64_t drawn = 0;
+  std::uint64_t drawn_within = 0;
 
   [[nodiscard]] double WithinFraction() const noexcept {
     return pixels == 0
                ? 1.0
                : static_cast<double>(within) / static_cast<double>(pixels);
   }
+  [[nodiscard]] double DrawnWithinFraction() const noexcept {
+    return drawn == 0
+               ? 1.0
+               : static_cast<double>(drawn_within) / static_cast<double>(drawn);
+  }
   [[nodiscard]] bool Matches() const noexcept {
     return same_size && WithinFraction() >= kMinWithinFraction &&
-           mean_abs_diff <= kMaxMeanAbsDiff;
+           mean_abs_diff <= kMaxMeanAbsDiff &&
+           DrawnWithinFraction() >= kMinDrawnWithinFraction;
   }
   [[nodiscard]] std::string Describe() const;
 };
 
+// |b| is the expected image: its most frequent colour is the background.
 [[nodiscard]] ImageDiff CompareImages(const TexturePayload& a,
                                       const TexturePayload& b);
 
