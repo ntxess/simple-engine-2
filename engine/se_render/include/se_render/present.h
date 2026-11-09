@@ -7,11 +7,12 @@
 // wrapper and the patch) and M6b (the FramePacer, which reaches it only
 // through its PresentPort; the integration step writes that adapter).
 //
-// Every function asserts the main thread: SDL_GPU performs no thread
-// checks, and the swapchain belongs to the window's thread. In an unpatched
-// build (SE_SDL_PATCH=OFF, compile definition SE_SDL_PATCHED=0; preset
-// msvc-unpatched-dev) every query reports "unsupported" and every action is
-// a no-op that returns false; the engine then runs Standard pacing.
+// Every function asserts the engine's main thread and SDL's
+// (SDL_IsMainThread): SDL_GPU performs no thread checks, and the swapchain
+// belongs to the window's thread. In an unpatched build (SE_SDL_PATCH=OFF,
+// compile definition SE_SDL_PATCHED=0; preset msvc-unpatched-dev) every
+// query reports "unsupported" and every action is a no-op that returns
+// false; the engine then runs Standard pacing.
 //
 // Backends (ADR-050 to ADR-053):
 // - Direct3D 12: the DXGI frame-latency waitable (the swapchain is recreated

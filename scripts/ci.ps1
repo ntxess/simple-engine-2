@@ -15,8 +15,10 @@
                                        # the legacy reference (build + "legacy" tests)
   scripts/ci.ps1 -Legacy               # appends both legacy presets to the selection
   scripts/ci.ps1 -Desktop              # the desktop label (real windows on this
-                                       # desktop) on msvc-dev and msvc-asan; with
-                                       # -Presets or -Legacy, after those
+                                       # desktop) on msvc-dev and msvc-asan, and
+                                       # pacing.unpatched_standard in
+                                       # msvc-unpatched-dev; with -Presets or
+                                       # -Legacy, after those
 #>
 param(
   [string[]]$Presets = @('msvc-dev', 'msvc-asan', 'clangcl-dev'),
@@ -32,6 +34,11 @@ if (Test-Path Env:SE_UPDATE_GOLDENS) {
   Write-Warning 'SE_UPDATE_GOLDENS is set; ci.ps1 clears it so that the golden tests check their goldens.'
   Remove-Item Env:SE_UPDATE_GOLDENS
 }
+# SDL's assertion dialog would wait for a click in an unattended run: a
+# failed SDL assertion aborts instead (ADR-070; the engine with
+# SE_NO_MESSAGE_BOX=1, the test executables and render_shot also install a
+# handler that prints and aborts).
+$env:SDL_ASSERT = 'abort'
 # powershell -File passes "a,b" as one string; accept both forms.
 $Presets = @($Presets | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
 if ($Milestone) {
@@ -87,9 +94,23 @@ foreach ($preset in $desktopPresets) {
   & cmd.exe /c "$msvc cmake --preset $preset && $msvc cmake --build --preset $preset && $msvc ctest --test-dir $tree -L desktop --output-on-failure"
   if ($LASTEXITCODE -ne 0) { $failed += "desktop:$preset" }
 }
+# The M6 exit "rampage runs in Standard unpatched" needs a window, and the
+# msvc-unpatched-dev test preset excludes the desktop label: run that one
+# desktop test in the unpatched tree (it skips in the patched ones).
+$unpatchedDesktop = @()
+if ($desktopPresets.Count -gt 0) {
+  $unpatchedDesktop = @('msvc-unpatched-dev')
+  Write-Host "=== desktop: msvc-unpatched-dev (pacing.unpatched_standard) ===" -ForegroundColor Cyan
+  $env:SE_NO_MESSAGE_BOX = '1'
+  $msvc = "`"$repo\scripts\with-msvc.cmd`""
+  $tree = "`"$repo\out\build\msvc-unpatched-dev`""
+  & cmd.exe /c "$msvc cmake --preset msvc-unpatched-dev && $msvc cmake --build --preset msvc-unpatched-dev && $msvc ctest --test-dir $tree -L desktop -R pacing[.]unpatched_standard --no-tests=error --output-on-failure"
+  if ($LASTEXITCODE -ne 0) { $failed += 'desktop:msvc-unpatched-dev' }
+}
 if ($failed.Count -gt 0) {
   Write-Host "FAILED: $($failed -join ', ')" -ForegroundColor Red
   exit 1
 }
-$passed = @($Presets) + @($desktopPresets | ForEach-Object { "desktop:$_" })
+$passed = @($Presets) + @(@($desktopPresets) + @($unpatchedDesktop) |
+  ForEach-Object { "desktop:$_" })
 Write-Host "All presets passed: $($passed -join ', ')" -ForegroundColor Green

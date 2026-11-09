@@ -7,18 +7,51 @@ Runs legacy_replay with the reference scenario NAME and its recorded input
 (tests/fixtures/reference/NAME.scenario.json and .seinput) up to tick N
 with --image-out, then render_shot on the same scenario, input and tick
 with --compare against the legacy image: both images have the legacy
-viewport's size and must match within the golden tolerance (98% of the
-pixels within 8/255, mean absolute difference at most 2/255). A mismatch
-leaves a diff PNG in DIR. Run from the repository root (the legacy tree
-reads config/ and assets/ relative to the working directory). Python 3,
-stdlib only.
+viewport's size and must match within the golden tolerance
+(tests/render_gpu/support/image_compare.h). A mismatch leaves a diff PNG
+in DIR. The legacy image must also equal the committed copy
+tests/golden/render/legacy/<NAME>_<N>.png, on which
+render_gpu."The sandbox golden matches the legacy image, sprite by sprite"
+checks that every sprite missing or drawn magenta fails (ADR-069); with
+SE_UPDATE_GOLDENS=1 the copy is rewritten instead. Run from the repository
+root (the legacy tree reads config/ and assets/ relative to the working
+directory). Python 3, stdlib only.
 """
 
 import argparse
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+
+import compare_images  # noqa: E402  pylint: disable=wrong-import-position
+
+GOLDEN_DIR = pathlib.Path("tests/golden/render/legacy")
+
+
+def check_committed_copy(legacy_png, name):
+    """The legacy image equals tests/golden/render/legacy/<name>.png, or,
+    with SE_UPDATE_GOLDENS=1, replaces it. Returns an error or None."""
+    golden = GOLDEN_DIR / f"{name}.png"
+    if os.environ.get("SE_UPDATE_GOLDENS") == "1":
+        GOLDEN_DIR.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(legacy_png, golden)
+        print(f"legacy_image_test: rewrote {golden}")
+        return None
+    if not golden.exists():
+        return (f"no committed legacy image {golden}; run with "
+                f"SE_UPDATE_GOLDENS=1 and commit it")
+    if golden.read_bytes() == legacy_png.read_bytes():
+        return None
+    # Another PNG encoder: the pixels must still be the same.
+    if compare_images.read_png(golden) == compare_images.read_png(legacy_png):
+        return None
+    return (f"{legacy_png} differs from the committed {golden}: rerun with "
+            f"SE_UPDATE_GOLDENS=1 if the legacy reference changed on "
+            f"purpose, and commit it")
 
 
 def run(command, **kwargs):
@@ -60,6 +93,10 @@ def main():
         return 1
     if not legacy_png.exists():
         print(f"FAIL: legacy_replay wrote no {legacy_png}")
+        return 1
+    stale = check_committed_copy(legacy_png, f"{args.scenario}_{args.tick}")
+    if stale:
+        print(f"FAIL: {stale}")
         return 1
     status = run([args.render_shot, "--legacy-scenario", scenario,
                   "--inputs", inputs, "--tick", str(args.tick),

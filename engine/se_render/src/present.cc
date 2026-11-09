@@ -13,6 +13,7 @@
 #include "se_core/log.h"
 #include "se_core/thread_role.h"
 #include "se_render/gpu_device.h"
+#include "src/gpu_assert.h"
 
 #if !defined(SE_SDL_PATCHED)
 #error "se_render is built with SE_SDL_PATCHED=0 or 1 (cmake: SE_SDL_PATCH)"
@@ -38,7 +39,7 @@ constexpr int kMaxFrameLatency = 2;
 }  // namespace
 
 Caps QueryCaps(GpuDevice& device) {
-  SE_ASSERT_MAIN_THREAD();
+  SE_ASSERT_GPU_THREAD();
   Caps caps;
   caps.patched = true;
   const SDL_SE_GPUCapabilityFlags flags =
@@ -54,7 +55,7 @@ Caps QueryCaps(GpuDevice& device) {
 }
 
 bool SetFrameLatency(GpuDevice& device, int frames) {
-  SE_ASSERT_MAIN_THREAD();
+  SE_ASSERT_GPU_THREAD();
   SE_ASSERT_MSG(frames >= kMinFrameLatency && frames <= kMaxFrameLatency,
                 "the frame latency is 1 or 2");
   if (device.ClaimedWindow() == nullptr) return false;
@@ -68,7 +69,7 @@ bool SetFrameLatency(GpuDevice& device, int frames) {
 }
 
 WaitResult WaitFrameLatency(GpuDevice& device, std::uint64_t timeout_ns) {
-  SE_ASSERT_MAIN_THREAD();
+  SE_ASSERT_GPU_THREAD();
   if (device.ClaimedWindow() == nullptr) return WaitResult::kUnsupported;
   switch (SDL_SE_WaitForGPUFrameLatency(device.Native(), device.ClaimedWindow(),
                                         timeout_ns)) {
@@ -83,7 +84,7 @@ WaitResult WaitFrameLatency(GpuDevice& device, std::uint64_t timeout_ns) {
 }
 
 bool GetPresentStats(GpuDevice& device, PresentStats& stats) {
-  SE_ASSERT_MAIN_THREAD();
+  SE_ASSERT_GPU_THREAD();
   if (device.ClaimedWindow() == nullptr) return false;
   SDL_SE_GPUPresentStatistics statistics{};
   if (!SDL_SE_GetGPUPresentStatistics(device.Native(), device.ClaimedWindow(),
@@ -100,18 +101,18 @@ bool GetPresentStats(GpuDevice& device, PresentStats& stats) {
 
 void BeginGpuTiming(GpuDevice& /*device*/,
                     SDL_GPUCommandBuffer* commands) noexcept {
-  SE_ASSERT_MAIN_THREAD();
+  SE_ASSERT_GPU_THREAD();
   if (commands != nullptr) SDL_SE_BeginGPUTiming(commands);
 }
 
 void EndGpuTiming(GpuDevice& /*device*/,
                   SDL_GPUCommandBuffer* commands) noexcept {
-  SE_ASSERT_MAIN_THREAD();
+  SE_ASSERT_GPU_THREAD();
   if (commands != nullptr) SDL_SE_EndGPUTiming(commands);
 }
 
 std::optional<GpuTime> ReadGpuTime(GpuDevice& device, SDL_GPUFence* fence) {
-  SE_ASSERT_MAIN_THREAD();
+  SE_ASSERT_GPU_THREAD();
   if (fence == nullptr) return std::nullopt;
   Uint64 duration_ns = 0;
   if (!SDL_SE_GetGPUTiming(device.Native(), fence, &duration_ns)) {
@@ -121,7 +122,7 @@ std::optional<GpuTime> ReadGpuTime(GpuDevice& device, SDL_GPUFence* fence) {
 }
 
 DeviceStatus QueryDeviceStatus(GpuDevice& device) {
-  SE_ASSERT_MAIN_THREAD();
+  SE_ASSERT_GPU_THREAD();
   switch (SDL_SE_GetGPUDeviceStatus(device.Native())) {
     case SDL_SE_GPU_DEVICE_STATUS_OK:
       return DeviceStatus::kOk;
@@ -134,7 +135,7 @@ DeviceStatus QueryDeviceStatus(GpuDevice& device) {
 }
 
 bool GetNativeHandles(GpuDevice& device, NativeHandles& handles) {
-  SE_ASSERT_MAIN_THREAD();
+  SE_ASSERT_GPU_THREAD();
   SDL_SE_GPUNativeHandles native{};
   if (!SDL_SE_GetGPUNativeHandles(device.Native(), device.ClaimedWindow(),
                                   &native)) {
@@ -156,7 +157,7 @@ bool GetNativeHandles(GpuDevice& device, NativeHandles& handles) {
 }
 
 bool SetPresentMode(GpuDevice& device, SDL_GPUPresentMode mode) {
-  SE_ASSERT_MAIN_THREAD();
+  SE_ASSERT_GPU_THREAD();
   SDL_Window* window = device.ClaimedWindow();
   if (window == nullptr) return false;
   if (!SDL_WindowSupportsGPUPresentMode(device.Native(), window, mode)) {
@@ -174,54 +175,54 @@ bool SetPresentMode(GpuDevice& device, SDL_GPUPresentMode mode) {
 #else  // !SE_SDL_PATCHED: everything unsupported, every action a no-op.
 
 Caps QueryCaps(GpuDevice& /*device*/) {
-  SE_ASSERT_MAIN_THREAD();
+  SE_ASSERT_GPU_THREAD();
   return Caps{};
 }
 
 bool SetFrameLatency(GpuDevice& /*device*/, int /*frames*/) {
-  SE_ASSERT_MAIN_THREAD();
+  SE_ASSERT_GPU_THREAD();
   return false;
 }
 
 WaitResult WaitFrameLatency(GpuDevice& /*device*/,
                             std::uint64_t /*timeout_ns*/) {
-  SE_ASSERT_MAIN_THREAD();
+  SE_ASSERT_GPU_THREAD();
   return WaitResult::kUnsupported;
 }
 
 bool GetPresentStats(GpuDevice& /*device*/, PresentStats& /*stats*/) {
-  SE_ASSERT_MAIN_THREAD();
+  SE_ASSERT_GPU_THREAD();
   return false;
 }
 
 void BeginGpuTiming(GpuDevice& /*device*/,
                     SDL_GPUCommandBuffer* /*commands*/) noexcept {
-  SE_ASSERT_MAIN_THREAD();
+  SE_ASSERT_GPU_THREAD();
 }
 
 void EndGpuTiming(GpuDevice& /*device*/,
                   SDL_GPUCommandBuffer* /*commands*/) noexcept {
-  SE_ASSERT_MAIN_THREAD();
+  SE_ASSERT_GPU_THREAD();
 }
 
 std::optional<GpuTime> ReadGpuTime(GpuDevice& /*device*/,
                                    SDL_GPUFence* /*fence*/) {
-  SE_ASSERT_MAIN_THREAD();
+  SE_ASSERT_GPU_THREAD();
   return std::nullopt;
 }
 
 DeviceStatus QueryDeviceStatus(GpuDevice& /*device*/) {
-  SE_ASSERT_MAIN_THREAD();
+  SE_ASSERT_GPU_THREAD();
   return DeviceStatus::kUnknown;
 }
 
 bool GetNativeHandles(GpuDevice& /*device*/, NativeHandles& /*handles*/) {
-  SE_ASSERT_MAIN_THREAD();
+  SE_ASSERT_GPU_THREAD();
   return false;
 }
 
 bool SetPresentMode(GpuDevice& /*device*/, SDL_GPUPresentMode /*mode*/) {
-  SE_ASSERT_MAIN_THREAD();
+  SE_ASSERT_GPU_THREAD();
   return false;
 }
 

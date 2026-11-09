@@ -317,7 +317,7 @@ std::expected<ViewportTarget*, Error> Renderer2D::CreateViewport(
 }
 
 void Renderer2D::DestroyViewport(ViewportTarget* viewport) {
-  SE_ASSERT_MAIN_THREAD();
+  SE_ASSERT_GPU_THREAD();
   const auto found =
       std::find_if(viewports_.begin(), viewports_.end(),
                    [&](const auto& owned) { return owned.get() == viewport; });

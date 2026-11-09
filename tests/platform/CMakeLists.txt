@@ -35,6 +35,7 @@ se_add_module(se_platform_tests KIND EXECUTABLE
   SOURCES
     app_desktop_test.cc
     callbacks_test.cc
+    fatal_test.cc
     fs_test.cc
     gpu_test.cc
     inbox_test.cc
@@ -44,6 +45,7 @@ se_add_module(se_platform_tests KIND EXECUTABLE
     sdl_context_test.cc
     wake_test.cc
     window_test.cc
+    ../support/no_dialogs_listener.cc
     ../support/tracy_inert_listener.cc
   PRIVATE_DEPS
     se_core
@@ -77,6 +79,14 @@ catch_discover_tests(se_platform_tests
     LABELS desktop
     ENVIRONMENT SE_NO_MESSAGE_BOX=1
     TIMEOUT 60)
+
+# A failed SDL assertion prints and aborts, never opening SDL's dialog
+# (ADR-070): with a dialog the test would hang until its timeout.
+add_test(NAME platform.sdl_assertion_aborts
+  COMMAND se_platform_tests "[.sdl_assertion]")
+set_tests_properties(platform.sdl_assertion_aborts PROPERTIES
+  LABELS unit TIMEOUT 30
+  PASS_REGULAR_EXPRESSION "SDL assertion failed: 'holds'")
 
 # The rampage executable (label desktop): it runs the sandbox for 300
 # presented frames and quits through the two-phase quit, and a failure at

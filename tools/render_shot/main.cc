@@ -58,6 +58,7 @@
 #include "se_core/thread_role.h"
 #include "se_core/types.h"
 #include "se_core/world.h"
+#include "se_platform/fatal.h"
 #include "se_platform/sdl_context.h"
 #include "se_render/gpu_device.h"
 #include "se_render/image_io.h"
@@ -351,6 +352,9 @@ int Run(const Args& args) SE_REQUIRES(g_main) SE_EXCLUDES(g_sim_owner) {
 }  // namespace se
 
 int Main(int argc, char** argv) {
+  // A test tool: nothing waits for a click, SDL's assertions included
+  // (ADR-070).
+  se::SuppressFaultDialogs();
   const auto args = se::Parse(argc, argv);
   if (!args) {
     se::Usage();

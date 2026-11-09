@@ -19,6 +19,7 @@
 se_add_module(se_present_tests KIND EXECUTABLE
   SOURCES
     present_test.cc
+    ../support/no_dialogs_listener.cc
     ../support/tracy_inert_listener.cc
   PRIVATE_DEPS
     se_core

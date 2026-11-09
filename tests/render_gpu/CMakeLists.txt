@@ -42,9 +42,11 @@ se_add_module(se_render_gpu_tests KIND EXECUTABLE
   SOURCES
     desktop_test.cc
     gpu_resources_test.cc
+    image_compare_test.cc
     renderer_test.cc
     shader_reflection_test.cc
     texture_table_test.cc
+    ../support/no_dialogs_listener.cc
     ../support/tracy_inert_listener.cc
   PRIVATE_DEPS
     game_rampage

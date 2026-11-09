@@ -140,7 +140,7 @@ std::uint32_t GpuResources::NewSlot() {
 }
 
 TextureHandle GpuResources::AddTexture(std::string_view name) {
-  SE_ASSERT_MAIN_THREAD();
+  SE_ASSERT_GPU_THREAD();
   const std::uint32_t key = TextureKeyOf(name);
   if (const auto found = by_key_.find(key); found != by_key_.end()) {
     const Slot& existing = slots_[found->second];
@@ -244,7 +244,7 @@ std::expected<void, Error> GpuResources::ResizeTarget(TextureHandle handle,
 }
 
 void GpuResources::Remove(TextureHandle handle) {
-  SE_ASSERT_MAIN_THREAD();
+  SE_ASSERT_GPU_THREAD();
   Slot* slot = SlotOf(handle);
   if (slot == nullptr || handle == magenta_) return;
   Retire(std::exchange(slot->resident, nullptr));
@@ -371,7 +371,7 @@ void GpuResources::CollectUploads() {
 }
 
 std::uint64_t GpuResources::PlanUploads() {
-  SE_ASSERT_MAIN_THREAD();
+  SE_ASSERT_GPU_THREAD();
   SE_ASSERT_MSG(plan_.chunks.empty(), "PlanUploads twice in one frame");
   plan_.bytes = 0;
   plan_.recorded = false;

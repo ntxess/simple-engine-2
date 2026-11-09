@@ -77,11 +77,15 @@ caught.
 
 Outside se_render, code keeps a `Handle<Texture>` and resolves it every
 frame through GpuResources; no class, struct or union stores an
-`SDL_GPUTexture*` (a pointer member or a container of them), tests and
-tools included (tools/checks/check_gpu_members.py,
-`checks.gpu_texture_members`, with a planted fixture). Every SDL_GPU call
-runs on main, and se_render's wrappers assert it. stb is a third-party
-header: included with angle brackets, exempt from lint.
+`SDL_GPUTexture` in any form (a pointer or reference member, a container
+or smart pointer of them, an SDL struct that holds one, or an alias of
+any of these), tests and tools included (tools/checks/check_gpu_members.py,
+`checks.gpu_texture_members`, with a planted fixture and a fixture of
+allowed forms; ADR-069). Every SDL_GPU call runs on main, and se_render's
+functions assert it with `SE_ASSERT_GPU_THREAD` (the engine's main thread
+and `SDL_IsMainThread`), never `SE_ASSERT_MAIN_THREAD` alone
+(check_banned_api.py rule gpu_thread, `checks.planted.gpu_thread`). stb is
+a third-party header: included with angle brackets, exempt from lint.
 
 ## Tools
 

@@ -191,8 +191,9 @@ function(se_register_checks)
   # M4a: one planted fixture per thread, debugging and include rule; each
   # test passes only if its own rule fires in every file of the fixture
   # (--expect). The dump_write fixture plants both dump rules.
+  # gpu_thread: se_render asserts SDL's main thread too (M7, ADR-069).
   foreach(_pair raw_thread:thread debug_break:debugbreak dump_write:dump
-          dump_write:dump_header time_period:timer)
+          dump_write:dump_header time_period:timer gpu_thread:gpu_thread)
     string(REPLACE ":" ";" _pair "${_pair}")
     list(GET _pair 0 _fixture)
     list(GET _pair 1 _rule)
@@ -234,8 +235,13 @@ function(se_register_checks)
   add_test(NAME checks.planted.gpu_texture_member
     COMMAND Python3::Interpreter "${_tools}/check_gpu_members.py"
             --planted "${_planted}/gpu_texture_member")
+  # The forms that store no texture (ADR-069): none may be reported.
+  add_test(NAME checks.planted.gpu_texture_member_allowed
+    COMMAND Python3::Interpreter "${_tools}/check_gpu_members.py"
+            --allowed "${_planted}/gpu_texture_member_allowed")
   set_tests_properties(checks.gpu_texture_members
-    checks.planted.gpu_texture_member PROPERTIES LABELS checks)
+    checks.planted.gpu_texture_member
+    checks.planted.gpu_texture_member_allowed PROPERTIES LABELS checks)
 
   # Linters.
   find_program(SE_CLANG_FORMAT clang-format)

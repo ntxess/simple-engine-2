@@ -2,15 +2,24 @@
 
   compare_images.py A.png B.png [--diff DIFF.png]
 
-Two images match when they have the same size, at least 98% of their
-pixels are within 8/255 on every channel (RGBA), and the mean absolute
-difference over all channels is at most 2/255 (docs/milestone-specs.md M7,
-"Legacy image comparison"), and at least 90% of the drawn pixels (more
-than 8/255 from the background, B's most frequent colour, in either image)
-are within 8/255, so that an image missing its sparse sprites does not pass
-on its background alone (ADR-065). tests/render_gpu/support/
-image_compare.h applies the same rule to the golden images and
-render_shot --compare. On a mismatch the per-channel
+A is the actual image, B the expected one. They match when they have the
+same size, at least 98% of their pixels are within 8/255 on every channel
+(RGBA), and the mean absolute difference over all channels is at most
+2/255 (docs/milestone-specs.md M7, "Legacy image comparison"), and, so that
+a missing sprite or one drawn with the fallback texture cannot pass on the
+rest of the image (a drawn pixel is more than 8/255 from the background,
+B's most frequent colour; an object is an 8-connected group of one image's
+drawn pixels):
+  - at least 90% of the pixels drawn in either image are within 8/255
+    (ADR-065);
+  - every object of either image of at least 8 pixels has at least 25% of
+    its pixels within 8/255 (ADR-069);
+  - at most 8 solid mismatches, pixels that with all 8 neighbours are drawn
+    in one image and background in the other (ADR-069);
+  - at most 8 pixels of A show the fallback magenta (255, 0, 255, 255)
+    where B does not (ADR-069).
+tests/render_gpu/support/image_compare.h applies the same rule to the
+golden images and render_shot --compare. On a mismatch the per-channel
 difference, scaled by 8, is written as an opaque PNG (default: next to B,
 named <B>.diff.png). Exit status 0 when they match, 1 when not, 2 on a
 file error. Python 3, stdlib only (8-bit non-interlaced PNGs: grey, RGB,
@@ -28,6 +37,11 @@ PIXEL_TOLERANCE = 8
 MIN_WITHIN_FRACTION = 0.98
 MAX_MEAN_ABS_DIFF = 2.0
 MIN_DRAWN_WITHIN_FRACTION = 0.90
+MIN_OBJECT_WITHIN_FRACTION = 0.25
+MIN_OBJECT_PIXELS = 8
+MAX_SOLID_MISMATCHES = 8
+MAX_FALLBACK_PIXELS = 8
+FALLBACK_COLOUR = bytes((255, 0, 255, 255))
 SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
 
@@ -149,21 +163,49 @@ def _off(pixels, p, colour):
                for c in range(4))
 
 
+def objects(width, height, mask):
+    """The 8-connected groups of the pixel indices in the set |mask|."""
+    seen = set()
+    groups = []
+    for start in sorted(mask):
+        if start in seen:
+            continue
+        seen.add(start)
+        stack = [start]
+        group = []
+        while stack:
+            p = stack.pop()
+            group.append(p)
+            x, y = p % width, p // width
+            for ny in range(max(0, y - 1), min(height, y + 2)):
+                for nx in range(max(0, x - 1), min(width, x + 2)):
+                    q = ny * width + nx
+                    if q in mask and q not in seen:
+                        seen.add(q)
+                        stack.append(q)
+        groups.append(group)
+    return groups
+
+
 def compare(a, b):
     """Statistics of two (width, height, rgba) images; B is the expected
     one, whose most frequent colour is the background."""
     (wa, ha, pa), (wb, hb, pb) = a, b
     result = {"same_size": (wa, ha) == (wb, hb), "pixels": wa * ha,
               "within": 0, "mean_abs_diff": 0.0, "max_diff": 0,
-              "drawn": 0, "drawn_within": 0}
+              "drawn": 0, "drawn_within": 0, "objects": 0,
+              "worst_object_within": 1.0, "worst_object_pixels": 0,
+              "solid_mismatches": 0, "fallback_pixels": 0}
     if not result["same_size"]:
         return result
     back = background(pb)
     total = 0
     within = 0
     worst_all = 0
-    drawn = 0
-    drawn_within = 0
+    within_set = set()
+    drawn_a = set()
+    drawn_b = set()
+    fallback = 0
     for p in range(0, len(pa), 4):
         worst = 0
         for c in range(4):
@@ -171,19 +213,48 @@ def compare(a, b):
             total += delta
             if delta > worst:
                 worst = delta
+        index = p // 4
         if worst <= PIXEL_TOLERANCE:
             within += 1
         if worst > worst_all:
             worst_all = worst
-        if _off(pa, p, back) or _off(pb, p, back):
-            drawn += 1
-            if worst <= PIXEL_TOLERANCE:
-                drawn_within += 1
+        off_a = _off(pa, p, back)
+        off_b = _off(pb, p, back)
+        if off_a:
+            drawn_a.add(index)
+        if off_b:
+            drawn_b.add(index)
+        if (off_a or off_b) and worst <= PIXEL_TOLERANCE:
+            within_set.add(index)
+        if (not _off(pa, p, FALLBACK_COLOUR) and
+                _off(pb, p, FALLBACK_COLOUR)):
+            fallback += 1
+    drawn = drawn_a | drawn_b
     result["within"] = within
     result["mean_abs_diff"] = total / max(1, len(pa))
     result["max_diff"] = worst_all
-    result["drawn"] = drawn
-    result["drawn_within"] = drawn_within
+    result["drawn"] = len(drawn)
+    result["drawn_within"] = len(within_set)
+    result["fallback_pixels"] = fallback
+    for mask in (drawn_a, drawn_b):
+        for group in objects(wa, ha, mask):
+            if len(group) < MIN_OBJECT_PIXELS:
+                continue
+            fraction = sum(1 for q in group if q in within_set) / len(group)
+            result["objects"] += 1
+            if fraction < result["worst_object_within"]:
+                result["worst_object_within"] = fraction
+                result["worst_object_pixels"] = len(group)
+    mismatched = drawn_a ^ drawn_b
+    solid = 0
+    for p in mismatched:
+        x, y = p % wa, p // wa
+        if x == 0 or y == 0 or x == wa - 1 or y == ha - 1:
+            continue
+        if all(p + dy * wa + dx in mismatched
+               for dy in (-1, 0, 1) for dx in (-1, 0, 1)):
+            solid += 1
+    result["solid_mismatches"] = solid
     return result
 
 
@@ -199,7 +270,10 @@ def matches(result):
     fraction = result["within"] / max(1, result["pixels"])
     return (fraction >= MIN_WITHIN_FRACTION and
             result["mean_abs_diff"] <= MAX_MEAN_ABS_DIFF and
-            drawn_fraction(result) >= MIN_DRAWN_WITHIN_FRACTION)
+            drawn_fraction(result) >= MIN_DRAWN_WITHIN_FRACTION and
+            result["worst_object_within"] >= MIN_OBJECT_WITHIN_FRACTION and
+            result["solid_mismatches"] <= MAX_SOLID_MISMATCHES and
+            result["fallback_pixels"] <= MAX_FALLBACK_PIXELS)
 
 
 def describe(result):
@@ -211,7 +285,14 @@ def describe(result):
             f"mean absolute difference {result['mean_abs_diff']:.3f}/255 "
             f"(at most {MAX_MEAN_ABS_DIFF}), largest {result['max_diff']}; "
             f"{100 * drawn_fraction(result):.3f}% of {result['drawn']} drawn "
-            f"pixels within (need {100 * MIN_DRAWN_WITHIN_FRACTION:.0f}%)")
+            f"pixels within (need {100 * MIN_DRAWN_WITHIN_FRACTION:.0f}%); "
+            f"worst of {result['objects']} objects "
+            f"{100 * result['worst_object_within']:.1f}% of "
+            f"{result['worst_object_pixels']} pixels within (need "
+            f"{100 * MIN_OBJECT_WITHIN_FRACTION:.0f}%); "
+            f"{result['solid_mismatches']} solid mismatches (at most "
+            f"{MAX_SOLID_MISMATCHES}); {result['fallback_pixels']} "
+            f"fallback-magenta pixels (at most {MAX_FALLBACK_PIXELS})")
 
 
 def diff_image(a, b):

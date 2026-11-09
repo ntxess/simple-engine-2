@@ -1809,3 +1809,110 @@ recreates on main with handles kept; keeping the old device until the new
 one is ready makes a failed recreation safe to retry, and recovering at the
 frame start keeps the tick sequence, so the readback can be compared frame
 for frame.
+
+## ADR-069 The image comparison judges each sprite; the GPU-object checks close their gaps (2026-11-09)
+
+**Context.** The M6/M7 review found that ADR-065's drawn-pixel condition
+still passed an image with one sprite erased or drawn in the fallback
+magenta: one ship of the stress scenario is about 6% of the 4205 drawn
+pixels at tick 600 against about 7 points of headroom (97.19% within), and
+each of the 60 sprites of `sprite_grid.png`, 19 of the 21 of `rotated.png`
+and all 47 of `sandbox_600.png` could be erased with the golden still
+matching. The legacy and engine images differ where ships overlap in
+another draw order (ADR-065), and that difference is not small: the
+largest connected group of differing pixels is 114 pixels, more than the
+smallest ship (56 pixels), so a cap on differing clumps cannot tell a
+missing sprite from draw order. Measured on the real pairs instead: no
+pixel is drawn in one image and background in the other together with all
+8 of its neighbours, no pixel shows the fallback magenta, and every object
+(an 8-connected group of one image's drawn pixels) has at least 75% of its
+pixels within 8/255 (46.8% for an untested pair at tick 604). The review
+also found that check_gpu_members.py missed a texture pointer kept through
+an alias or a smart pointer, and that se::present asserted only the
+engine's main thread, not SDL's.
+
+**Decision.**
+- The comparison (tests/render_gpu/support/image_compare.h and its Python
+  twin tools/render_shot/compare_images.py) keeps the spec's three
+  conditions and ADR-065's 90% of the drawn pixels, and adds three:
+  - every object of either image with at least 8 pixels has at least 25%
+    of its pixels within 8/255 (specks under 8 pixels are left to the
+    image-wide conditions): an isolated sprite that is missing, added or
+    drawn in other colours has none;
+  - at most 8 solid mismatches, pixels drawn in one image and background
+    in the other whose 8 neighbours are too: a sprite missing from a group
+    of overlapping ones leaves such a block (19 to 24 for the smallest
+    ships), draw order and rasterization leave thin edges (0 measured);
+  - at most 8 pixels within 8/255 of opaque magenta (GpuResources' fallback
+    texture) in the actual image where the expected one is not.
+- The legacy image of the stress scenario at tick 600 is committed
+  (tests/golden/render/legacy/stress_600.png, 89 KB, byte-identical in
+  every preset's run). `render.legacy_image.*` and `legacy.image_compare.*`
+  fail when legacy_replay's image differs from it (SE_UPDATE_GOLDENS=1
+  rewrites it), so the unit test `render_gpu.The sandbox golden matches the
+  legacy image, sprite by sprite` sweeps the real pair in every preset,
+  WSL included: every object of the engine image erased, and drawn
+  magenta, must fail, and one moved by 40 pixels too. `render_gpu.Every
+  object of each golden, erased or magenta, fails` does the same for each
+  golden against itself (every eighth object of the 1920x1080 sandbox,
+  which the legacy sweep covers in full). Synthetic cases pin each
+  condition and show overlapping sprites in another order and sprites
+  shifted by one pixel still matching. With the old conditions these
+  tests fail; the real pairs keep their margins.
+- check_gpu_members.py reports any class, struct or union member that
+  names SDL_GPUTexture (a pointer, a reference, a container, a smart
+  pointer, any template argument), an SDL struct that holds one
+  (SDL_GPUTextureLocation, SDL_GPUTextureRegion, SDL_GPUBlitRegion,
+  SDL_GPUBlitInfo, SDL_GPUColorTargetInfo, SDL_GPUDepthStencilTargetInfo,
+  SDL_GPUTextureSamplerBinding, SDL_GPUStorageTextureReadWriteBinding), or
+  an alias of either (using or typedef, aliases of aliases, collected over
+  every scanned file first). Member function declarations, function
+  pointers and members initialized by a call are told apart. The planted
+  fixture adds an alias, a typedef chain, a unique_ptr, an SDL struct and
+  initialized and annotated members;
+  `checks.planted.gpu_texture_member_allowed` holds the allowed forms and
+  must report nothing.
+- se_render asserts `SE_ASSERT_GPU_THREAD` (the engine's main thread and
+  SDL_IsMainThread) in every function, present.cc included;
+  check_banned_api.py's rule gpu_thread bans `SE_ASSERT_MAIN_THREAD` in
+  se_render, with no opt-out (planted: `checks.planted.gpu_thread`).
+
+**Why.** Each added condition answers one way a frame can be wrong while
+most of it is right, with thresholds set from the real pairs' measured
+margins; nothing the spec's tolerance passed before fails now except the
+planted damage.
+
+## ADR-070 Unattended runs show no dialog: SDL's assertions print and abort (2026-11-09)
+
+**Context.** SE_NO_MESSAGE_BOX=1 suppressed the engine's and the CRT's
+boxes, but a failed SDL assertion (SDL's own, or the presentation patch's
+debug-mode checks) opened SDL's Abort/Retry/Ignore box, which hung
+msvc-release once until the CTest timeout, on the owner's desktop. The M6
+exit "rampage runs in Standard unpatched" (`pacing.unpatched_standard`)
+also ran in no scripts/ci.ps1 path: the patched desktop presets skip it and
+the unpatched test preset excludes the desktop label.
+
+**Decision.**
+- `se::SuppressFaultDialogs()` (se_platform/fatal.h) turns off the CRT and
+  Windows Error Reporting dialogs as ConfigureFaultDialogs did and installs
+  an SDL assertion handler that prints `SDL assertion failed: '<condition>'
+  at <file>:<line> (<function>)` to stderr and aborts. It does not return
+  SDL's ABORT, which calls SDL_Quit first and can block or assert again
+  inside a GPU call. ConfigureFaultDialogs calls it under
+  SE_NO_MESSAGE_BOX=1; every Catch2 executable that links se_platform
+  (the platform, pacing, present and render_gpu tests) calls it
+  unconditionally through tests/support/no_dialogs_listener.cc, and so does
+  render_shot.
+- scripts/ci.ps1 also sets SDL_ASSERT=abort (SDL's default handler honours
+  it) for any process that installs no handler.
+- Tests: `platform.Test executables never show SDL's assertion dialog`,
+  `platform.SE_NO_MESSAGE_BOX=1 replaces SDL's assertion dialog`, and
+  `platform.sdl_assertion_aborts`, which runs a hidden case that fails an
+  SDL_assert_release and passes only on the printed line (a dialog would
+  run into the timeout).
+- `scripts/ci.ps1 -Desktop` (and so -Milestone) also builds
+  msvc-unpatched-dev and runs `ctest -L desktop -R
+  pacing[.]unpatched_standard --no-tests=error` there.
+
+**Why.** Tests run unattended on a desktop someone may be using; a
+diagnosable abort is the only acceptable end of a failed assertion there.

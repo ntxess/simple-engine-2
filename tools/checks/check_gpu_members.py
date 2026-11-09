@@ -1,22 +1,37 @@
-"""Bans SDL_GPUTexture* members outside se_render (docs/milestone-specs.md M7).
+"""Bans SDL_GPUTexture members outside se_render (docs/milestone-specs.md M7).
 
 GpuResources::Resolve returns a texture that is valid for the current frame
 only: SDL's D3D12 backend frees a texture's client container when it is
 released, and a reload or resize releases it (red team C2). Code outside
 se_render therefore keeps a Handle<Texture> and resolves it every frame; a
-class or struct that stores an SDL_GPUTexture* (a pointer member, or a
-container or wrapper of them) is a violation. Function declarations that
-take or return one are fine, and so are locals.
+class, struct or union that stores an SDL_GPUTexture is a violation, in any
+form (ADR-069):
+  - a pointer or reference member, or an array of them;
+  - a member of any type that names one: a container, a smart pointer
+    (std::unique_ptr<SDL_GPUTexture, D>), any template argument;
+  - a member of an SDL struct that holds one (SDL_GPUColorTargetInfo,
+    SDL_GPUTextureSamplerBinding, SDL_GPUBlitInfo and the others below);
+  - a member whose type is an alias (using, typedef) of any of these,
+    aliases of aliases included, wherever the alias is declared.
+Member function declarations that take or return one are fine, and so are
+function-pointer members, locals and parameters. A std::function member
+whose signature returns one is reported too (keep a Handle).
 
 The scan follows braces through each file with comments and strings
-stripped: a declaration that ends with ';' directly inside a class, struct
-or union body and names SDL_GPUTexture* outside parentheses is reported.
-Every module but se_render is scanned, test and tool modules included.
+stripped. First every scanned file's aliases are collected (using X = ...;
+typedef ... X;) whose type names a texture type or an earlier such alias;
+then a declaration that ends with ';' directly inside a class, struct or
+union body, and is not a member function, an alias, a friend or a
+static_assert, is reported when it names a texture type or alias outside
+parentheses. Every module but se_render is scanned, test and tool modules
+included.
 
 usage:
   check_gpu_members.py <build>/se_checks.json
   check_gpu_members.py --planted <dir>
       succeeds only if every source file under <dir> has a violation
+  check_gpu_members.py --allowed <dir>
+      succeeds only if no source file under <dir> has one
 """
 
 import argparse
@@ -27,10 +42,30 @@ import sys
 
 SOURCE_SUFFIXES = {".h", ".cc", ".hpp", ".cpp", ".inl"}
 ALLOWED_MODULES = {"se_render"}
-TEXTURE_RE = re.compile(r"\bSDL_GPUTexture\s*\*")
+# SDL_GPUTexture and the SDL structs that hold an SDL_GPUTexture*.
+TEXTURE_TYPES = (
+    "SDL_GPUTexture",
+    "SDL_GPUTextureLocation",
+    "SDL_GPUTextureRegion",
+    "SDL_GPUBlitRegion",
+    "SDL_GPUBlitInfo",
+    "SDL_GPUColorTargetInfo",
+    "SDL_GPUDepthStencilTargetInfo",
+    "SDL_GPUTextureSamplerBinding",
+    "SDL_GPUStorageTextureReadWriteBinding",
+)
 ACCESS_SPECIFIERS = {"public", "private", "protected"}
 CLASS_HEAD_RE = re.compile(
     r"^(?:template\s*<[^{]*>\s*)?(?:typedef\s+)?(?:class|struct|union)\b")
+USING_RE = re.compile(
+    r"^(?:template\s*<.*>\s*)?using\s+([A-Za-z_]\w*)\s*(?:\[\[.*?\]\]\s*)?=")
+TYPEDEF_RE = re.compile(r"^typedef\b(.*?)\b([A-Za-z_]\w*)\s*(?:\[[^\]]*\]\s*)*$")
+IDENTIFIER_RE = re.compile(r"[A-Za-z_]\w*")
+MACRO_RE = re.compile(r"[A-Z][A-Z0-9_]*")
+# A '(' after one of these, or after an all-caps macro such as
+# SE_GUARDED_BY, does not make a declaration a function.
+NOT_FUNCTION_NAMES = {"decltype", "alignas", "alignof", "sizeof", "noexcept",
+                      "__declspec", "__attribute__", "requires"}
 
 
 def strip(text):
@@ -101,13 +136,14 @@ def outside_parentheses(statement):
     return "".join(out)
 
 
-def scan_text(text):
-    """Line numbers of SDL_GPUTexture* members in |text|."""
+def statements(text):
+    """(line, scope kind, statement) for every ';'-terminated statement of
+    |text|, the scope being the kind of the innermost enclosing brace;
+    whitespace in the statement is collapsed."""
     code = strip(text)
     stack = ["file"]
     head = []
     head_start = 0
-    found = []
     line = 1
     for ch in code:
         if ch == "\n":
@@ -138,10 +174,7 @@ def scan_text(text):
             head = []
             continue
         if ch == ";":
-            statement = "".join(head)
-            if stack[-1] == "class" and \
-                    TEXTURE_RE.search(outside_parentheses(statement)):
-                found.append(head_start)
+            yield head_start, stack[-1], " ".join("".join(head).split())
             head = []
             continue
         if not head:
@@ -149,16 +182,113 @@ def scan_text(text):
                 continue
             head_start = line
         head.append(ch)
-    return found
 
 
-def scan_file(path):
+def names_pattern(names):
+    return re.compile(r"\b(?:" + "|".join(sorted(map(re.escape, names))) +
+                      r")\b")
+
+
+def declared_alias(statement):
+    """(name, aliased text) of a using or typedef alias, else None.
+    Function-pointer typedefs are not texture storage and are skipped."""
+    match = USING_RE.match(statement)
+    if match:
+        return match.group(1), statement[match.end():]
+    if statement.startswith("typedef ") and "(" not in statement:
+        match = TYPEDEF_RE.match(statement)
+        if match:
+            return match.group(2), match.group(1)
+    return None
+
+
+def collect_aliases(texts):
+    """Names of the aliases, in any of |texts|, of a texture type or of
+    another such alias."""
+    declared = []
+    for text in texts:
+        for _, _, statement in statements(text):
+            alias = declared_alias(statement)
+            if alias:
+                declared.append(alias)
+    found = set()
+    while True:
+        pattern = names_pattern(set(TEXTURE_TYPES) | found)
+        added = {name for name, aliased in declared
+                 if name not in found and
+                 pattern.search(outside_parentheses(aliased))}
+        if not added:
+            return found
+        found |= added
+
+
+def is_function_declaration(statement):
+    """A member function: an identifier (or an operator) followed by '(' at
+    template-angle depth 0, before any '=' or '{' (a data member's
+    initializer), and not a function pointer, a macro or a keyword such as
+    SE_GUARDED_BY(...) or alignas(...)."""
+    angle = 0
+    i = 0
+    n = len(statement)
+    while i < n:
+        ch = statement[i]
+        if angle == 0 and statement.startswith("operator", i) and \
+                (i == 0 or not statement[i - 1].isalnum()):
+            return True
+        if ch == "<":
+            angle += 1
+        elif ch == ">" and angle > 0:
+            angle -= 1
+        elif ch in "={" and angle == 0:
+            return False  # An initializer: a data member.
+        elif ch == "(" and angle == 0:
+            if statement[i + 1:].lstrip()[:1] in ("*", "&", "^"):
+                return False  # A pointer to a function: a data member.
+            before = statement[:i].rstrip()
+            words = IDENTIFIER_RE.findall(before)
+            name = words[-1] if words else ""
+            if name and before.endswith(name) and \
+                    name not in NOT_FUNCTION_NAMES and \
+                    not MACRO_RE.fullmatch(name):
+                return True
+            # A macro's or keyword's parentheses: skip them.
+            depth = 0
+            while i < n:
+                if statement[i] == "(":
+                    depth += 1
+                elif statement[i] == ")":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                i += 1
+        i += 1
+    return False
+
+
+def member_violation(statement, pattern):
+    if declared_alias(statement):
+        return False
+    if statement.split(" ", 1)[0] in ("friend", "static_assert"):
+        return False
+    if is_function_declaration(statement):
+        return False
+    return bool(pattern.search(outside_parentheses(statement)))
+
+
+def scan_text(text, aliases):
+    """Line numbers of texture members in |text|."""
+    pattern = names_pattern(set(TEXTURE_TYPES) | aliases)
+    return [line for line, scope, statement in statements(text)
+            if scope == "class" and member_violation(statement, pattern)]
+
+
+def scan_file(path, aliases):
     text = path.read_text(encoding="utf-8", errors="replace")
     lines = text.splitlines()
-    return [f"{path}:{number}: SDL_GPUTexture* stored as a member outside "
+    return [f"{path}:{number}: SDL_GPUTexture stored as a member outside "
             f"se_render (keep a Handle<Texture> and resolve it every frame): "
             f"{lines[number - 1].strip() if number <= len(lines) else ''}"
-            for number in scan_text(text)]
+            for number in scan_text(text, aliases)]
 
 
 def source_files(root):
@@ -166,45 +296,66 @@ def source_files(root):
             if path.suffix in SOURCE_SUFFIXES]
 
 
+def read_all(paths):
+    return [path.read_text(encoding="utf-8", errors="replace")
+            for path in paths]
+
+
+def fixture_mode(root, expect_violation):
+    files = source_files(root)
+    aliases = collect_aliases(read_all(files))
+    failed = []
+    for path in files:
+        found = scan_file(path, aliases)
+        for line in found:
+            print("planted (expected):" if expect_violation else "FOUND:",
+                  line)
+        if bool(found) != expect_violation:
+            failed.append(path)
+    for path in failed:
+        if expect_violation:
+            print(f"FAIL: {path}: the planted member was not detected")
+        else:
+            print(f"FAIL: {path}: an allowed declaration was reported")
+    if not files:
+        print("FAIL: no fixture files")
+        return 1
+    return 1 if failed else 0
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("config", nargs="?")
     parser.add_argument("--planted")
+    parser.add_argument("--allowed")
     args = parser.parse_args()
 
     if args.planted:
-        files = source_files(args.planted)
-        missed = []
-        for path in files:
-            found = scan_file(path)
-            for line in found:
-                print("planted (expected):", line)
-            if not found:
-                missed.append(path)
-        for path in missed:
-            print(f"FAIL: {path}: the planted member was not detected")
-        if not files:
-            print("FAIL: no planted files")
-            return 1
-        return 1 if missed else 0
+        return fixture_mode(args.planted, expect_violation=True)
+    if args.allowed:
+        return fixture_mode(args.allowed, expect_violation=False)
 
     config = json.loads(pathlib.Path(args.config).read_text(encoding="utf-8"))
-    violations = []
-    scanned = set()
+    files = []
+    seen = set()
     for module in config["modules"]:
         if module["name"] in ALLOWED_MODULES:
             continue
         for path in source_files(module["dir"]):
-            if "planted" in path.parts or path in scanned:
+            if "planted" in path.parts or path in seen:
                 continue
             if any(part == "se_render" for part in path.parts):
                 continue
-            scanned.add(path)
-            violations += scan_file(path)
+            seen.add(path)
+            files.append(path)
+    aliases = collect_aliases(read_all(files))
+    violations = []
+    for path in files:
+        violations += scan_file(path, aliases)
     for line in violations:
         print(line)
-    print(f"check_gpu_members: {len(scanned)} file(s), {len(violations)} "
-          f"violation(s)")
+    print(f"check_gpu_members: {len(files)} file(s), {len(aliases)} texture "
+          f"alias(es), {len(violations)} violation(s)")
     return 1 if violations else 0
 
 

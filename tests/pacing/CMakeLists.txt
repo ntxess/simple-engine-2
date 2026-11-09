@@ -25,6 +25,7 @@ se_add_module(se_pacing_tests KIND EXECUTABLE
     pacing_desktop_test.cc
     vblank_sampler_test.cc
     ../support/fake_present_port.cc
+    ../support/no_dialogs_listener.cc
     ../support/tracy_inert_listener.cc
   PRIVATE_DEPS
     game_rampage

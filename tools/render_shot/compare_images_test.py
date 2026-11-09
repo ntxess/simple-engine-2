@@ -4,8 +4,10 @@ Writes small RGBA images with compare_images.write_png, reads them back,
 and checks the tolerance rule at its edges: identical images, a uniform
 shift inside the per-pixel tolerance that still breaks the mean, a few
 far-off pixels below and above 2%, a size mismatch, an image missing its
-sparse drawn pixels, and the diff image of a mismatch. Python 3, stdlib
-only.
+sparse drawn pixels, a sprite missing, added, recoloured or shifted by one
+pixel, overlapping sprites in another order, a sprite missing from an
+overlapping group, the fallback magenta inside a group (ADR-069), and the
+diff image of a mismatch. Python 3, stdlib only.
 """
 
 import pathlib
@@ -29,6 +31,93 @@ def with_pixels(base, count, value):
     for p in range(count):
         out[p * 4:p * 4 + 4] = bytes([value] * 4)
     return width, height, bytes(out)
+
+
+BLACK = (0, 0, 0, 255)
+WHITE = (255, 255, 255, 255)
+BLUE = (40, 60, 200, 255)
+GREY = (150, 150, 150, 255)
+MAGENTA = (255, 0, 255, 255)
+
+
+def canvas(width, height, colour):
+    return [width, height, bytearray(bytes(colour) * (width * height))]
+
+
+def rect(image, x0, y0, w, h, colour):
+    width = image[0]
+    for y in range(y0, y0 + h):
+        for x in range(x0, x0 + w):
+            image[2][(y * width + x) * 4:(y * width + x + 1) * 4] = bytes(
+                colour)
+    return image
+
+
+def frozen(image):
+    return image[0], image[1], bytes(image[2])
+
+
+def sprite_cases(check):
+    """The object, solid-mismatch and fallback conditions (ADR-069), as in
+    tests/render_gpu/image_compare_test.cc."""
+    def result(actual, expected):
+        return compare_images.compare(frozen(actual), frozen(expected))
+
+    def two_squares():
+        return rect(rect(canvas(200, 100, BLACK), 20, 20, 30, 30, WHITE),
+                    120, 40, 30, 30, BLUE)
+
+    expected = two_squares()
+    same = result(expected, expected)
+    check(compare_images.matches(same) and same["objects"] == 4,
+          "two squares match themselves (4 objects)")
+    missing = result(rect(two_squares(), 120, 40, 30, 30, BLACK), expected)
+    check(missing["worst_object_within"] == 0.0 and
+          missing["worst_object_pixels"] == 900 and
+          not compare_images.matches(missing), "a missing sprite fails")
+    added = result(rect(two_squares(), 80, 5, 6, 6, WHITE), expected)
+    check(added["worst_object_pixels"] == 36 and
+          not compare_images.matches(added), "an added sprite fails")
+    recoloured = result(rect(two_squares(), 120, 40, 30, 30, GREY), expected)
+    check(not compare_images.matches(recoloured),
+          "a recoloured sprite fails")
+    shifted = rect(rect(canvas(200, 100, BLACK), 21, 20, 30, 30, WHITE),
+                   120, 41, 30, 30, BLUE)
+    shifted = result(shifted, expected)
+    check(shifted["solid_mismatches"] == 0 and
+          compare_images.matches(shifted),
+          "sprites shifted by one pixel match")
+
+    order_b = rect(rect(canvas(200, 100, BLACK), 20, 20, 40, 40, WHITE),
+                   55, 30, 40, 40, BLUE)
+    order_a = rect(rect(canvas(200, 100, BLACK), 55, 30, 40, 40, BLUE),
+                   20, 20, 40, 40, WHITE)
+    order = result(order_a, order_b)
+    check(order["drawn_within"] < order["drawn"] and
+          order["solid_mismatches"] == 0 and compare_images.matches(order),
+          "overlapping sprites in another order match")
+
+    group_b = rect(rect(canvas(200, 100, BLACK), 20, 20, 50, 50, WHITE),
+                   66, 30, 10, 10, BLUE)
+    group_a = rect(canvas(200, 100, BLACK), 20, 20, 50, 50, WHITE)
+    group = result(group_a, group_b)
+    check(group["worst_object_within"] >=
+          compare_images.MIN_OBJECT_WITHIN_FRACTION and
+          group["solid_mismatches"] > compare_images.MAX_SOLID_MISMATCHES and
+          not compare_images.matches(group),
+          "a sprite missing from an overlapping group fails")
+
+    inner_b = rect(rect(canvas(200, 100, BLACK), 20, 20, 50, 50, WHITE),
+                   40, 40, 5, 5, BLUE)
+    inner_a = rect(rect(canvas(200, 100, BLACK), 20, 20, 50, 50, WHITE),
+                   40, 40, 5, 5, MAGENTA)
+    inner = result(inner_a, inner_b)
+    check(inner["fallback_pixels"] == 25 and
+          inner["solid_mismatches"] == 0 and
+          not compare_images.matches(inner),
+          "the fallback magenta inside a group fails")
+    check(compare_images.matches(result(inner_a, inner_a)),
+          "magenta the expected image has too is not the fallback's")
 
 
 def main():
@@ -95,6 +184,8 @@ def main():
               "none of the 50 drawn pixels is within")
         check(not compare_images.matches(nothing),
               "an image missing its sparse sprites does not match")
+
+        sprite_cases(check)
 
         b_path = root / "b.png"
         compare_images.write_png(b_path, *with_pixels(base, 3, 255))

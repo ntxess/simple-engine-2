@@ -13,6 +13,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <vector>
 
 #include "se_platform/fs.h"
 #include "se_render/gpu_resources.h"
@@ -41,9 +42,74 @@ std::uint32_t PixelKey(const std::uint8_t* pixel) {
          (std::uint32_t{pixel[2]} << 16) | (std::uint32_t{pixel[3]} << 24);
 }
 
-// The most frequent colour of |image| (the first one on a tie), counted in
-// runs: rendered images are mostly long runs of the clear colour.
-std::array<std::uint8_t, 4> Background(const TexturePayload& image) {
+int WorstChannel(const std::uint8_t* pixel,
+                 const std::array<std::uint8_t, 4>& colour) {
+  int worst = 0;
+  for (std::size_t c = 0; c < 4; ++c) {
+    worst = std::max(worst, std::abs(int{pixel[c]} - int{colour[c]}));
+  }
+  return worst;
+}
+
+// Per-pixel flags of a comparison.
+constexpr std::uint8_t kDrawnA = 1U;
+constexpr std::uint8_t kDrawnB = 2U;
+constexpr std::uint8_t kWithin = 4U;
+constexpr std::uint8_t kSeenA = 8U;
+constexpr std::uint8_t kSeenB = 16U;
+
+bool Has(std::uint8_t flags, std::uint8_t which) {
+  return (flags & which) != 0;
+}
+
+// Drawn in exactly one of the two images.
+bool PresenceDiffers(std::uint8_t flags) {
+  return Has(flags, kDrawnA) != Has(flags, kDrawnB);
+}
+
+// Calls |visit| with each 8-connected group of the pixels whose |mask| flag
+// is set, marking them with |seen|; groups come in the scan order of their
+// first pixel.
+template <typename Visit>
+void ForEachObject(std::vector<std::uint8_t>& flags, std::uint32_t width,
+                   std::uint32_t height, std::uint8_t mask, std::uint8_t seen,
+                   const Visit& visit) {
+  std::vector<std::size_t> stack;
+  std::vector<std::size_t> object;
+  const auto w = static_cast<std::int64_t>(width);
+  const auto h = static_cast<std::int64_t>(height);
+  for (std::size_t start = 0; start < flags.size(); ++start) {
+    if (!Has(flags[start], mask) || Has(flags[start], seen)) continue;
+    flags[start] |= seen;
+    stack.assign(1, start);
+    object.clear();
+    while (!stack.empty()) {
+      const std::size_t p = stack.back();
+      stack.pop_back();
+      object.push_back(p);
+      const auto x = static_cast<std::int64_t>(p % width);
+      const auto y = static_cast<std::int64_t>(p / width);
+      for (std::int64_t ny = std::max<std::int64_t>(0, y - 1);
+           ny <= std::min(h - 1, y + 1); ++ny) {
+        for (std::int64_t nx = std::max<std::int64_t>(0, x - 1);
+             nx <= std::min(w - 1, x + 1); ++nx) {
+          const auto q = static_cast<std::size_t>(ny * w + nx);
+          if (Has(flags[q], mask) && !Has(flags[q], seen)) {
+            flags[q] |= seen;
+            stack.push_back(q);
+          }
+        }
+      }
+    }
+    visit(object);
+  }
+}
+
+}  // namespace
+
+std::array<std::uint8_t, 4> BackgroundColour(const TexturePayload& image) {
+  // Counted in runs: rendered images are mostly long runs of the clear
+  // colour.
   std::unordered_map<std::uint32_t, std::uint64_t> counts;
   std::uint32_t best = 0;
   std::uint64_t best_count = 0;
@@ -69,26 +135,38 @@ std::array<std::uint8_t, 4> Background(const TexturePayload& image) {
           static_cast<std::uint8_t>((best >> 24) & 0xFFU)};
 }
 
-int WorstChannel(const std::uint8_t* pixel,
-                 const std::array<std::uint8_t, 4>& colour) {
-  int worst = 0;
-  for (std::size_t c = 0; c < 4; ++c) {
-    worst = std::max(worst, std::abs(int{pixel[c]} - int{colour[c]}));
+std::vector<std::vector<std::size_t>> DrawnObjects(
+    const TexturePayload& image,
+    const std::array<std::uint8_t, 4>& background) {
+  std::vector<std::vector<std::size_t>> objects;
+  if (image.pixels.size() != image.Bytes()) return objects;
+  std::vector<std::uint8_t> flags(image.pixels.size() / 4, 0);
+  for (std::size_t p = 0; p < flags.size(); ++p) {
+    if (WorstChannel(&image.pixels[p * 4], background) > kPixelTolerance) {
+      flags[p] = kDrawnA;
+    }
   }
-  return worst;
+  ForEachObject(flags, image.width, image.height, kDrawnA, kSeenA,
+                [&](const std::vector<std::size_t>& object) {
+                  objects.push_back(object);
+                });
+  return objects;
 }
-
-}  // namespace
 
 std::string ImageDiff::Describe() const {
   if (!same_size) return "the sizes differ";
   return std::format(
       "{:.3f}% of {} pixels within {}/255 (need {:.0f}%), mean absolute "
       "difference {:.3f}/255 (at most {:.1f}), largest {}; {:.3f}% of {} "
-      "drawn pixels within (need {:.0f}%)",
+      "drawn pixels within (need {:.0f}%); worst of {} objects {:.1f}% of {} "
+      "pixels within (need {:.0f}%); {} solid mismatches (at most {}); {} "
+      "fallback-magenta pixels (at most {})",
       100.0 * WithinFraction(), pixels, kPixelTolerance,
       100.0 * kMinWithinFraction, mean_abs_diff, kMaxMeanAbsDiff, max_diff,
-      100.0 * DrawnWithinFraction(), drawn, 100.0 * kMinDrawnWithinFraction);
+      100.0 * DrawnWithinFraction(), drawn, 100.0 * kMinDrawnWithinFraction,
+      objects, 100.0 * worst_object_within, worst_object_pixels,
+      100.0 * kMinObjectWithinFraction, solid_mismatches, kMaxSolidMismatches,
+      fallback_pixels, kMaxFallbackPixels);
 }
 
 ImageDiff CompareImages(const TexturePayload& a, const TexturePayload& b) {
@@ -97,27 +175,74 @@ ImageDiff CompareImages(const TexturePayload& a, const TexturePayload& b) {
                    a.pixels.size() == a.Bytes() && b.pixels.size() == b.Bytes();
   if (!diff.same_size) return diff;
   diff.pixels = std::uint64_t{a.width} * a.height;
-  const std::array<std::uint8_t, 4> background = Background(b);
+  const std::array<std::uint8_t, 4> background = BackgroundColour(b);
+  std::vector<std::uint8_t> flags(static_cast<std::size_t>(diff.pixels), 0);
   std::uint64_t total = 0;
-  for (std::size_t p = 0; p < diff.pixels; ++p) {
+  for (std::size_t p = 0; p < flags.size(); ++p) {
+    const std::uint8_t* pa = &a.pixels[p * 4];
+    const std::uint8_t* pb = &b.pixels[p * 4];
     int worst = 0;
     for (std::size_t c = 0; c < 4; ++c) {
-      const int delta =
-          std::abs(int{a.pixels[p * 4 + c]} - int{b.pixels[p * 4 + c]});
+      const int delta = std::abs(int{pa[c]} - int{pb[c]});
       worst = std::max(worst, delta);
       total += static_cast<std::uint64_t>(delta);
     }
-    const bool within = worst <= kPixelTolerance;
-    if (within) ++diff.within;
-    diff.max_diff = std::max(diff.max_diff, worst);
-    if (WorstChannel(&a.pixels[p * 4], background) > kPixelTolerance ||
-        WorstChannel(&b.pixels[p * 4], background) > kPixelTolerance) {
-      ++diff.drawn;
-      if (within) ++diff.drawn_within;
+    std::uint8_t flag = 0;
+    if (worst <= kPixelTolerance) {
+      flag |= kWithin;
+      ++diff.within;
     }
+    diff.max_diff = std::max(diff.max_diff, worst);
+    if (WorstChannel(pa, background) > kPixelTolerance) flag |= kDrawnA;
+    if (WorstChannel(pb, background) > kPixelTolerance) flag |= kDrawnB;
+    if (Has(flag, kDrawnA | kDrawnB)) {
+      ++diff.drawn;
+      if (Has(flag, kWithin)) ++diff.drawn_within;
+    }
+    if (WorstChannel(pa, kFallbackColour) <= kPixelTolerance &&
+        WorstChannel(pb, kFallbackColour) > kPixelTolerance) {
+      ++diff.fallback_pixels;
+    }
+    flags[p] = flag;
   }
   diff.mean_abs_diff =
       static_cast<double>(total) / static_cast<double>(diff.pixels * 4);
+
+  // Each object of either image, by the fraction of its pixels within.
+  const auto measure = [&](const std::vector<std::size_t>& object) {
+    if (object.size() < kMinObjectPixels) return;
+    std::uint64_t object_within = 0;
+    for (const std::size_t p : object) {
+      if (Has(flags[p], kWithin)) ++object_within;
+    }
+    const double fraction =
+        static_cast<double>(object_within) / static_cast<double>(object.size());
+    ++diff.objects;
+    if (fraction < diff.worst_object_within) {
+      diff.worst_object_within = fraction;
+      diff.worst_object_pixels = object.size();
+    }
+  };
+  ForEachObject(flags, a.width, a.height, kDrawnA, kSeenA, measure);
+  ForEachObject(flags, a.width, a.height, kDrawnB, kSeenB, measure);
+
+  // Solid mismatches: drawn in one image only, and so are all 8 neighbours.
+  const std::size_t w = a.width;
+  for (std::size_t y = 1; y + 1 < a.height; ++y) {
+    for (std::size_t x = 1; x + 1 < w; ++x) {
+      if (!PresenceDiffers(flags[y * w + x])) continue;
+      bool solid = true;
+      for (std::size_t ny = y - 1; ny <= y + 1 && solid; ++ny) {
+        for (std::size_t nx = x - 1; nx <= x + 1; ++nx) {
+          if (!PresenceDiffers(flags[ny * w + nx])) {
+            solid = false;
+            break;
+          }
+        }
+      }
+      if (solid) ++diff.solid_mismatches;
+    }
+  }
   return diff;
 }
 
@@ -142,6 +267,8 @@ TexturePayload DiffImage(const TexturePayload& a, const TexturePayload& b) {
   }
   return out;
 }
+
+std::string GoldenImageDir() { return SE_RENDER_GOLDEN_DIR; }
 
 std::string ImageOutDir() { return SE_TEST_OUT_DIR; }
 
