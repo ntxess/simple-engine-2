@@ -55,7 +55,9 @@ std::expected<se::GameSetup, se::Error> MakeRampage(
   setup.content_marker = kDefaultScene;
   setup.seed = 1;
   setup.tick_rate = 120;
-  setup.clear_color = se::ClearColor{0.10F, 0.12F, 0.20F, 1.0F};
+  // Opaque black, as the legacy Engine clears its window, so the window
+  // matches the legacy image of the same tick.
+  setup.clear_color = se::ClearColor{0.0F, 0.0F, 0.0F, 1.0F};
   setup.window_width = 1280;
   setup.window_height = 720;
   setup.texture_table = "config/texture.json";

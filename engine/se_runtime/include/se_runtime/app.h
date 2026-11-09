@@ -317,7 +317,6 @@ class App final : public WindowListener {
   std::uint64_t inbox_events_ = 0;
   std::uint64_t low_memory_events_ = 0;
   std::uint64_t presented_frames_ = 0;
-  std::uint64_t render_failures_ = 0;
   std::uint64_t frames_skipped_ = 0;
   std::uint64_t ticks_run_ = 0;
   std::uint64_t last_title_ns_ = 0;

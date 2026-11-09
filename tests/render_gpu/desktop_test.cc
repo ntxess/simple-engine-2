@@ -164,6 +164,71 @@ TEST_CASE("Two viewports and the composite in one frame", "[desktop]") {
   renderer.DestroyViewport(*second);
 }
 
+// HalfRate's re-present (wired at the M6 integration): the blit of the last
+// composite again, without a RenderList, vertices or an offscreen pass.
+TEST_CASE("RepresentLast blits the last composite again", "[desktop]") {
+  const testing::MainThreadScope main;
+  testing::GpuFixtureOptions options;
+  options.window = true;
+  options.window_width = 320;
+  options.window_height = 240;
+  GpuFixture gpu(options);
+  if (!gpu.Available()) SKIP(gpu.SkipReason());
+  REQUIRE(testing::LoadTestTextures(gpu.Resources()));
+  Renderer2D& renderer = gpu.Renderer();
+
+  // Before any frame the composite was never drawn: the swapchain is
+  // cleared and still presented.
+  SDL_PumpEvents();
+  const FrameResult first = renderer.RepresentLast();
+  CHECK(first.submitted);
+  CHECK_FALSE(first.error.has_value());
+
+  SceneBuilder scene("represent");
+  scene.Add(SpriteOf("white", 1, 1, kRed), {100, 75}, 0.0F, {40, 40});
+  const std::unique_ptr<World> world = scene.Finish();
+  RenderLayer layer;
+  layer.world = world.get();
+  layer.camera = CanvasCamera(200, 150);
+  const std::vector<RenderLayer> layers = {layer};
+  FrameRequest request;
+  request.layers = layers;
+  request.clear = ClearColor{0.0F, 0.0F, 0.0F, 1.0F};
+  SDL_PumpEvents();
+  REQUIRE(renderer.Frame(request).submitted);
+  const std::uint64_t frames = renderer.Totals().frames;
+  const std::uint64_t device_frames = gpu.Device().Stats().frames;
+  auto drawn = renderer.Readback();
+  REQUIRE(drawn);
+  REQUIRE(testing::PixelAt(*drawn, 160, 120) == kRed);
+
+  constexpr int kRepresents = 4;
+  int presented = 0;
+  for (int i = 0; i < kRepresents; ++i) {
+    SDL_PumpEvents();
+    const FrameResult result = renderer.RepresentLast();
+    CHECK(result.submitted);
+    CHECK_FALSE(result.build_fault.has_value());
+    CHECK_FALSE(result.error.has_value());
+    if (result.presented) ++presented;
+  }
+  // One command buffer each, no new frame of the renderer; the swapchain
+  // wait makes every acquire succeed on a visible window, but a NULL
+  // acquire is allowed (it is not a state change).
+  CHECK(renderer.Totals().represents == kRepresents + 1);
+  CHECK(renderer.Totals().frames == frames);
+  CHECK(gpu.Device().Stats().frames == device_frames + kRepresents);
+  CHECK(presented + static_cast<int>(renderer.Totals().null_acquires) >=
+        kRepresents);
+  REQUIRE(presented > 0);
+  // The composite is untouched: the re-present only reads it.
+  auto again = renderer.Readback();
+  REQUIRE(again);
+  REQUIRE(again->width == drawn->width);
+  REQUIRE(again->height == drawn->height);
+  CHECK(again->pixels == drawn->pixels);
+}
+
 // The sandbox in the real App, the player texture replaced by an opaque
 // green one while the window is minimized.
 TEST_CASE("A texture reloaded while minimized is correct after restore",
