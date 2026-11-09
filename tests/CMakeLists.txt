@@ -1,6 +1,7 @@
 # Engine tests (Catch2 v3 under CTest).
 #
 # Labels: unit, determinism, golden, slow, checks, lint, legacy, desktop, gpu.
+# The render_gpu tests' golden images live in tests/golden/render/<driver>/.
 # Catch2 tags become labels, so a test tagged [slow] is skipped by the
 # msvc-debug preset.
 
@@ -179,6 +180,8 @@ add_subdirectory(render)
 add_subdirectory(crash)
 if(SE_BUILD_PLATFORM)
   add_subdirectory(platform)
+  # M7: Renderer2D and GpuResources.
+  add_subdirectory(render_gpu)
 endif()
 
 # tools/se_replay links the kernel test module from tests/support, so it is

@@ -16,7 +16,7 @@ together, delete the old archive from `.deps/`, record the change here.
 | miniaudio | 0.11.26 | 0.11.26.tar.gz (4,572,837) | `838ba55a…969c600` | Public domain / MIT-0 | M8 | Audio engine owned by the main thread |
 | LZ4 | v1.10.0 | lz4-1.10.0.tar.gz (387,114) | `53751290…d792ec5f48b` | BSD-2 | M9 | Atlas page compression decoded in ~2 ms lane steps |
 | Dear ImGui | v1.93.0-docking | v1.93.0-docking.tar.gz (2,365,310) | `746c2655…1496f1a5` | MIT | M10 | Editor UI with the first-party SDL3 and SDL_GPU backends |
-| stb | (pinned at M7) | | | MIT / public domain | M7 | PNG decoding at import |
+| stb | commit 4e9b368bfc071e97206ea5c6adba68dd0cbf8897 | 4e9b368bfc071e97206ea5c6adba68dd0cbf8897.tar.gz (1,515,460) | `e60706ab…01a0683` | MIT / public domain | M7 | PNG decoding (stb_image, se_render; the decoder SFML uses) and PNG writing for the readback hook, tests and tools (stb_image_write); INTERFACE target `se::stb`, header-only, exempt from lint (ADR-060) |
 | EnTT | 3.16.0 (vendored in dep/) | | | MIT | M2 | ECS; built with `ENTT_USE_ATOMIC` everywhere |
 
 Full hashes are in cmake/Dependencies.cmake.

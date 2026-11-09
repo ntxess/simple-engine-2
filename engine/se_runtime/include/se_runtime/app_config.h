@@ -37,6 +37,18 @@
 //   --dump-test after-ticks:N  after tick N the watchdog writes a dump; the
 //                          ticks stop until it is written, then the app
 //                          quits through the two-phase quit
+//   --inject-frame-fault STEP[:EVERY[:UNTIL]]  the frame transaction's STEP
+//                          (build, vertices, upload, prepare, copy_pass,
+//                          viewport_pass, acquire, swapchain_pass, submit)
+//                          fails on every EVERY-th frame up to frame UNTIL
+//                          (se_render/frame_faults.h; M7)
+//   --reload-texture NAME@FRAME[=FILE]  at frame FRAME, decode texture NAME
+//                          again (from FILE instead of its table path when
+//                          given) and queue its upload; repeatable
+//   --readback FRAME:FILE  write the composite of the first frame rendered
+//                          at or after frame FRAME to FILE as PNG;
+//                          repeatable
+// Frames are iterates, counted from 1, as for --inject-null-acquire.
 
 #ifndef SE_RUNTIME_APP_CONFIG_H_
 #define SE_RUNTIME_APP_CONFIG_H_
@@ -51,6 +63,7 @@
 #include "se_core/assert.h"
 #include "se_core/error.h"
 #include "se_core/log.h"
+#include "se_render/frame_faults.h"
 
 #ifndef SE_RUNTIME_TEST_HOOKS
 #define SE_RUNTIME_TEST_HOOKS 0
@@ -63,6 +76,20 @@ inline constexpr bool kRuntimeTestHooks = SE_RUNTIME_TEST_HOOKS != 0;
 inline constexpr bool kReleaseBuild = SE_ASSERTS == 0;
 
 enum class ThrowSite : std::uint8_t { kNone, kIterate, kEvent };
+
+// --reload-texture NAME@FRAME[=FILE].
+struct TextureReloadHook {
+  std::string name;
+  std::int64_t frame = 0;
+  // Empty: the texture table's path.
+  std::string file;
+};
+
+// --readback FRAME:FILE.
+struct ReadbackHook {
+  std::int64_t frame = 0;
+  std::string file;
+};
 
 struct AppConfig {
   std::int64_t frames = 0;
@@ -86,6 +113,9 @@ struct AppConfig {
   std::int64_t null_acquire_count = 0;
   std::int64_t crash_test_after_ticks = 0;
   std::int64_t dump_test_after_ticks = 0;
+  FrameFaultConfig frame_fault;
+  std::vector<TextureReloadHook> texture_reloads;
+  std::vector<ReadbackHook> readbacks;
 
   // The arguments after "--".
   std::vector<std::string> game_args;

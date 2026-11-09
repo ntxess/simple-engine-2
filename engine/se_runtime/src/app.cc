@@ -37,6 +37,11 @@
 #include "se_platform/window.h"
 #include "se_render/frame_recorder.h"
 #include "se_render/gpu_device.h"
+#include "se_render/image_io.h"
+#include "se_render/renderer_2d.h"
+#include "se_render/texture_table.h"
+#include "se_render_core/render_components.h"
+#include "se_render_core/render_list.h"
 #include "se_runtime/app_config.h"
 #include "se_runtime/basic_input.h"
 #include "se_runtime/integration.h"
@@ -247,6 +252,9 @@ std::expected<void, Error> App::Boot() {
     }
     SE_LOG_INFO("GPU device '{}' (debug mode {}), display {:.3f} Hz",
                 gpu_->Driver(), gpu_->DebugMode(), refresh_hz_);
+    if (auto started = StartRenderer(); !started) {
+      return started;
+    }
   }
 
   // 8. The CPU topology.
@@ -387,6 +395,37 @@ std::expected<void, Error> App::StartGame() {
   return {};
 }
 
+std::expected<void, Error> App::StartRenderer() {
+  auto renderer = Renderer2D::Create(*gpu_);
+  if (!renderer) return std::unexpected(std::move(renderer.error()));
+  renderer_ = std::move(*renderer);
+  if (kRuntimeTestHooks) renderer_->Faults().Configure(config_.frame_fault);
+  readbacks_done_.assign(config_.readbacks.size(), false);
+  if (setup_.texture_table.empty()) return {};
+  auto report = LoadTextureTable(renderer_->Resources(), paths_.content_root,
+                                 setup_.texture_table);
+  if (!report) return std::unexpected(std::move(report.error()));
+  // A texture that does not load draws magenta; the game still boots.
+  for (const Error& error : report->errors) {
+    SE_LOG_ERROR("{} ({})", error.message, error.path);
+  }
+  textures_ = std::move(report->entries);
+  if (auto flushed = renderer_->Resources().FlushUploads(); !flushed) {
+    return flushed;
+  }
+  SE_LOG_INFO("renderer: {} of {} textures from {} resident", report->loaded,
+              textures_.size(), setup_.texture_table);
+  return {};
+}
+
+Camera2D App::CameraFor(const World& world) const {
+  if (setup_.camera) return setup_.camera(world);
+  if (const std::optional<Camera2D> primary = PrimaryCamera(world)) {
+    return *primary;
+  }
+  return Camera2D{};
+}
+
 Tick App::NextTick() const noexcept {
   return game_ ? game_->driver.NextTick() : 0;
 }
@@ -516,10 +555,10 @@ SDL_AppResult App::HandleEvent(const SDL_Event& event) {
   return SDL_APP_CONTINUE;
 }
 
-bool App::RenderClear(bool& presented, double& render_sec) {
-  presented = false;
-  if (gpu_ == nullptr) return false;
-  const std::uint64_t start = SDL_GetTicksNS();
+std::expected<void, Error> App::RenderFrame(FrameReport& report,
+                                            double& wait_sec) {
+  report.presented = false;
+  if (renderer_ == nullptr) return {};
   if (kRuntimeTestHooks && config_.null_acquire_count > 0) {
     const auto frame = static_cast<std::int64_t>(iterates_);
     if (frame >= config_.null_acquire_from &&
@@ -527,27 +566,90 @@ bool App::RenderClear(bool& presented, double& render_sec) {
       gpu_->ForceNullAcquires(1);
     }
   }
-  bool recorded = false;
-  {
-    auto frame = FrameRecorder::Prepare(*gpu_);
-    if (!frame) {
-      if (render_failures_ == 0) {
-        SE_LOG_ERROR("frame not recorded: {}", frame.error().message);
-      }
-      ++render_failures_;
+  layers_.clear();
+  for (const WorldRenderSource& source :
+       game_->states.RenderSources(report.plan)) {
+    if (source.world == nullptr) continue;
+    RenderLayer layer;
+    layer.world = source.world;
+    layer.camera = CameraFor(*source.world);
+    layer.alpha = source.alpha;
+    layers_.push_back(layer);
+  }
+  FrameRequest request;
+  request.layers = layers_;
+  request.clear = setup_.clear_color;
+  renderer_->Faults().SetFrame(iterates_);
+  FrameResult result = renderer_->Frame(request);
+  report.rendered = result.submitted;
+  report.presented = result.presented;
+  report.render = renderer_->LastFrame();
+  wait_sec = static_cast<double>(report.render.swapchain_wait_ns) * kNsToSec;
+  if (result.build_fault) {
+    return std::unexpected(std::move(*result.build_fault));
+  }
+  if (result.error) {
+    ++frames_skipped_;
+    if (frames_skipped_ == 1 || frames_skipped_ % 120 == 0) {
+      SE_LOG_WARN("frame {} not rendered ({} so far): {}", iterates_,
+                  frames_skipped_, result.error->message);
+    }
+  }
+  if (result.null_acquire) lifecycle_.OnNullAcquire();
+  return {};
+}
+
+void App::RunTextureReloads() {
+  if (renderer_ == nullptr) return;
+  for (const TextureReloadHook& reload : config_.texture_reloads) {
+    if (reload.frame != static_cast<std::int64_t>(iterates_)) continue;
+    GpuResources& resources = renderer_->Resources();
+    const TextureHandle handle = resources.Find(TextureKeyOf(reload.name));
+    std::string path;
+    if (!reload.file.empty()) {
+      path = fs::Join(paths_.content_root, reload.file);
     } else {
-      recorded = true;
-      if (frame->AcquireSwapchain() != nullptr) {
-        frame->Clear(setup_.clear_color);
-        presented = true;
-      } else {
-        lifecycle_.OnNullAcquire();
+      for (const TextureTableEntry& entry : textures_) {
+        if (entry.name == reload.name) path = entry.path;
       }
     }
-    // ~FrameRecorder submits here.
+    if (handle.IsNull() || path.empty()) {
+      SE_LOG_ERROR("--reload-texture: no texture '{}' in the table",
+                   reload.name);
+      continue;
+    }
+    if (auto loaded = LoadTextureFile(resources, handle, path); !loaded) {
+      SE_LOG_ERROR("--reload-texture {}: {} ({})", reload.name,
+                   loaded.error().message, loaded.error().path);
+      continue;
+    }
+    SE_LOG_INFO("reloading texture '{}' from {} at frame {}", reload.name, path,
+                iterates_);
   }
-  render_sec = static_cast<double>(SDL_GetTicksNS() - start) * kNsToSec;
-  return recorded;
+}
+
+void App::RunReadbacks(const FrameReport& report) {
+  if (renderer_ == nullptr || !report.rendered) return;
+  for (std::size_t i = 0; i < config_.readbacks.size(); ++i) {
+    const ReadbackHook& readback = config_.readbacks[i];
+    if (readbacks_done_[i] ||
+        static_cast<std::int64_t>(iterates_) < readback.frame) {
+      continue;
+    }
+    readbacks_done_[i] = true;
+    auto image = renderer_->Readback();
+    if (!image) {
+      SE_LOG_ERROR("--readback {}: {}", readback.file, image.error().message);
+      continue;
+    }
+    if (auto written = WritePng(readback.file, *image); !written) {
+      SE_LOG_ERROR("--readback {}: {}", readback.file, written.error().message);
+      continue;
+    }
+    SE_LOG_INFO("readback of frame {} (tick {}, {}x{}) written to {}",
+                iterates_, game_->driver.NextTick() - 1, image->width,
+                image->height, readback.file);
+  }
 }
 
 SDL_AppResult App::Iterate() {
@@ -592,12 +694,15 @@ SDL_AppResult App::Iterate() {
   FrameReport report;
   report.iterate = iterates_;
   report.now_ns = now;
-  double render_sec = 0.0;
+  double wait_sec = 0.0;
+  if (kRuntimeTestHooks) RunTextureReloads();
   // While Suspended (10 Hz), probe: a window that is visible again and
   // acquires a texture leaves Suspended.
   if (lifecycle_.WindowSuspended() && !lifecycle_.PowerSuspended() &&
       window_ != nullptr && window_->Visible()) {
-    report.rendered = RenderClear(report.presented, render_sec);
+    if (auto rendered = RenderFrame(report, wait_sec); !rendered) {
+      return OnCallbackFault("render build", rendered.error().message);
+    }
     lifecycle_.OnSuspendProbe(true, report.presented);
     if (lifecycle_.TakeFrameClockReset()) {
       clock_.Reset();
@@ -627,19 +732,29 @@ SDL_AppResult App::Iterate() {
   if (kRuntimeTestHooks) RunExitTests(report.next_tick);
 
   if (!report.rendered && lifecycle_.ShouldRender()) {
-    report.rendered = RenderClear(report.presented, render_sec);
+    if (auto rendered = RenderFrame(report, wait_sec); !rendered) {
+      // The game build's policy for a render build fault: the callbacks'
+      // fault path (ADR-062).
+      SE_LOG_ERROR("frame {}: {}", iterates_, rendered.error().message);
+      return OnCallbackFault("render build", rendered.error().message);
+    }
+  } else if (!report.rendered && renderer_ != nullptr) {
+    // Uploads continue while nothing renders (a minimized window).
+    renderer_->PumpUploads();
   }
+  if (kRuntimeTestHooks) RunReadbacks(report);
   if (report.presented) {
     ++presented_frames_;
     SE_PROFILE_FRAME();
   }
   stepper_.OnPresentResult(/*missed=*/false, lifecycle_.Modal());
 
-  // The non-tick CPU cost, without the swapchain wait and submit (M6's
-  // pacer and M7's renderer measure those separately).
+  // The non-tick CPU cost R: the iterate without its ticks and without the
+  // swapchain wait (ADR-063); the render build, recording and submit
+  // count.
   const double busy_sec =
       static_cast<double>(SDL_GetTicksNS() - iterate_start) * kNsToSec;
-  const double non_tick_sec = std::max(0.0, busy_sec - ticks_sec - render_sec);
+  const double non_tick_sec = std::max(0.0, busy_sec - ticks_sec - wait_sec);
   costs_.AddFrame(frame_clock.real_delta, non_tick_sec,
                   std::numeric_limits<double>::quiet_NaN());
 
@@ -722,6 +837,16 @@ void App::LogProgress(std::uint64_t now_ns) {
               game_->driver.NextTick() - 1,
               LifecycleStateName(lifecycle_.State()), iterates_,
               presented_frames_, lifecycle_.NullAcquires());
+  if (renderer_ != nullptr) {
+    const Renderer2DStats& last = renderer_->LastFrame();
+    SE_LOG_DEBUG(
+        "render frame {}: {} quads, {} batches, {} draws, {} upload bytes, "
+        "build {:.3f} ms, record {:.3f} ms, swapchain wait {:.3f} ms",
+        last.frame, last.quads, last.batches, last.draws, last.upload_bytes,
+        static_cast<double>(last.build_ns) * 1e-6,
+        static_cast<double>(last.record_ns) * 1e-6,
+        static_cast<double>(last.swapchain_wait_ns) * 1e-6);
+  }
 }
 
 SDL_AppResult App::Shutdown(SDL_AppResult result) {
@@ -738,6 +863,9 @@ SDL_AppResult App::Shutdown(SDL_AppResult result) {
       result == SDL_APP_FAILURE ? "failure" : "success", iterates_,
       presented_frames_, ticks_run_, NextTick(), lifecycle_.NullAcquires(),
       inbox_events_);
+  // The renderer's totals and leak check, while logging still runs; the
+  // teardown below only destroys it.
+  if (renderer_) renderer_->Shutdown();
   Teardown();
   return shutdown_faulted_ ? SDL_APP_FAILURE : result;
 }
@@ -767,7 +895,9 @@ void App::Teardown() {
     if (!RunGameHook("GameState::OnExit", clear)) shutdown_faulted_ = true;
     game_.reset();
   }
-  // Step 12: release the window from the device, destroy the device.
+  // Step 12: the renderer's objects (the GPU is idle), then release the
+  // window from the device and destroy the device.
+  renderer_.reset();
   gpu_.reset();
   // Step 14: remove the subclass, destroy the window.
   if (window_) window_->SetListener(nullptr);

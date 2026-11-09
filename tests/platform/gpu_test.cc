@@ -1,9 +1,10 @@
 // Copyright 2026 The simple-engine-2 Authors.
 //
-// The GPU device and the clear-only frame transaction. Driver resolution is
-// a unit test; device creation needs a GPU (label gpu, excluded on Linux);
-// anything with a window is label desktop. The windows open without taking
-// focus.
+// The GPU device and the frame transaction on a window (M5's clear frames,
+// drawn since M7 by Renderer2D: the composite cleared, then blitted).
+// Driver resolution is a unit test; device creation needs a GPU (label gpu,
+// excluded on Linux); anything with a window is label desktop. The windows
+// open without taking focus.
 
 #include <SDL3/SDL_events.h>
 #include <SDL3/SDL_gpu.h>
@@ -22,6 +23,7 @@
 #include "se_platform/window.h"
 #include "se_render/frame_recorder.h"
 #include "se_render/gpu_device.h"
+#include "se_render/renderer_2d.h"
 #include "support/test_roles.h"
 
 #if defined(_WIN32)
@@ -100,6 +102,7 @@ TEST_CASE("An unknown GPU driver is an error", "[gpu]") {
 struct ClaimedWindow {
   std::unique_ptr<Window> window;
   std::unique_ptr<GpuDevice> device;
+  std::unique_ptr<Renderer2D> renderer;
 };
 
 ClaimedWindow OpenClaimedWindow(const std::string& driver) SE_REQUIRES(g_main) {
@@ -118,18 +121,22 @@ ClaimedWindow OpenClaimedWindow(const std::string& driver) SE_REQUIRES(g_main) {
   REQUIRE(device);
   result.device = std::make_unique<GpuDevice>(std::move(*device));
   REQUIRE(result.device->ClaimWindow(result.window->Native()));
+  auto renderer = Renderer2D::Create(*result.device);
+  REQUIRE(renderer);
+  result.renderer = std::move(*renderer);
   return result;
 }
 
-// Runs one clear frame; true when it presented.
-bool ClearFrame(GpuDevice& device, const ClearColor& color)
+// Runs one frame that clears the composite to |color| and blits it; true
+// when it presented.
+bool ClearFrame(Renderer2D& renderer, const ClearColor& color)
     SE_REQUIRES(g_main) {
   SDL_PumpEvents();
-  auto frame = FrameRecorder::Prepare(device);
-  REQUIRE(frame);
-  if (frame->AcquireSwapchain() == nullptr) return false;
-  frame->Clear(color);
-  return true;
+  FrameRequest request;
+  request.clear = color;
+  const FrameResult result = renderer.Frame(request);
+  REQUIRE(result.submitted);
+  return result.presented;
 }
 
 #if defined(_WIN32)
@@ -165,7 +172,7 @@ TEST_CASE("Clear frames present on a visible window", "[desktop][gpu]") {
     const ClearColor color{0.0F, 0.5F, 1.0F, 1.0F};
     int presented = 0;
     for (int i = 0; i < 30; ++i) {
-      if (ClearFrame(*claimed.device, color)) ++presented;
+      if (ClearFrame(*claimed.renderer, color)) ++presented;
     }
     claimed.device->WaitForIdle();
     REQUIRE(presented > 20);
@@ -184,6 +191,7 @@ TEST_CASE("Clear frames present on a visible window", "[desktop][gpu]") {
     REQUIRE(std::abs(int{GetGValue(pixel)} - 128) <= 12);
     REQUIRE(std::abs(int{GetBValue(pixel)} - 255) <= 8);
 #endif
+    claimed.renderer.reset();
     claimed.device.reset();
     claimed.window.reset();
   }
@@ -198,20 +206,21 @@ TEST_CASE("Forced NULL acquires skip presents, then presenting resumes",
     REQUIRE(sdl);
     ClaimedWindow claimed = OpenClaimedWindow(std::string(DefaultGpuDriver()));
     const ClearColor color{0.2F, 0.2F, 0.2F, 1.0F};
-    for (int i = 0; i < 5; ++i) ClearFrame(*claimed.device, color);
+    for (int i = 0; i < 5; ++i) ClearFrame(*claimed.renderer, color);
     claimed.device->ForceNullAcquires(30);
     for (int i = 0; i < 30; ++i) {
-      REQUIRE_FALSE(ClearFrame(*claimed.device, color));
+      REQUIRE_FALSE(ClearFrame(*claimed.renderer, color));
     }
     REQUIRE(claimed.device->Stats().forced_null_acquires == 30);
     // Presenting resumes within 2 frames once the hook stops.
     int frames_to_present = 0;
-    while (!ClearFrame(*claimed.device, color) && frames_to_present < 10) {
+    while (!ClearFrame(*claimed.renderer, color) && frames_to_present < 10) {
       ++frames_to_present;
     }
     REQUIRE(frames_to_present < 2);
     claimed.device->WaitForIdle();
     REQUIRE(claimed.device->Stats().submit_failures == 0);
+    claimed.renderer.reset();
     claimed.device.reset();
     claimed.window.reset();
   }
