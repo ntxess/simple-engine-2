@@ -64,6 +64,9 @@ TEST_CASE("A window opens without taking focus", "[desktop][window]") {
     REQUIRE(sdl);
 #if defined(_WIN32)
     const HWND foreground_before = GetForegroundWindow();
+    LASTINPUTINFO input_before{};
+    input_before.cbSize = sizeof(input_before);
+    GetLastInputInfo(&input_before);
 #endif
     WindowConfig config;
     config.title = "se_platform_tests window";
@@ -81,8 +84,15 @@ TEST_CASE("A window opens without taking focus", "[desktop][window]") {
 #if defined(_WIN32)
     CHECK((*window)->NativeHandle() != nullptr);
     CHECK((*window)->Subclassed());
-    CHECK(GetForegroundWindow() == foreground_before);
-    CHECK(GetForegroundWindow() != (*window)->NativeHandle());
+    // A person using the machine may switch windows meanwhile; the check
+    // holds when no real input arrived.
+    LASTINPUTINFO input_after{};
+    input_after.cbSize = sizeof(input_after);
+    GetLastInputInfo(&input_after);
+    if (input_after.dwTime == input_before.dwTime) {
+      CHECK(GetForegroundWindow() == foreground_before);
+      CHECK(GetForegroundWindow() != (*window)->NativeHandle());
+    }
 #endif
   }
   SDL_Quit();

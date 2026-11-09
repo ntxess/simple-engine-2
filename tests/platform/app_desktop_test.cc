@@ -52,13 +52,29 @@ constexpr double kNsToSec = 1e-9;
 
 #if defined(_WIN32)
 
-// The cursor and the foreground window must be as they were.
+// The time of the last user input anywhere on the desktop.
+DWORD LastInputTick() {
+  LASTINPUTINFO info{};
+  info.cbSize = sizeof(info);
+  GetLastInputInfo(&info);
+  return info.dwTime;
+}
+
+// The cursor and the foreground window must be as they were. A person may
+// be using the machine while the desktop tests run: when real input arrived
+// during the test, the person may have moved the cursor or switched windows,
+// so the comparison is skipped (the test itself never generates input).
 class DesktopUntouched {
  public:
-  DesktopUntouched() : foreground_(GetForegroundWindow()) {
+  DesktopUntouched()
+      : foreground_(GetForegroundWindow()), input_tick_(LastInputTick()) {
     GetCursorPos(&cursor_);
   }
   void Check(HWND ours) const {
+    if (LastInputTick() != input_tick_) {
+      WARN("user input during the test: cursor and focus checks skipped");
+      return;
+    }
     POINT now{};
     GetCursorPos(&now);
     CHECK(now.x == cursor_.x);
@@ -69,6 +85,7 @@ class DesktopUntouched {
 
  private:
   HWND foreground_;
+  DWORD input_tick_;
   POINT cursor_{};
 };
 

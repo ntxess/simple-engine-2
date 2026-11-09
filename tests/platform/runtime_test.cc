@@ -100,15 +100,57 @@ TEST_CASE("The frame clock follows SDL's clock and the display period",
   REQUIRE(second.prev_frame_start_ns == 1'000'000'000);
   CHECK(second.modal);
   CHECK(second.real_delta > 0.0069);
-  // An unknown refresh rate counts as 60 Hz.
-  const FrameClock unknown = source.Next(1'020'000'000, 0.0, false);
-  CHECK(unknown.period_sec > 0.0166);
-  CHECK(unknown.period_sec < 0.0167);
+  CHECK_FALSE(source.UsingMeasuredPeriod());
   // After a reset the next frame is a first frame: no catch-up.
   source.Reset();
-  const FrameClock after = source.Next(9'000'000'000, 60.0, false);
+  const FrameClock after = source.Next(9'000'000'000, 144.0, false);
   REQUIRE(after.prev_frame_start_ns == 0);
   REQUIRE(source.Resets() == 1);
+  // An unknown refresh rate counts as 60 Hz.
+  FrameClockSource fresh;
+  const FrameClock unknown = fresh.Next(1'000'000'000, 0.0, false);
+  CHECK(unknown.period_sec > 0.0166);
+  CHECK(unknown.period_sec < 0.0167);
+}
+
+TEST_CASE("Frames faster than the display mode say fall back to their rate",
+          "[frame_clock]") {
+  // SDL reports 60 Hz, but the frames present at 165 Hz (a window on
+  // another monitor). With the display's period, Locked cadence would round
+  // each 6 ms delta to no vblank and run no ticks.
+  FrameClockSource source;
+  FixedStepper stepper(120);
+  constexpr std::uint64_t kFrameNs = 6'060'606;
+  std::uint64_t now = 1'000'000'000;
+  int ticks = 0;
+  for (int i = 0; i < 330; ++i) {
+    const FrameClock clock = source.Next(now, 60.0, false);
+    ticks +=
+        stepper.Plan(clock, FrameCosts{}, /*running=*/true, false, false).steps;
+    now += kFrameNs;
+  }
+  CHECK(source.UsingMeasuredPeriod());
+  CHECK(source.MeasuredPeriodSec() > 0.0060);
+  CHECK(source.MeasuredPeriodSec() < 0.0061);
+  // Two seconds of frames run about two seconds of ticks.
+  REQUIRE(ticks >= 236);
+  REQUIRE(ticks <= 244);
+  // Frames that match the display mode use its period again.
+  for (int i = 0; i < 100; ++i) {
+    static_cast<void>(source.Next(now, 60.0, false));
+    now += 16'666'667;
+  }
+  CHECK_FALSE(source.UsingMeasuredPeriod());
+  // Slow iterates (Suspended runs at 10 Hz) are forgotten at a reset.
+  for (int i = 0; i < 30; ++i) {
+    static_cast<void>(source.Next(now, 60.0, false));
+    now += 100'000'000;
+  }
+  CHECK(source.UsingMeasuredPeriod());
+  source.Reset();
+  const FrameClock resumed = source.Next(now, 60.0, false);
+  CHECK_FALSE(source.UsingMeasuredPeriod());
+  CHECK(resumed.period_sec < 0.0167);
 }
 
 TEST_CASE("A fixed frame dt makes the clock synthetic", "[frame_clock]") {

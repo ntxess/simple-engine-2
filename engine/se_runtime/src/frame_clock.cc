@@ -28,7 +28,22 @@ FrameClock FrameClockSource::Next(std::uint64_t now_ns, double refresh_hz,
     clock.vblanks_known = true;
   } else {
     clock.frame_start_ns = now_ns;
-    clock.period_sec = 1.0 / (refresh_hz > 1.0 ? refresh_hz : kFallbackHz);
+    const double display_sec =
+        1.0 / (refresh_hz > 1.0 ? refresh_hz : kFallbackHz);
+    if (prev_start_ns_ != 0 && now_ns > prev_start_ns_) {
+      const double delta_sec =
+          static_cast<double>(now_ns - prev_start_ns_) * 1e-9;
+      if (delta_sec < kMaxMeasuredSec) {
+        measured_sec_ =
+            measured_sec_ == 0.0
+                ? delta_sec
+                : measured_sec_ + kMeasureWeight * (delta_sec - measured_sec_);
+      }
+    }
+    using_measured_ =
+        measured_sec_ > 0.0 &&
+        std::abs(measured_sec_ - display_sec) > kPeriodTolerance * display_sec;
+    clock.period_sec = using_measured_ ? measured_sec_ : display_sec;
     clock.vblanks_known = false;
   }
   clock.prev_frame_start_ns = prev_start_ns_;

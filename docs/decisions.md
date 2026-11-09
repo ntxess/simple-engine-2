@@ -487,7 +487,7 @@ loop; std::terminate inside a noexcept frame is defined behaviour, a catch
 in the window procedure would have to invent a recovery the design does not
 have (the quit path runs from the callbacks).
 
-## ADR-039 M5's frame costs leave out the swapchain wait (2026-11-08)
+## ADR-039 M5's frame clock falls back to measured frames; its costs leave out the swapchain wait (2026-11-08)
 
 **Decision.** Until M6's pacer and M7's renderer measure them, the App
 feeds CostTracker each tick's cost and, as the non-tick cost R, the
@@ -499,6 +499,19 @@ wait for a swapchain image.
 **Why.** Counted as CPU time, the VSYNC wait makes R about one period, k_95
 falls below k_rt and the stepper enters Overloaded after a second, running
 one tick per frame: at 60 Hz the game would run at half speed.
+
+**Decision (frame clock).** The FrameClock's period is SDL's display mode
+unless a moving average of the frame deltas (weight 0.1, stalls over
+0.25 s left out) differs from it by more than 5%; then the clock reports
+the measured period, and the FixedStepper runs Free cadence on real time.
+
+**Why.** Running the rampage executable on this machine, SDL reported a
+60 Hz display for a window whose VSYNC presents came at 165 Hz. In Locked
+cadence with unknown vblank counts the stepper rounds each 6 ms delta to
+zero vblanks: 300 presented frames ran 2 ticks. The same happens in a
+modal loop, whose WM_TIMER iterates do not follow the display. M6's
+pacer uses present statistics and drops to Standard on such a
+disagreement; until then the measured rate keeps 120 ticks per second.
 
 ## ADR-040 Lifecycle details the design leaves open (2026-11-08)
 
