@@ -77,3 +77,35 @@ catch_discover_tests(se_platform_tests
     ENVIRONMENT SE_NO_MESSAGE_BOX=1
     TIMEOUT 60)
 
+# The rampage executable (label desktop): it runs the sandbox for 300
+# presented frames and quits through the two-phase quit, and a failure at
+# every boot step exits with SDL_APP_FAILURE, no app state and no engine
+# thread left (scripts/ci.ps1 -Desktop runs these in msvc-dev and, for ASan,
+# msvc-asan). run_app.py checks the exit status as well as the output; the
+# patterns avoid backslashes, which the test command line does not keep.
+if(TARGET rampage)
+  set(_se_run_app "${CMAKE_CURRENT_SOURCE_DIR}/run_app.py")
+  set(_se_rampage_pref "${_se_platform_out}/rampage_pref")
+  add_test(NAME rampage.frames_300
+    COMMAND Python3::Interpreter "${_se_run_app}" --expect-exit 0
+            --expect "booted 'rampage'"
+            --expect "shutdown [(]success[)]: [0-9]+ iterates, 300 presented frames, ran [1-9][0-9][0-9]+ ticks"
+            --reject "SE_ASSERT failed|ERROR|E t=[0-9]+ "
+            -- $<TARGET_FILE:rampage> --frames 300 --no-activate
+            --pref-dir "${_se_rampage_pref}")
+  set_tests_properties(rampage.frames_300 PROPERTIES
+    LABELS "desktop;gpu;rampage" TIMEOUT 120)
+  if(NOT CMAKE_BUILD_TYPE STREQUAL "Release")
+    foreach(_se_step RANGE 1 10)
+      add_test(NAME rampage.fail_init_step.${_se_step}
+        COMMAND Python3::Interpreter "${_se_run_app}" --expect-exit 1
+                --expect "injected failure at boot step ${_se_step} "
+                --expect "SDL_AppQuit without an app [(]boot failed[)]: 0 engine threads running"
+                --reject "booted 'rampage'|SE_ASSERT failed"
+                -- $<TARGET_FILE:rampage> --fail-init-step ${_se_step}
+                --no-activate --pref-dir "${_se_rampage_pref}")
+      set_tests_properties(rampage.fail_init_step.${_se_step} PROPERTIES
+        LABELS "desktop;rampage" TIMEOUT 60)
+    endforeach()
+  endif()
+endif()

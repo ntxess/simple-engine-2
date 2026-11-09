@@ -33,6 +33,7 @@ behaviour reference until every rule and editor operation is ported.
 | se_platform | engine/se_platform | SDL3 on the main thread: SDL's initialisation, the event filter and Inbox, WakeMain, the window and its Win32 subclass (Modal, session end, power), se::fs on SDL's filesystem API (M5) |
 | se_render | engine/se_render | The SDL_GPU device (D3D12 on Windows, Vulkan on Linux) and the frame transaction, clear-only until M7 (M5) |
 | se_runtime | engine/se_runtime | The App on SDL's main callbacks: boot steps, the frame, the lifecycle and two-phase quit state machines, BasicInputService, the noexcept callbacks (`SE_DEFINE_SDL_APP`) and the M4 integration hooks (M5) |
+| rampage | games/rampage/app | The rampage executable: the sandbox scene at 120 Hz in a window, clear-only until M7 (M5) |
 | se_replay | tools/se_replay | Headless runs of a game module: per-tick hashes, replays, projections |
 | refcmp | tools/refcmp/refcmp.py | Compares two `.seproj` projections within the M3 tolerances (Python 3, stdlib only) |
 | se_bench | bench/se_bench | Benchmark suites and their Release gates (`bench.*`) |
@@ -78,6 +79,15 @@ out\build\msvc-release\bin\se_bench --suite rampage_tick_5k --json rampage_tick_
 
 The `bench.*` tests run only in the msvc-release preset, against
 bench/thresholds.json; run them on an otherwise idle machine.
+
+The rampage executable runs the sandbox scene in a window (clear-only
+until M7; the title shows the tick and the lifecycle state). `--frames N`
+quits after N presented frames; the runtime's options are listed in
+engine/se_runtime/include/se_runtime/app_config.h:
+
+```bat
+out\build\msvc-dev\bin\rampage --frames 600
+```
 
 `scripts/ci.ps1` runs the commit gate (msvc-dev, msvc-asan, clangcl-dev,
 including the `lint` and `checks` test labels); `scripts/ci.ps1 -Milestone`
