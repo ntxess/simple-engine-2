@@ -48,7 +48,10 @@ VblankReading FakePresentPort::Reading(std::uint64_t now_ns,
   reading.resolved = true;
   reading.fresh = true;
   reading.valid = true;
-  reading.last_vblank_ns = LatestVblank(now_ns);
+  reading.last_vblank_ns =
+      now_ns >= sampler_lag_ns + anchor_ns_
+          ? LatestVblank(now_ns - sampler_lag_ns) + sampler_lag_ns
+          : LatestVblank(now_ns);
   reading.count = RefreshAt(now_ns);
   reading.period_ns =
       static_cast<std::uint64_t>(std::llround(period_ns_ * scale));

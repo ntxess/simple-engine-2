@@ -871,6 +871,9 @@ SDL_AppResult App::Iterate() {
   const FrameClock frame_clock =
       pacer_.BeginFrame(lifecycle_.Modal(), stepper_);
   report.clock = frame_clock;
+  // The N-L fence wait is GPU time, not CPU work: it stays out of R.
+  const double fence_wait_sec =
+      static_cast<double>(pacer_.LastFrame().fence_wait_ns) * kNsToSec;
   report.gameplay_ran = lifecycle_.GameplayRuns() &&
                         game_->states.SimRunning() && !exit_test_hold_;
   report.plan =
@@ -919,12 +922,13 @@ SDL_AppResult App::Iterate() {
     SE_PROFILE_FRAME();
   }
 
-  // The non-tick CPU cost R: the iterate without its ticks and without the
-  // swapchain wait (ADR-063); the render build, recording and submit
-  // count.
+  // The non-tick CPU cost R: the iterate without its ticks, the swapchain
+  // wait (ADR-064) and the pacer's N-L fence wait (ADR-067); the render
+  // build, recording and submit count.
   const double busy_sec =
       static_cast<double>(SDL_GetTicksNS() - iterate_start) * kNsToSec;
-  const double non_tick_sec = std::max(0.0, busy_sec - ticks_sec - wait_sec);
+  const double non_tick_sec =
+      std::max(0.0, busy_sec - ticks_sec - wait_sec - fence_wait_sec);
   // g: the GPU duration of an earlier frame that arrived this frame
   // (se::present timestamps), else unknown.
   const double gpu_sec =

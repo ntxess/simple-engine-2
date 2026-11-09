@@ -249,23 +249,45 @@ TEST_CASE("Presents one refresh late are misses although starts are on time",
   REQUIRE(loop.pacer.Totals().missed_vblanks >= 30);
 }
 
-TEST_CASE("Statistics are the miss source when they arrive", "[pacer]") {
+TEST_CASE("The latency wait is the source; statistics are counted beside it",
+          "[pacer]") {
   const testing::MainThreadScope main;
   Loop loop(Patched());
   loop.Attach();
   for (int i = 0; i < 30; ++i) loop.Step();
   const PacerTotals& totals = loop.pacer.Totals();
-  // The first present is resolved by its wait: nothing has been displayed
-  // yet, so there are no statistics. From then on they are the source.
-  CHECK(loop.frames[0].pacer.miss_source == MissSource::kLatencyWait);
-  REQUIRE(totals.resolved_by_wait == 1);
-  for (std::size_t i = 1; i < loop.frames.size(); ++i) {
-    CHECK(loop.frames[i].pacer.miss_source == MissSource::kStatistics);
+  for (const Frame& frame : loop.frames) {
+    CHECK(frame.pacer.miss_source == MissSource::kLatencyWait);
   }
-  CHECK(totals.resolved_by_statistics + 1 == totals.resolved_presents);
+  REQUIRE(totals.resolved_by_wait == 30);
+  REQUIRE(totals.resolved_by_statistics == 0);
+  REQUIRE(totals.resolved_presents == totals.resolved_by_wait);
+  // The fake shows each present at its target, so the statistics agree.
+  REQUIRE(totals.stats_resolved >= 28);
+  REQUIRE(totals.stats_missed == 0);
   // The waits polled first, then blocked.
   REQUIRE(loop.port.waitable_polls == 30);
   REQUIRE(loop.port.waitable_waits == 30);
+}
+
+TEST_CASE("Without the waitable, present statistics are the source",
+          "[pacer]") {
+  const testing::MainThreadScope main;
+  // Vulkan with VK_GOOGLE_display_timing but no present_wait: Standard.
+  PresentCaps caps = Patched();
+  caps.frame_latency_waitable = false;
+  Loop loop(caps);
+  loop.Attach();
+  REQUIRE(loop.pacer.Mode() == PacingMode::kStandard);
+  for (int i = 0; i < 30; ++i) loop.Step();
+  loop.port.LatePresents(1);
+  for (int i = 0; i < 10; ++i) loop.Step();
+  const PacerTotals& totals = loop.pacer.Totals();
+  CHECK(loop.frames.back().pacer.miss_source == MissSource::kStatistics);
+  REQUIRE(totals.resolved_by_wait == 0);
+  REQUIRE(totals.resolved_by_statistics >= 35);
+  REQUIRE(totals.missed_presents == 1);
+  REQUIRE(totals.stats_missed == 1);
 }
 
 TEST_CASE("A window without statistics: Paced, misses from the latency wait",
@@ -306,6 +328,26 @@ TEST_CASE("A window without statistics: Paced, misses from the latency wait",
       REQUIRE(loop.frames[i].pacer.missed == 0);
     }
   }
+}
+
+TEST_CASE("Sampler stamps after the waits' returns cause no false misses",
+          "[pacer]") {
+  const testing::MainThreadScope main;
+  // The waits return 0.1 ms after each vblank, the sampler stamps it
+  // 0.5 ms after: a frame start just after a vblank is before its stamp.
+  FramePacerConfig config = WindowsConfig();
+  SECTION("Standard") { config.request = PacingRequest::kStandard; }
+  SECTION("Paced") { config.request = PacingRequest::kPaced; }
+  Loop loop(Windowed(), config);
+  loop.port.sampler_lag_ns = 500'000;
+  loop.Attach();
+  for (int i = 0; i < 60; ++i) loop.Step();
+  REQUIRE(loop.pacer.Totals().resolved_by_wait >= 58);
+  REQUIRE(loop.pacer.Totals().missed_presents == 0);
+  // A present one refresh late is still a miss.
+  loop.port.LatePresents(1);
+  for (int i = 0; i < 5; ++i) loop.Step();
+  REQUIRE(loop.pacer.Totals().missed_presents == 1);
 }
 
 TEST_CASE("The sampler decides between Paced and Standard", "[pacer]") {

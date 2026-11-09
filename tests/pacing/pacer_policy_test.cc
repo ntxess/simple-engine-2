@@ -269,6 +269,30 @@ TEST_CASE("The paced target keeps HalfRate's phase and skips past vblanks",
   }
 }
 
+TEST_CASE("The paced target is ahead of now by the sampler's slack",
+          "[pacer]") {
+  constexpr std::uint64_t kAnchor = 50'000'000'000ULL;
+  constexpr double kPeriod = 10'000'000.0;
+  // The previous target's next vblank stamp is 0.4 ms after now: its true
+  // vblank may have passed, so the one after it is the target.
+  const std::uint64_t prev = kAnchor;
+  const std::uint64_t now = kAnchor + 9'600'000;
+  const PacedWake plain = PlanPacedWake(now, kAnchor, kPeriod, 1, prev, 0.002);
+  REQUIRE(plain.target_ns == kAnchor + 10'000'000);
+  const PacedWake slack = PlanPacedWake(now, kAnchor, kPeriod, 1, prev, 0.002,
+                                        EarlySlackNs(kPeriod));
+  REQUIRE(slack.target_ns == kAnchor + 20'000'000);
+  REQUIRE(slack.skipped_intervals == 1);
+  // 1.5 ms, at most a quarter period.
+  REQUIRE(EarlySlackNs(kPeriod) == 1'500'000.0);
+  REQUIRE(EarlySlackNs(4'000'000.0) == 1'000'000.0);
+  // Steady state, the wait just after the target's vblank: no change.
+  const PacedWake steady = PlanPacedWake(kAnchor + 300'000, kAnchor, kPeriod, 1,
+                                         prev, 0.002, EarlySlackNs(kPeriod));
+  REQUIRE(steady.target_ns == kAnchor + 10'000'000);
+  REQUIRE(steady.skipped_intervals == 0);
+}
+
 TEST_CASE("The VRR deadline: 120 Hz, 60 Hz below 120, no catch-up", "[pacer]") {
   CHECK(VrrRateHz(165.003) == 120.0);
   CHECK(VrrRateHz(120.0) == 120.0);
@@ -522,9 +546,9 @@ TEST_CASE("Wait misses: a wait that tells nothing never counts as a hit",
           "[pacer]") {
   WaitTracker tracker;
   SECTION("ready at once") {
-    tracker.OnPresentIssued(Vblank(1));
+    tracker.OnPresentIssued(Vblank(1), Vblank(1) - 3 * kMs);
     const auto result =
-        tracker.OnWait(true, false, Vblank(1) - kMs, 1, kPeriod100);
+        tracker.OnWait(true, false, Vblank(1) - 2 * kMs, 1, kPeriod100);
     REQUIRE(result.resolved == 0);
     REQUIRE(result.unresolved == 1);
   }
@@ -548,6 +572,31 @@ TEST_CASE("Wait misses: a wait that tells nothing never counts as a hit",
     REQUIRE(result.unresolved == 0);
   }
   REQUIRE(tracker.Pending() == 0);
+}
+
+TEST_CASE("Wait misses: a present submitted after its target is a miss",
+          "[pacer]") {
+  WaitTracker tracker;
+  // A 30 ms late frame: idle vblanks left the waitable signalled, so the
+  // wait was ready at once; the present was submitted 3.2 vblanks after
+  // its target, so it was taken at least 4 late.
+  tracker.OnPresentIssued(Vblank(1), Vblank(4) + 2 * kMs);
+  auto result =
+      tracker.OnWait(true, false, Vblank(4) + 2'100'000, 1, kPeriod100);
+  REQUIRE(result.resolved == 1);
+  REQUIRE(result.missed == 1);
+  REQUIRE(result.late_refreshes == 4);
+  REQUIRE_FALSE(result.blocked);
+  // A timeout says as much.
+  tracker.OnPresentIssued(Vblank(5), Vblank(5) + 2 * kMs);
+  result = tracker.OnWait(false, true, Vblank(10), 1, kPeriod100);
+  REQUIRE(result.missed == 1);
+  REQUIRE(result.late_refreshes == 1);
+  // Submitted within the slack after the stamp: unknown, not a miss.
+  tracker.OnPresentIssued(Vblank(11), Vblank(11) + kMs);
+  result = tracker.OnWait(true, false, Vblank(11) + 1'100'000, 1, kPeriod100);
+  REQUIRE(result.missed == 0);
+  REQUIRE(result.unresolved == 1);
 }
 
 TEST_CASE("Wait misses: latency 2 reports the present before the newest",

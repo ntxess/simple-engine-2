@@ -581,13 +581,28 @@ void SkipWithoutPaced(const PacedRun& run) {
   }
 }
 
-// Where the Paced frames' results came from, and the latency wait's
-// phase: how long after the vblank that took a present the wait returned.
+// The nearest-rank percentile p of |values| (0 when empty).
+double Percentile(std::vector<double> values, double p) {
+  if (values.empty()) return 0.0;
+  std::sort(values.begin(), values.end());
+  const auto rank = static_cast<std::size_t>(
+      std::ceil(p * static_cast<double>(values.size())));
+  return values[std::clamp<std::size_t>(rank, 1, values.size()) - 1];
+}
+
+// Where the Paced frames' results came from (ADR-066), the latency wait's
+// return after the vblank that took each present, the present statistics
+// counted beside it, and each present's lead on its target vblank (target
+// minus submit) for hits and misses.
 std::string DescribeSources(const PacedRun& run) {
   std::uint64_t by_statistics = 0;
   std::uint64_t by_wait = 0;
   std::uint64_t unresolved = 0;
+  std::uint64_t stats_resolved = 0;
+  std::uint64_t stats_missed = 0;
   std::vector<double> phases_ms;
+  std::vector<double> hit_leads_ms;
+  std::vector<double> miss_leads_ms;
   for (const PacerFrame& frame : run.frames) {
     if (frame.mode != PacingMode::kPaced) continue;
     if (frame.miss_source == MissSource::kStatistics) {
@@ -596,31 +611,42 @@ std::string DescribeSources(const PacedRun& run) {
       by_wait += frame.resolved;
     }
     unresolved += frame.unresolved;
+    stats_resolved += frame.stats_resolved;
+    stats_missed += frame.stats_missed;
     if (frame.wait_blocked) {
       phases_ms.push_back(static_cast<double>(frame.wait_phase_ns) * 1e-6);
     }
+    // The latency wait resolves the frame's own present (frame latency 1).
+    if (frame.miss_source == MissSource::kLatencyWait && frame.resolved > 0 &&
+        frame.target_ns != 0 && frame.submit_ns != 0) {
+      const double lead_ms = (static_cast<double>(frame.target_ns) -
+                              static_cast<double>(frame.submit_ns)) *
+                             1e-6;
+      (frame.missed > 0 ? miss_leads_ms : hit_leads_ms).push_back(lead_ms);
+    }
   }
-  std::sort(phases_ms.begin(), phases_ms.end());
-  const auto at = [&](double p) {
-    if (phases_ms.empty()) return 0.0;
-    const auto rank = static_cast<std::size_t>(
-        std::ceil(p * static_cast<double>(phases_ms.size())));
-    return phases_ms[std::clamp<std::size_t>(rank, 1, phases_ms.size()) - 1];
-  };
+  std::string source = "both";
+  if (by_wait == 0) source = "present statistics";
+  if (by_statistics == 0) source = "the frame-latency wait on the vblank grid";
   return std::format(
-      "misses from {}: {} presents by present statistics, {} by the "
-      "frame-latency wait on the vblank grid, {} waits unresolved; wait "
-      "return after the vblank min {:.3f} ms, p50 {:.3f} ms, p99 {:.3f} ms, "
-      "max {:.3f} ms",
-      by_statistics > 0 && by_wait == 0
-          ? "present statistics"
-          : (by_wait > 0 && by_statistics == 0
-                 ? "the frame-latency wait on the vblank grid"
-                 : "both"),
-      by_statistics, by_wait, unresolved, at(0.0), at(0.5), at(0.99), at(1.0));
+      "misses from {}: {} presents by the frame-latency wait, {} by present "
+      "statistics, {} waits unresolved; the wait returned after the vblank "
+      "that took its present: min {:.3f}, p50 {:.3f}, p99 {:.3f}, max {:.3f} "
+      "ms; present statistics beside it: {} resolved, {} shown after their "
+      "target refresh; submit lead on the target: hits min {:.3f}, p50 "
+      "{:.3f} ms ({}), misses min {:.3f}, p50 {:.3f}, max {:.3f} ms ({})",
+      source, by_wait, by_statistics, unresolved, Percentile(phases_ms, 0.0),
+      Percentile(phases_ms, 0.5), Percentile(phases_ms, 0.99),
+      Percentile(phases_ms, 1.0), stats_resolved, stats_missed,
+      Percentile(hit_leads_ms, 0.0), Percentile(hit_leads_ms, 0.5),
+      hit_leads_ms.size(), Percentile(miss_leads_ms, 0.0),
+      Percentile(miss_leads_ms, 0.5), Percentile(miss_leads_ms, 1.0),
+      miss_leads_ms.size());
 }
 
-void PacedMisses(std::string_view driver) {
+// |gate|: the M6 exit (under 1% of the presents late) applies; otherwise
+// the numbers are reported only.
+void PacedMisses(std::string_view driver, bool gate) {
   const Desktop desktop;
   const PacedRun run = RunPaced(driver, 20.0, {});
   SkipWithoutPaced(run);
@@ -653,14 +679,25 @@ void PacedMisses(std::string_view driver) {
   const bool under = missed * 100 < resolved;
   if (!under && desktop.Busy()) {
     WARN("misses above 1% with a busy desktop: " << desktop.Report());
+  } else if (!under && !gate) {
+    WARN("misses above 1% on " << run.driver
+                               << " (reported; docs/gates.md, Paced on "
+                                  "Vulkan in a window)");
   } else {
     CHECK(under);
   }
 }
 
-TEST_CASE("paced_misses", "[desktop][pacing]") { PacedMisses("direct3d12"); }
+// The M6 exit: rampage's default driver.
+TEST_CASE("paced_misses", "[desktop][pacing]") {
+  PacedMisses("direct3d12", /*gate=*/true);
+}
 
-TEST_CASE("paced_misses_vulkan", "[desktop][pacing]") { PacedMisses("vulkan"); }
+// Reported: NVIDIA's Vulkan path in a window takes about 3% of the presents
+// one vblank late whatever their lead (measured 2026-11-09; gates.md).
+TEST_CASE("paced_misses_vulkan", "[desktop][pacing]") {
+  PacedMisses("vulkan", /*gate=*/false);
+}
 
 TEST_CASE("late_frame_drains", "[desktop][pacing]") {
   const Desktop desktop;

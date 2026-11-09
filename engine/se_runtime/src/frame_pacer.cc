@@ -229,30 +229,24 @@ FrameClock FramePacer::BeginFrame(bool modal, FixedStepper& stepper) {
     }
   }
 
-  // 2. Hits and misses, one result per frame: present statistics when the
-  // presentation path produces them; else what the previous EndFrame's
-  // latency waits resolved (ADR-066).
-  bool missed = carried_.missed > 0;
+  // 2. Present statistics, resolved and counted beside the pacer's source
+  // (they become its source below only when the latency wait cannot
+  // resolve this frame's present; ADR-066).
   stats_live_ = false;
+  PresentTracker::Result stats_result;
   if (port_ != nullptr && caps_.present_stats && mode_ != PacingMode::kVrr) {
     PresentStatistics stats;
     if (port_->GetPresentStats(stats)) {
       stats_live_ = true;
-      const PresentTracker::Result result =
-          tracker_.OnStats(stats, vblank_period_sec_ * kNsPerSec);
-      frame_.resolved = result.resolved;
-      frame_.missed = result.missed;
-      frame_.late_vblanks = result.late_refreshes;
-      frame_.stats_reset = result.reset;
-      totals_.resolved_presents += result.resolved;
-      totals_.resolved_by_statistics += result.resolved;
-      totals_.missed_presents += result.missed;
-      totals_.missed_vblanks += result.late_refreshes;
-      if (result.reset) ++totals_.stats_resets;
-      missed = missed || result.missed > 0;
+      stats_result = tracker_.OnStats(stats, vblank_period_sec_ * kNsPerSec);
+      frame_.stats_resolved = stats_result.resolved;
+      frame_.stats_missed = stats_result.missed;
+      frame_.stats_reset = stats_result.reset;
+      totals_.stats_resolved += stats_result.resolved;
+      totals_.stats_missed += stats_result.missed;
+      if (stats_result.reset) ++totals_.stats_resets;
     }
   }
-  stepper.OnPresentResult(missed, modal);
 
   // 3. The mode: re-evaluated twice a second, at once when Paced loses its
   // sampler.
@@ -314,7 +308,14 @@ FrameClock FramePacer::BeginFrame(bool modal, FixedStepper& stepper) {
       frame_target_ns_ = target_ns_;
     } else {
       start = GridFloor(now, reading.last_vblank_ns, vblank_ns);
-      frame_target_ns_ = start + ToNs(present_ns * 1e-9);
+      // The target: one interval after the latest vblank, where a time just
+      // after a true vblank but before the sampler's stamp of it counts as
+      // after it (ADR-066); else a present taken at the next vblank would
+      // count as one late.
+      const std::uint64_t latest =
+          GridFloor(now + ToNs(EarlySlackNs(vblank_ns) * 1e-9),
+                    reading.last_vblank_ns, vblank_ns);
+      frame_target_ns_ = latest + ToNs(present_ns * 1e-9);
     }
     clock.period_sec = period.period_sec * interval;
     clock.vblanks_known = true;
@@ -341,21 +342,36 @@ FrameClock FramePacer::BeginFrame(bool modal, FixedStepper& stepper) {
   frame_.period_sec = clock.period_sec;
   frame_.frame_start_ns = start;
   frame_.target_ns = frame_target_ns_;
-  if (stats_live_) {
-    frame_.miss_source = MissSource::kStatistics;
-  } else if (port_ != nullptr && caps_.frame_latency_waitable &&
-             mode_ != PacingMode::kVrr && frame_target_ns_ != 0) {
+
+  // 5. Hits and misses, one result per frame (ADR-066): the latency wait on
+  // the vblank grid when it can resolve this frame's present (its result
+  // arrives at EndFrame; the previous frame's is reported now), else
+  // present statistics, else nothing.
+  bool missed = carried_.missed > 0;
+  if (port_ != nullptr && caps_.frame_latency_waitable &&
+      mode_ != PacingMode::kVrr && frame_target_ns_ != 0) {
     frame_.miss_source = MissSource::kLatencyWait;
+  } else if (stats_live_) {
+    frame_.miss_source = MissSource::kStatistics;
+    frame_.resolved = stats_result.resolved;
+    frame_.missed = stats_result.missed;
+    frame_.late_vblanks = stats_result.late_refreshes;
+    totals_.resolved_presents += stats_result.resolved;
+    totals_.resolved_by_statistics += stats_result.resolved;
+    totals_.missed_presents += stats_result.missed;
+    totals_.missed_vblanks += stats_result.late_refreshes;
+    missed = missed || stats_result.missed > 0;
   }
+  stepper.OnPresentResult(missed, modal);
   return clock;
 }
 
 void FramePacer::RegisterPresent(std::uint64_t target_ns) {
   if (port_ == nullptr || mode_ == PacingMode::kVrr) return;
   // Every present the waitable will wait for, so that the waits line up
-  // with their presents; with statistics the waits resolve nothing.
+  // with their presents.
   if (caps_.frame_latency_waitable) {
-    wait_tracker_.OnPresentIssued(stats_live_ ? 0 : target_ns);
+    wait_tracker_.OnPresentIssued(target_ns, clock_->NowNs());
   }
   if (!caps_.present_stats || target_ns == 0) return;
   PresentStatistics stats;
@@ -375,6 +391,7 @@ void FramePacer::OnFrameSubmitted(bool presented, bool null_acquire,
   frame_.presented = presented;
   frame_.null_acquire = null_acquire;
   presented_this_frame_ = presented;
+  frame_.submit_ns = clock_->NowNs();
   if (presented) ++totals_.presented;
   if (null_acquire) ++totals_.null_acquires;
   if (presented) RegisterPresent(frame_target_ns_);
@@ -415,7 +432,7 @@ void FramePacer::WaitWaitable(std::uint64_t& now_ns) {
   const WaitTracker::Result waited =
       wait_tracker_.OnWait(result == PresentWait::kReady, blocked, now_ns,
                            latency_.Latency(), vblank_period_sec_ * kNsPerSec);
-  if (!stats_live_) AddWaitResult(waited);
+  if (frame_.miss_source == MissSource::kLatencyWait) AddWaitResult(waited);
 }
 
 void FramePacer::AddWaitResult(const WaitTracker::Result& result) {
@@ -522,9 +539,10 @@ void FramePacer::EndFrame(const StepPlan& next, const FrameCosts& costs,
         target_ns_ = 0;
         break;
       }
+      const double vblank_ns = vblank_period_sec_ * kNsPerSec;
       const PacedWake wake = PlanPacedWake(
-          now, reading.last_vblank_ns, vblank_period_sec_ * kNsPerSec,
-          PresentInterval(), target_ns_, next.budget_b);
+          now, reading.last_vblank_ns, vblank_ns, PresentInterval(), target_ns_,
+          next.budget_b, EarlySlackNs(vblank_ns));
       target_ns_ = wake.target_ns;
       Sleep(now, wake.wake_ns);
       break;

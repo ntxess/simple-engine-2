@@ -588,10 +588,16 @@ void CheckPresentStatistics(WindowMode mode) SE_REQUIRES(g_main) {
     }
     PresentFrame(device, static_cast<float>(i % 2));
   }
-  if (samples.empty() && mode == WindowMode::kUnfocused && IsD3d12(device)) {
+  // A window DWM composes (D3D12): statistics arrive only while the display
+  // is awake, and they describe DWM's composed presents, so a refresh may
+  // show two of the window's presents (measured at the integration,
+  // ADR-052, ADR-066); the per-refresh rule below holds in independent
+  // flip.
+  const bool composed = mode == WindowMode::kUnfocused && IsD3d12(device);
+  if (samples.empty() && composed) {
     // DXGI keeps the statistics of a composed (windowed) flip-model
-    // swapchain at zero on this machine (ADR-052); they need independent
-    // flip, which a desktop test cannot take the screen for.
+    // swapchain at zero while the display sleeps (ADR-052); independent
+    // flip needs the screen, which a desktop test cannot take.
     const std::string driver(device.Driver());
     fixture.Close();
     SKIP(driver << " windowed: " << no_stats_reason
@@ -604,6 +610,7 @@ void CheckPresentStatistics(WindowMode mode) SE_REQUIRES(g_main) {
 
   int one_step = 0;
   int other_steps = 0;
+  int shared_refreshes = 0;
   std::uint64_t max_sync_lag = 0;
   for (std::size_t i = 0; i < samples.size(); ++i) {
     const present::PresentStats& s = samples[i].stats;
@@ -621,9 +628,15 @@ void CheckPresentStatistics(WindowMode mode) SE_REQUIRES(g_main) {
     REQUIRE(s.last_present_count == p.last_present_count + 1);
     REQUIRE(s.present_count >= p.present_count);
     REQUIRE(s.sync_refresh_count >= p.sync_refresh_count);
-    // No refresh shows two presents.
-    REQUIRE(s.present_refresh_count - p.present_refresh_count >=
-            s.present_count - p.present_count);
+    // No refresh shows two presents (independent flip).
+    if (s.present_refresh_count - p.present_refresh_count <
+        s.present_count - p.present_count) {
+      ++shared_refreshes;
+    }
+    if (!composed) {
+      REQUIRE(s.present_refresh_count - p.present_refresh_count >=
+              s.present_count - p.present_count);
+    }
     if (s.present_count == p.present_count + 1) {
       ++one_step;
     } else {
@@ -635,15 +648,16 @@ void CheckPresentStatistics(WindowMode mode) SE_REQUIRES(g_main) {
   const std::uint64_t presents = last.present_count - first.present_count;
   const std::uint64_t issued =
       last.last_present_count - first.last_present_count;
-  WARN(device.Driver() << ": " << samples.size() << " samples, " << one_step
-                       << " advanced by one present, " << other_steps
-                       << " otherwise; displayed " << presents << " of "
-                       << issued << " issued over "
-                       << (last.present_refresh_count -
-                           first.present_refresh_count)
-                       << " refreshes; sync lag at most " << max_sync_lag
-                       << "; foreign input " << activity.InputSeen()
-                       << ", CPU load " << activity.CpuLoad());
+  WARN(device.Driver()
+       << ": " << samples.size() << " samples, " << one_step
+       << " advanced by one present, " << other_steps
+       << " otherwise; displayed " << presents << " of " << issued
+       << " issued over "
+       << (last.present_refresh_count - first.present_refresh_count)
+       << " refreshes; sync lag at most " << max_sync_lag << "; "
+       << shared_refreshes << " samples where one refresh showed two presents"
+       << (composed ? " (composed by DWM)" : "") << "; foreign input "
+       << activity.InputSeen() << ", CPU load " << activity.CpuLoad());
   // Every issued present is displayed (VSYNC drops none), and the displayed
   // refresh follows the sampled one closely.
   REQUIRE(presents + 2 >= issued);

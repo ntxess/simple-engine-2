@@ -151,13 +151,17 @@ struct PacedWake {
 // frame's target (0: none). The target is the first grid vblank
 // |interval| periods after the previous target (HalfRate keeps its phase)
 // that is still ahead of now; without a previous target, |interval|
-// periods after the vblank at or before now. The wake is target -
-// |budget_sec|, or now when that has passed (no sleep).
+// periods after the vblank at or before now. "Ahead of now" means after
+// now + |early_slack_ns|: the grid is the sampler's stamps, which trail
+// the true vblanks, so a stamp just after now may be a vblank that has
+// already passed (ADR-066; the pacer passes EarlySlackNs). The wake is
+// target - |budget_sec|, or now when that has passed (no sleep).
 [[nodiscard]] PacedWake PlanPacedWake(std::uint64_t now_ns,
                                       std::uint64_t anchor_ns, double period_ns,
                                       int interval,
                                       std::uint64_t prev_target_ns,
-                                      double budget_sec) noexcept;
+                                      double budget_sec,
+                                      double early_slack_ns = 0.0) noexcept;
 
 // B for a frame of |steps| ticks: steps * S_hi + R_hi + g_hi + m, with an
 // unknown g_hi (NaN) counted as 0 and m = SafetyMarginSec(timer p99,
@@ -261,10 +265,16 @@ enum class MissSource : std::uint8_t { kNone, kStatistics, kLatencyWait };
 // present was taken floor((ready - target + slack) / period) vblanks after
 // its target, where the slack (kEarlySlackSec, at most a quarter period)
 // allows for the sampler's stamps trailing the true vblanks; one or more
-// is a miss. A wait that was ready at once, timed out or had no target
-// tells nothing: that present is unresolved, never a hit. Presents whose
-// wait did not run (Modal frames) are dropped as unresolved. Misses are
-// counted against targets and vblanks, never frame starts.
+// is a miss. A wait that was ready at once (the D3D12 waitable is also
+// signalled at vblanks while the queue has room, so a frame submitted
+// after idle vblanks finds it signalled) or timed out does not say when
+// its present was taken: the present is a miss when it was submitted after
+// its target vblank plus the slack (it cannot have been taken before it
+// was submitted; at least floor((submit - target - slack) / period) + 1
+// vblanks late), and unresolved otherwise, never a hit. Presents without a
+// target, and presents whose wait did not run (Modal frames), are
+// unresolved. Misses are counted against targets and vblanks, never frame
+// starts.
 class WaitTracker {
  public:
   static constexpr std::size_t kCapacity = 8;
@@ -282,9 +292,10 @@ class WaitTracker {
     std::int64_t phase_ns = 0;
   };
 
-  // A present was issued for the vblank |target_ns| (0: unknown). A full
-  // queue drops its oldest entry.
-  void OnPresentIssued(std::uint64_t target_ns) noexcept;
+  // A present was issued at |submit_ns| for the vblank |target_ns| (0:
+  // unknown). A full queue drops its oldest entry.
+  void OnPresentIssued(std::uint64_t target_ns,
+                       std::uint64_t submit_ns = 0) noexcept;
   // The frame-latency wait after the newest present returned at
   // |ready_ns|. |ready|: it returned ready (not a timeout); |blocked|: it
   // was not ready when it started; |latency|: the frame latency it waited
@@ -298,10 +309,20 @@ class WaitTracker {
  private:
   void PopFront() noexcept;
 
-  std::array<std::uint64_t, kCapacity> targets_{};
+  struct Entry {
+    std::uint64_t target_ns = 0;
+    std::uint64_t submit_ns = 0;
+  };
+  std::array<Entry, kCapacity> entries_{};
   std::size_t head_ = 0;
   std::size_t size_ = 0;
 };
+
+// How far the vblank sampler's stamps may trail the true vblanks (they are
+// taken after WaitForVBlank returns) and a time still count as at or after
+// the stamp's vblank: WaitTracker::kEarlySlackSec, at most a quarter of
+// |period_ns| (ADR-066).
+[[nodiscard]] double EarlySlackNs(double period_ns) noexcept;
 
 // HalfRate above 100 Hz, with hysteresis (docs/milestone-specs.md M6b):
 // entered when, over the last 2 s, more than 1% of the resolved presents

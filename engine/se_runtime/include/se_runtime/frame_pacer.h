@@ -7,11 +7,12 @@
 //
 // Each iterate:
 //   BeginFrame   the fence of frame N-L (L = FrameLatency()), then the
-//                present statistics turned into hits and misses
-//                (PresentTracker) when the presentation path produces
-//                them, each frame's result (with the previous frame's
-//                latency-wait result, below) reported to
-//                FixedStepper::OnPresentResult(missed, modal); returns the
+//                present statistics (PresentTracker, counted beside the
+//                pacer's source), the FrameClock, and the frame's miss
+//                source: the latency wait (EndFrame, below) when it can
+//                resolve the present, else the statistics (ADR-066); the
+//                result is reported to FixedStepper::OnPresentResult(missed,
+//                modal) (a wait's result one frame later). Returns the
 //                FrameClock. Its period is the sampler's when it agrees with
 //                the display mode within 0.5%, else the mode, else the
 //                measured frame period (ADR-039). Frame starts lie on the
@@ -128,6 +129,10 @@ struct PacerFrame {
   MissSource miss_source = MissSource::kNone;
   // Latency waits that told nothing (ready at once, a timeout, no target).
   std::uint32_t unresolved = 0;
+  // Present statistics resolved this frame, whatever the source: on a
+  // window DWM composes they count DWM's displayed refresh (ADR-066).
+  std::uint32_t stats_resolved = 0;
+  std::uint32_t stats_missed = 0;
   // A blocked latency wait resolved this frame's present: its return's
   // offset from the vblank the present was taken at.
   bool wait_blocked = false;
@@ -136,6 +141,9 @@ struct PacerFrame {
   bool presented = false;
   bool null_acquire = false;
   bool represented = false;
+  // When the frame was submitted (OnFrameSubmitted): target - submit is
+  // the lead the present had on its vblank.
+  std::uint64_t submit_ns = 0;
 };
 
 struct PacerTotals {
@@ -157,6 +165,10 @@ struct PacerTotals {
   std::uint64_t resolved_by_statistics = 0;
   std::uint64_t resolved_by_wait = 0;
   std::uint64_t unresolved_waits = 0;
+  // Every present statistics resolved, and the ones later than their
+  // targets by them, whether or not they were the source.
+  std::uint64_t stats_resolved = 0;
+  std::uint64_t stats_missed = 0;
   std::uint64_t stats_resets = 0;
   std::uint64_t represents = 0;
   std::uint64_t mode_changes = 0;

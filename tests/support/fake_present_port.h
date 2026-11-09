@@ -55,7 +55,8 @@ class FakePresentPort final : public PresentPort {
   void LatePresents(std::uint32_t count) { late_presents_ = count; }
   // The vblank at or before |now_ns|.
   [[nodiscard]] std::uint64_t LatestVblank(std::uint64_t now_ns) const;
-  // A sampler reading that agrees with the display (period * |scale|).
+  // A sampler reading that agrees with the display (period * |scale|); its
+  // stamps trail the vblanks by sampler_lag_ns.
   [[nodiscard]] VblankReading Reading(std::uint64_t now_ns,
                                       double scale = 1.0) const;
   // The refresh present |id| (1-based) showed at, or nullopt.
@@ -99,6 +100,8 @@ class FakePresentPort final : public PresentPort {
   bool fence_pending = false;
   // How long a wake after a flip takes.
   std::uint64_t wake_latency_ns = 100'000;
+  // How long after a vblank the sampler stamps it.
+  std::uint64_t sampler_lag_ns = 0;
 
   // Calls the pacer made.
   std::vector<int> latencies;

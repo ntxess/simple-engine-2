@@ -118,14 +118,9 @@ ModeChoice ChooseMode(const ModeInputs& inputs) noexcept {
     return {PacingMode::kStandard,
             "the vblank intervals vary (not a fixed-refresh display)"};
   }
-  if (inputs.caps.present_stats) {
-    return {PacingMode::kPaced,
-            "waitable and the vblank sampler agree with the display mode; "
-            "misses from present statistics, else the latency wait"};
-  }
   return {PacingMode::kPaced,
           "waitable and the vblank sampler agree with the display mode; "
-          "misses from the latency wait"};
+          "misses from the latency wait on the vblank grid"};
 }
 
 std::string_view PeriodSourceName(PeriodSource source) noexcept {
@@ -180,8 +175,8 @@ std::uint64_t GridNearest(std::uint64_t time_ns, std::uint64_t anchor_ns,
 
 PacedWake PlanPacedWake(std::uint64_t now_ns, std::uint64_t anchor_ns,
                         double period_ns, int interval,
-                        std::uint64_t prev_target_ns,
-                        double budget_sec) noexcept {
+                        std::uint64_t prev_target_ns, double budget_sec,
+                        double early_slack_ns) noexcept {
   PacedWake wake;
   if (!(period_ns > 0.0)) {
     wake.target_ns = now_ns;
@@ -190,15 +185,17 @@ PacedWake PlanPacedWake(std::uint64_t now_ns, std::uint64_t anchor_ns,
   }
   const int vblanks = std::max(1, interval);
   const double step = static_cast<double>(vblanks) * period_ns;
+  // A target must lie after this (its true vblank still ahead of now).
+  const std::uint64_t ready_ns = Offset(now_ns, std::max(0.0, early_slack_ns));
   const std::uint64_t base =
       prev_target_ns != 0 ? GridNearest(prev_target_ns, anchor_ns, period_ns)
-                          : GridFloor(now_ns, anchor_ns, period_ns);
+                          : GridFloor(ready_ns, anchor_ns, period_ns);
   // The first step past base that is still ahead of now.
   double k = 1.0;
-  const double ahead = SignedDeltaNs(now_ns, base);
+  const double ahead = SignedDeltaNs(ready_ns, base);
   if (ahead >= step) k = std::floor(ahead / step) + 1.0;
   wake.target_ns = Offset(base, k * step);
-  if (wake.target_ns <= now_ns) {
+  if (wake.target_ns <= ready_ns) {
     k += 1.0;
     wake.target_ns = Offset(base, k * step);
   }
@@ -338,9 +335,15 @@ std::string_view MissSourceName(MissSource source) noexcept {
   return "?";
 }
 
-void WaitTracker::OnPresentIssued(std::uint64_t target_ns) noexcept {
+double EarlySlackNs(double period_ns) noexcept {
+  return std::min(WaitTracker::kEarlySlackSec * 1e9,
+                  0.25 * std::max(0.0, period_ns));
+}
+
+void WaitTracker::OnPresentIssued(std::uint64_t target_ns,
+                                  std::uint64_t submit_ns) noexcept {
   if (size_ == kCapacity) PopFront();
-  targets_[(head_ + size_) % kCapacity] = target_ns;
+  entries_[(head_ + size_) % kCapacity] = Entry{target_ns, submit_ns};
   ++size_;
 }
 
@@ -367,13 +370,31 @@ WaitTracker::Result WaitTracker::OnWait(bool ready, bool blocked,
     PopFront();
     ++result.unresolved;
   }
-  const std::uint64_t target_ns = targets_[head_];
+  const Entry entry = entries_[head_];
   PopFront();
-  if (!ready || !blocked || target_ns == 0 || !(period_ns > 0.0)) {
+  const std::uint64_t target_ns = entry.target_ns;
+  if (target_ns == 0 || !(period_ns > 0.0)) {
     ++result.unresolved;
     return result;
   }
-  const double slack_ns = std::min(kEarlySlackSec * 1e9, 0.25 * period_ns);
+  const double slack_ns = EarlySlackNs(period_ns);
+  if (!ready || !blocked) {
+    // When it was taken is unknown; it was late if it was submitted after
+    // its target's vblank.
+    const double after_ns =
+        entry.submit_ns != 0
+            ? SignedDeltaNs(entry.submit_ns, target_ns) - slack_ns
+            : -1.0;
+    if (after_ns > 0.0) {
+      ++result.resolved;
+      ++result.missed;
+      result.late_refreshes =
+          static_cast<std::uint64_t>(std::floor(after_ns / period_ns)) + 1;
+    } else {
+      ++result.unresolved;
+    }
+    return result;
+  }
   const double offset_ns = SignedDeltaNs(ready_ns, target_ns);
   const double late = std::floor((offset_ns + slack_ns) / period_ns);
   ++result.resolved;

@@ -106,7 +106,7 @@ out\build\msvc-dev\bin\rampage --frames 600
 
 | Mode | When | What it does |
 |---|---|---|
-| Paced | auto on Windows (or `--pacing paced` anywhere) when the SDL presentation patch's frame-latency waitable exists and the vblank sampler measures the window's output and agrees with its display mode within 0.5% (ADR-055, ADR-057); never while the display sleeps | waits on the waitable, then sleeps (SDL_DelayNS) to the predicted vblank minus B(next); misses from present statistics when the presentation path gives them (D3D12 independent flip), else from the waitable's (D3D12) or present_wait's (Vulkan) return on the vblank grid (ADR-066) |
+| Paced | auto on Windows (or `--pacing paced` anywhere) when the SDL presentation patch's frame-latency waitable exists and the vblank sampler measures the window's output and agrees with its display mode within 0.5% (ADR-055, ADR-057); never while the display sleeps | waits on the waitable, then sleeps (SDL_DelayNS) to the predicted vblank minus B(next); misses from the waitable's (D3D12) or present_wait's (Vulkan) return on the vblank sampler's grid, with present statistics counted beside them (ADR-066) |
 | Standard | otherwise (no patch, no sampler, a display asleep, Linux), or `--pacing standard` | the waitable when present, then SDL_WaitForGPUSwapchain; HalfRate re-presents the last composite |
 | VRR | `--pacing vrr`, where IMMEDIATE (tearing) works, patched or not | IMMEDIATE, a self-paced 120 Hz deadline (60 Hz below a 120 Hz mode), no miss logic |
 

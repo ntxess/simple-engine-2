@@ -1109,9 +1109,11 @@ needs no new SDL API: at frame latency 1, WaitFrameLatency returns when DWM
 latched the previous present, so its return time placed on the vblank
 sampler's grid tells the refresh that took the present. That choice (or
 borderless fullscreen for Paced) is the owner's; docs/gates.md, "Present
-statistics in independent flip". The integration took the waitable's return on
-the sampler's grid for windows and keeps statistics where they arrive
-(ADR-066).
+statistics in independent flip". Corrected at the integration (ADR-066): the
+zeros were measured while the display slept; with it awake DXGI fills a
+window's statistics, with DWM's displayed refresh (one after the vblank
+that took the present), and the pacer's misses come from the latency
+wait on the sampler's grid.
 
 **Why.** The spec's statistics are DXGI's; reporting zeros as statistics
 would make every present look undisplayed, and inventing them from DWM's
@@ -1226,7 +1228,10 @@ STATUS_GRAPHICS_PRESENT_OCCLUDED); whether DXGI's mode list also lacks
 near-60 Hz modes looks like the driver's list without the monitor's own
 modes, so SDL may be right while the monitor is awake and wrong whenever
 it sleeps (as during unattended test runs, M5's included); the pacer does
-not depend on which, because it reads the current mode.
+not depend on which, because it reads the current mode. (Measured at the
+integration with the display awake: DXGI lists 7 modes at 2560x1440 up to
+165.003 Hz, SDL reports 165.003 Hz, and the sampler 164.965 Hz; the
+60.001 Hz is the sleeping display's.)
 
 The "display mode" the pacer compares the sampler with, and the period it
 falls back to, is therefore the OS's current mode of the window's monitor:
@@ -1611,68 +1616,103 @@ member scan (which needs brace tracking) out of the line-based banned-API
 scan; the drawn-pixel condition makes "matches the legacy image" fail
 when the sprites are missing, which the background alone would hide.
 
-## ADR-066 Paced in a window counts misses from the frame-latency wait on the vblank grid (2026-11-09)
+## ADR-066 Paced counts misses from the frame-latency wait on the vblank grid; statistics are counted beside it (2026-11-09)
 
-**Decision.** M6a found (ADR-052) that DXGI returns S_OK with every
-DXGI_FRAME_STATISTICS field at zero for a windowed flip-model swapchain
-that DWM composes, and NVIDIA's Windows Vulkan driver has no
-VK_GOOGLE_display_timing. Paced therefore takes its hits and misses from
-the first real source available, per frame:
+**Context.** M6a found (ADR-052) that DXGI kept a window's frame
+statistics at zero, and NVIDIA's Windows Vulkan driver has no
+VK_GOOGLE_display_timing, so a source of hits and misses other than the
+statistics was needed for Paced in a window. Measured at the integration
+on 2026-11-09:
+- While the display sleeps (as in every M6a and M6b run, and the
+  integration's first ones) WaitForVBlank returns at once, the vblank
+  sampler has no valid reading, Paced cannot run, and DXGI's window
+  statistics are zero.
+- With the display awake, DXGI fills a window's statistics, but they
+  describe DWM's composition: over 20 s of Paced rampage on D3D12 each of
+  3296 presents was reported displayed one refresh after the vblank its
+  latency wait showed it taken at, although every present was submitted
+  at least 0.8 ms (p50 1.5 ms) before its target vblank and every wait
+  returned 0.35 ms (p50; p99 1.2 ms) after that vblank. Counted as misses
+  against the target they read as 54% to 100% late (HalfRate's own phase
+  sometimes lets DWM take a present one vblank early) and put Paced into
+  HalfRate for nothing; M6a's per-refresh invariant also fails at times
+  (one refresh shows two presents).
 
-| Backend | Presentation path | Source |
-|---|---|---|
-| D3D12 | independent flip (borderless fullscreen in front) | present statistics (GetFrameStatistics, GetLastPresentCount) |
-| D3D12 | a window DWM composes | the frame-latency waitable's return on the vblank sampler's grid |
-| Vulkan | VK_GOOGLE_display_timing present | present statistics (ADR-052's derived counts) |
-| Vulkan | present_id and present_wait only (NVIDIA here) | vkWaitForPresentKHR's return (WaitFrameLatency) on the grid |
-| any | no waitable (unpatched), no valid sampler (display asleep, Linux), VRR, `--fixed-frame-dt` | none: Standard, or no miss logic |
+**Decision.**
+- The pacer's miss source, per frame: the frame-latency wait on the vblank
+  sampler's grid whenever it can resolve the frame's present (the waitable
+  or present_wait exists, and the frame has a target on the grid: Paced,
+  or Standard with a valid sampler); otherwise present statistics (a
+  backend with statistics but no waitable, such as Vulkan with display
+  timing and no present_wait); otherwise none. Present statistics are
+  still read every frame and counted beside the source
+  (PacerFrame::stats_resolved/stats_missed, PacerTotals::stats_*), and
+  `pacing.paced_misses` prints both.
 
-- Statistics are preferred: a frame whose GetPresentStats returned
-  statistics uses them (PresentTracker, ADR-057), and the latency waits'
-  results are then dropped, so nothing is counted twice. Otherwise the
-  WaitTracker (pacer_policy.h) resolves the presents.
+| Backend | Path | Pacer's source | Statistics |
+|---|---|---|---|
+| D3D12 | a window DWM composes | the waitable's return on the grid | DWM's displayed refresh (taken + 1), reported beside |
+| D3D12 | independent flip (borderless fullscreen in front) | the waitable's return on the grid | DXGI's displayed refresh, reported beside (not measured: gates.md) |
+| Vulkan | present_id and present_wait (NVIDIA here) | vkWaitForPresentKHR's return on the grid | none (no display timing) |
+| Vulkan | display timing, no present_wait | present statistics (ADR-052's derived counts) | the source |
+| any | no waitable (unpatched), no valid sampler (display asleep, Linux), VRR, `--fixed-frame-dt` | none: Standard, or no miss logic | |
+
 - The wait. With frame latency L the wait after a present returns once the
   present L - 1 before it has left the present queue: DXGI signals the
   waitable when the compositor (or the display) takes the present at a
   vblank; vkWaitForPresentKHR returns when it has been presented. Every
-  wait now polls (timeout 0) first and then blocks; only a wait that
-  blocked returned at that moment. The present was taken
-  floor((return - target + slack) / period) vblanks after its target
-  vblank, slack = min(1.5 ms, period / 4), which allows for the sampler's
-  stamps (taken after WaitForVBlank returns) trailing the true vblank; one
-  or more is a miss. The target is the one the pacer planned (Paced:
-  PlanPacedWake's vblank; Standard: the frame start plus one interval),
-  as for the statistics.
-- A wait that was ready at once, timed out, or had no target (no grid) is
-  unresolved, never a hit: a D3D12 waitable that is a semaphore left
-  signalled by skipped waits (Modal frames) would otherwise pass a late
-  present as on time. Presents whose own wait never ran are dropped as
-  unresolved.
-- The offset is taken as 0: the wait returns at the vblank that took the
-  present, not one later. Were it one later in reality, every present
-  would count as late and the test would fail loudly; the opposite
-  assumption could hide a one-refresh-late equilibrium (red team P1). The
-  desktop test prints the measured distribution of the return's offset
-  from its vblank (`wait return after the vblank ... p50, p99`), which
-  settles it on a display that is awake.
-- Paced no longer requires present statistics: ChooseMode asks for the
-  waitable and a valid, agreeing, fixed-refresh sampler; its reason says
-  where the misses come from. PacerFrame carries `miss_source`,
-  `late_vblanks`, `unresolved`, `wait_blocked` and `wait_phase_ns`;
-  PacerTotals counts presents resolved by each source and unresolved
-  waits; the per-second log, the shutdown line and `pacing.paced_misses`
-  print the source. A wait's result is recorded in the frame that waited
-  and reported to FixedStepper::OnPresentResult and HalfRate at the next
-  frame (the statistics' results arrive at a frame start, as before).
+  wait polls (timeout 0) first and then blocks. A wait that blocked
+  returned at the vblank that took its present: it was taken
+  floor((return - target + slack) / period) vblanks after its target,
+  slack = min(1.5 ms, period / 4) (the sampler's stamps, taken after
+  WaitForVBlank returns, trail the true vblank); one or more is a miss.
+  A wait that was ready at once or timed out does not say when: the D3D12
+  waitable is also signalled at vblanks while the queue has room, so the
+  wait after a late frame (idle vblanks) is ready at once. Such a present
+  is a miss when it was submitted after its target plus the slack (it
+  cannot have been taken before it was submitted: at least
+  floor((submit - target - slack) / period) + 1 vblanks late), and
+  unresolved otherwise, never a hit. Presents without a target or whose
+  wait never ran (Modal frames) are unresolved.
+- The offset is 0, measured: the waits return 0.35 ms (D3D12) and 0.31 ms
+  (Vulkan) after the target's sampler stamp at p50, 1.2 and 1.1 ms at
+  p99, never more than 1.5 ms; a one-vblank offset would have shown as
+  every present late.
+- Targets lie ahead of now by the same slack (EarlySlackNs): PlanPacedWake
+  takes the first grid vblank after now + slack, and Standard's target is
+  one interval after the grid vblank at or before now + slack (its frame
+  start stays the vblank at or before now). Without this a fake display
+  whose stamps trail the waits' returns by 0.5 ms put Paced into a
+  one-refresh-late equilibrium (every target a vblank that had just
+  passed), which the latency wait reported as every present missed.
+- Paced needs the waitable and a valid, agreeing, fixed-refresh sampler,
+  no longer present statistics. PacerFrame carries `miss_source`,
+  `late_vblanks`, `unresolved`, `wait_blocked`, `wait_phase_ns` and
+  `submit_ns`; PacerTotals counts the presents each source resolved and
+  the unresolved waits; the per-second log, the shutdown line and the
+  desktop tests print them. A wait's result is recorded in the frame that
+  waited and reported to FixedStepper::OnPresentResult and HalfRate at the
+  next frame; statistics' results arrive at a frame start.
 - In Standard's HalfRate the re-presented composite is registered and
   waited for like the frame's own present (one wait per present).
-- The fullscreen statistics check stays a gates.md entry (ADR-052).
+- Measured with the display awake (desktop tests, 20 s of rampage, Paced
+  at 165 Hz): D3D12 0 of 3298 presents late; the injected 30 ms frame one
+  miss (submitted 28 ms after its target), on time from the next frame.
+  Vulkan 50 to 82 of about 2250 (2.2% to 3.6%) one vblank late, with the
+  same submit lead as the hits (p50 2.3 ms against 2.2 ms): NVIDIA's
+  Vulkan path in a window drops that many whatever the lead, so
+  `pacing.paced_misses_vulkan` reports it and the M6 exit stays on
+  rampage's default D3D12 (gates.md).
 
-**Why.** A miss is a present shown later than planned; in a composed window
-the only per-present signal of when it was taken is the latency wait, and
-the vblank sampler is the only clock of the window's output. DWM's
-desktop-wide timing would bring back red team P2. Counting unknown waits as
-hits would report numbers the hardware did not give.
+**Why.** What the pacer controls is whether a present is taken at the
+vblank it was planned for; the wait measures exactly that on both
+backends, against the sampler's clock of the window's output. A window's
+DXGI statistics add DWM's own refresh of composition, which the pacer can
+neither avoid nor act on, and its displayed latency is what PresentMon's
+capture measures (gates.md). This reverses the integration brief's order
+("statistics preferred when they are non-zero"), whose premise was that
+non-zero statistics come only from independent flip. Counting unknown
+waits as hits would report numbers the hardware did not give.
 
 ## ADR-067 The PresentPort adapter and the GPU timing hooks (2026-11-09)
 
@@ -1701,12 +1741,19 @@ hits would report numbers the hardware did not give.
   (unknown, NaN, when nothing arrived: unpatched, or a frame that did not
   render). Measured here: 0.012 ms (D3D12) and 0.017 ms (Vulkan) for the
   sandbox frame.
-- FrameCosts' R stays ADR-064's (the iterate minus its ticks minus the
-  recorder's swapchain wait). The pacer's own waits run in EndFrame, after
-  the costs are recorded, so they are never in R.
-- Measured on D3D12: the N-L fence (frame latency 1) is still pending at
-  nearly every frame start in Standard, about 0.28 ms after the waitable
-  returned (164 fence waits a second, 46 ms in all); on Vulkan never.
+- FrameCosts' R is ADR-064's (the iterate minus its ticks minus the
+  recorder's swapchain wait) minus the pacer's N-L fence wait at
+  BeginFrame, which is GPU time. The pacer's other waits run in EndFrame,
+  after the costs are recorded. Without the fence term, an unpatched build
+  (no waitable, so the fence of the last frame is pending at each frame
+  start for most of a vblank) carried the wait in R_hi, held k_max at 1 at
+  165 Hz, and a 64 Hz modal loop then ran 65 ticks a second instead of
+  120 (`platform.Ticks continue during a modal loop with Modal set`
+  failed in msvc-unpatched-dev with the display awake).
+- Measured on D3D12: in Standard the N-L fence (frame latency 1) is still
+  pending at nearly every frame start, about 0.3 ms after the waitable
+  returned (164 fence waits a second); in Paced, after the sleep, about
+  one a second; on Vulkan none.
 
 **Why.** Renderer2D already owns the frame's fences and the composite, so
 the adapter is a thin copy; reading timings at the next frame start needs
