@@ -1916,3 +1916,96 @@ the unpatched test preset excludes the desktop label.
 
 **Why.** Tests run unattended on a desktop someone may be using; a
 diagnosable abort is the only acceptable end of a failed assertion there.
+
+## ADR-071 HalfRate does not flap; Standard's HalfRate holds each frame for two vblanks; the probe's present is paced (2026-11-09)
+
+**Context.** The review found four pacing defects. HalfRate entered on
+misses above 1% but left on cost margin alone, so misses that cost does not
+explain made it toggle: on NVIDIA's Vulkan path in a window it went on and
+off three times in 20 s (2 s at full rate, 4 s at half), against the
+design's "HalfRate does not flap at a 1% miss load". The entry log printed
+the miss fraction after HalfRatePolicy had cleared its window (always
+0.0%). In Standard, HalfRate registered each frame's present one vblank
+later than it can be taken, so a present one vblank late counted as a hit;
+it also re-presented after every frame, so a frame slower than one vblank
+(HalfRate entered by cost) held the screen for three vblanks and the frame
+starts were three apart. And the Suspended probe's present (the frame that
+leaves Suspended) was never reported to the pacer: not counted, its fence
+not waited for N-L, its present not waited for.
+
+**Decision.**
+- HalfRatePolicy leaves after a dwell of margin in which the full-rate p95
+  cost stays below 0.75 T *and* at most 1% of the presents resolved over
+  the last 2 s at half rate missed. The dwell is 4 s (ADR-058) and doubles,
+  up to 64 s, at each entry within 10 s of the previous exit; an entry
+  later than that starts again at 4 s. Unit tests: a constant 3% miss load
+  enters once in 30 s and stays (five entries before); 3% at full rate and
+  none at half rate stays 4, 8 and 16 s, four entries in 60 s (ten
+  before). Measured on Vulkan with the display awake: one entry in 20 s,
+  kept (its misses continue at half rate, 4.1% overall).
+- The entry log names the cause and the fraction over the 2 s that entered
+  it, and the dwell (`EntryMissFraction`, `EnteredByCost`, `ExitDwellSec`).
+- Standard: a frame starts just after a flip, and its own present targets
+  the next vblank; in HalfRate it targets two vblanks after the previous
+  frame's own present was taken, unless that is earlier. The composite is
+  presented again only when the frame's present was taken at the first
+  vblank after its start (a slower frame already holds the screen for two
+  vblanks), and the re-present targets the vblank after that take. Off the
+  vblank grid (no valid sampler) it re-presents after every frame,
+  untargeted, as before. This replaces ADR-057's "Standard: the frame
+  start plus one presentation interval" and the re-present target of
+  ADR-066. Unit tests: in Standard HalfRate a present one vblank late is a
+  miss, and 8 ms frames at 165 Hz start two vblanks apart without
+  re-presents or misses (both fail with the old targets).
+- The App reports the probe's frame to the pacer (OnFrameSubmitted) right
+  after BeginFrame, like any other frame. Desktop test `platform.The
+  Suspended probe's present reaches the pacer` pushes an
+  SDL_EVENT_WINDOW_OCCLUDED for its own window (nothing on the desktop
+  changes) and requires the pacer to count every present the App made (it
+  fails without the change).
+
+**Why.** Hysteresis must be on the quantity that entered the state; a
+cause HalfRate does not cure should keep it rather than toggle it, and one
+it cures but cost does not predict should back off. Standard has no sleep
+to keep a phase, so the take of each frame's own present is its phase.
+
+## ADR-072 Present statistics are checked on their own, after the measured composition delay (2026-11-09)
+
+**Context.** The M6 exit counts Paced misses "by present statistics";
+ADR-066 made the latency wait the pacer's source, because DXGI's
+statistics for a window DWM composes report every present after the
+vblank that took it. Counted against the targets they read 100% late
+(3295 of 3295 in the review's run), so the exit passed on ADR-066's source
+alone, which needs the owner's acceptance. Measured now with the display
+awake: each present of the 20 s D3D12 run (3295) is shown exactly two
+refreshes after its target and two after the vblank its latency wait saw
+it taken at (ADR-066 recorded one; its count did not separate the two).
+
+**Decision.**
+- PresentTracker reports, for each present whose refresh the statistics
+  tell, the refreshes it was shown after its target (0 or fewer, 1, 2, 3,
+  4 or more), and for each named present whose take the latency wait saw
+  (`OnPresentTaken`, from each blocked wait), the refreshes it was shown
+  after that take. PacerFrame and PacerTotals carry both
+  (`stats_lateness`, `stats_delay`); the shutdown log prints them.
+- `CheckStatistics`: the composition delay is the most frequent
+  shown-after-take value (without takes, the most frequent lateness; the
+  smaller on a tie); the statistics' misses are the presents shown later
+  than their target plus that delay. The delay is a property of the
+  presentation path, measured per run rather than assumed, and the
+  lateness is counted against the targets, so a pacer that took its
+  presents late still shows them beyond it (a unit test: every present
+  taken one late and shown after DWM's two refreshes is a miss by the
+  statistics).
+- `pacing.paced_misses` (D3D12, the exit's gate) requires, beside the
+  latency wait's under 1%, when the statistics resolved at least 80% as
+  many presents as the wait: takes known for at least 80% of them, and
+  under 1% shown later than target plus delay. It prints both histograms.
+  Measured: 0 of 3295 beyond a delay of 2. `paced_misses_vulkan` reports
+  only (NVIDIA's Vulkan has no display timing).
+- Whether ADR-066's source with this check satisfies the exit's "by
+  present statistics" is the owner's decision (docs/gates.md).
+
+**Why.** The spec asks for the statistics' verdict; this gives it with the
+one correction the composed path needs, measured on the run itself, so
+the exit no longer rests on the change of source alone.

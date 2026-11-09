@@ -252,6 +252,17 @@ void PresentTracker::OnPresentIssued(std::uint64_t present_id,
   ++size_;
 }
 
+void PresentTracker::OnPresentTaken(std::uint64_t target_ns,
+                                    std::uint64_t take_ns) noexcept {
+  for (std::size_t i = size_; i > 0; --i) {
+    Entry& entry = entries_[(head_ + i - 1) % kCapacity];
+    if (entry.target_ns == target_ns && entry.take_ns == 0) {
+      entry.take_ns = take_ns;
+      return;
+    }
+  }
+}
+
 void PresentTracker::PopFront() noexcept {
   head_ = (head_ + 1) % kCapacity;
   --size_;
@@ -303,24 +314,59 @@ PresentTracker::Result PresentTracker::OnStats(const PresentStatistics& stats,
     const std::int64_t target = target_refresh(entry.target_ns);
     std::int64_t refresh = target;
     bool late = false;
+    // The statistics tell the refresh (or its earliest) of this present.
+    bool known = false;
     if (entry.id == shown_id) {
       refresh = shown_refresh;
       late = refresh > target;
+      known = true;
     } else if (have_last_ && entry.id > last_.present_count) {
       // Shown between two samples: no earlier than one refresh after the
       // previous displayed present per present in between.
       refresh = static_cast<std::int64_t>(last_.present_refresh_count) +
                 static_cast<std::int64_t>(entry.id - last_.present_count);
       late = target < refresh;
+      known = true;
     }
     if (late) {
       ++result.missed;
       result.late_refreshes += static_cast<std::uint64_t>(refresh - target);
     }
+    const auto bin = [](std::int64_t refreshes) {
+      return static_cast<std::size_t>(std::clamp<std::int64_t>(
+          refreshes, 0, static_cast<std::int64_t>(kLatenessBins) - 1));
+    };
+    if (known) ++result.lateness[bin(refresh - target)];
+    if (entry.id == shown_id && entry.take_ns != 0) {
+      ++result.delay[bin(refresh - target_refresh(entry.take_ns))];
+    }
   }
   last_ = stats;
   have_last_ = true;
   return result;
+}
+
+StatisticsCheck CheckStatistics(
+    const std::array<std::uint64_t, PresentTracker::kLatenessBins>& lateness,
+    const std::array<std::uint64_t, PresentTracker::kLatenessBins>&
+        delay) noexcept {
+  StatisticsCheck check;
+  for (std::size_t bin = 0; bin < lateness.size(); ++bin) {
+    check.counted += lateness[bin];
+    check.delays += delay[bin];
+  }
+  const auto& calibration = check.delays > 0 ? delay : lateness;
+  std::uint64_t most = 0;
+  for (std::size_t bin = 0; bin < calibration.size(); ++bin) {
+    if (calibration[bin] > most) {
+      most = calibration[bin];
+      check.offset = static_cast<std::uint32_t>(bin);
+    }
+  }
+  for (std::size_t bin = check.offset + 1; bin < lateness.size(); ++bin) {
+    check.beyond += lateness[bin];
+  }
+  return check;
 }
 
 std::string_view MissSourceName(MissSource source) noexcept {
@@ -401,6 +447,10 @@ WaitTracker::Result WaitTracker::OnWait(bool ready, bool blocked,
   result.blocked = true;
   result.phase_ns = static_cast<std::int64_t>(
       std::llround(offset_ns - std::max(0.0, late) * period_ns));
+  result.target_ns = target_ns;
+  const double take_ns = static_cast<double>(target_ns) + late * period_ns;
+  result.take_ns =
+      take_ns > 0.0 ? static_cast<std::uint64_t>(std::llround(take_ns)) : 0;
   if (late >= 1.0) {
     ++result.missed;
     result.late_refreshes = static_cast<std::uint64_t>(late);
@@ -421,6 +471,9 @@ void HalfRatePolicy::Reset() noexcept {
   over_budget_sec_ = 0.0;
   margin_sec_ = 0.0;
   active_ = false;
+  dwell_sec_ = kExitSec;
+  since_exit_sec_ = 0.0;
+  exited_ = false;
 }
 
 double HalfRatePolicy::MissFraction() const noexcept {
@@ -462,15 +515,24 @@ bool HalfRatePolicy::OnFrame(const FrameInput& frame) noexcept {
     head_ = (head_ + 1) % kWindowFrames;
     --size_;
   }
+  // Allow for the frame times not adding up to exactly 2 s.
+  const bool full_window = window_sec_ >= kEnterSec - 1e-9;
+  const bool misses = full_window && MissFraction() > kMissBudget;
 
   if (!active_) {
+    if (exited_) since_exit_sec_ += frame.frame_sec;
     over_budget_sec_ = frame.planned_full_rate_sec > frame.vblank_period_sec
                            ? over_budget_sec_ + frame.frame_sec
                            : 0.0;
-    // Allow for the frame times not adding up to exactly 2 s.
-    const bool full_window = window_sec_ >= kEnterSec - 1e-9;
-    const bool misses = full_window && MissFraction() > kMissBudget;
-    if (misses || over_budget_sec_ >= kEnterSec - 1e-9) {
+    const bool by_cost = over_budget_sec_ >= kEnterSec - 1e-9;
+    if (misses || by_cost) {
+      entry_miss_fraction_ = MissFraction();
+      entered_by_cost_ = by_cost && !misses;
+      // Back again soon after leaving: the margin did not hold, so the
+      // next stay is twice as long.
+      dwell_sec_ = exited_ && since_exit_sec_ < kFlapSec
+                       ? std::min(2.0 * dwell_sec_, kMaxExitSec)
+                       : kExitSec;
       ClearWindow();
       over_budget_sec_ = 0.0;
       margin_sec_ = 0.0;
@@ -480,15 +542,18 @@ bool HalfRatePolicy::OnFrame(const FrameInput& frame) noexcept {
     }
     return false;
   }
-  margin_sec_ =
-      frame.full_rate_cost95_sec < kExitLoadFraction * frame.vblank_period_sec
-          ? margin_sec_ + frame.frame_sec
-          : 0.0;
-  if (margin_sec_ >= kExitSec - 1e-9) {
+  // Margin: the full-rate cost fits, and the half-rate presents are not
+  // missing either (a cause HalfRate does not cure keeps it).
+  const bool cost_margin =
+      frame.full_rate_cost95_sec < kExitLoadFraction * frame.vblank_period_sec;
+  margin_sec_ = cost_margin && !misses ? margin_sec_ + frame.frame_sec : 0.0;
+  if (margin_sec_ >= dwell_sec_ - 1e-9) {
     ClearWindow();
     over_budget_sec_ = 0.0;
     margin_sec_ = 0.0;
     active_ = false;
+    exited_ = true;
+    since_exit_sec_ = 0.0;
     ++exits_;
     return true;
   }

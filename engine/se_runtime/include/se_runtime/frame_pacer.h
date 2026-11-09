@@ -23,16 +23,18 @@
 //                to the port, and the present is registered with its target
 //                vblank for the miss count.
 //   EndFrame     nothing while Modal or when the frame presented nothing.
-//                Every wait on the waitable polls first, then blocks; when
-//                there are no statistics, a blocked wait's return on the
-//                vblank grid gives the hit or miss of the present it
-//                waited for (WaitTracker, ADR-066).
+//                Every wait on the waitable polls first, then blocks; a
+//                blocked wait's return on the vblank grid gives the hit or
+//                miss of the present it waited for (WaitTracker, ADR-066)
+//                and the take that calibrates the statistics' own check
+//                (ADR-072).
 //                Paced: the waitable, then SDL_DelayNS to the predicted
 //                vblank of the window's output minus B(next) (never spins).
 //                Standard: the waitable when present, then
-//                SDL_WaitForGPUSwapchain; in HalfRate the last composite is
-//                presented again (RepresentLast) and waited for the same
-//                way. VRR: the waitable, then
+//                SDL_WaitForGPUSwapchain; in HalfRate, after a frame whose
+//                present was taken at the first vblank after its start, the
+//                last composite is presented again (RepresentLast) and
+//                waited for the same way (ADR-071). VRR: the waitable, then
 //                the self-paced deadline. HalfRate and the adaptive frame
 //                latency are updated here.
 //
@@ -46,6 +48,7 @@
 #ifndef SE_RUNTIME_FRAME_PACER_H_
 #define SE_RUNTIME_FRAME_PACER_H_
 
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -133,6 +136,11 @@ struct PacerFrame {
   // window DWM composes they count DWM's displayed refresh (ADR-066).
   std::uint32_t stats_resolved = 0;
   std::uint32_t stats_missed = 0;
+  // Those with a known refresh, by the refreshes they were shown after
+  // their targets, and after the vblank the latency wait saw them taken at
+  // (CheckStatistics, ADR-072).
+  std::array<std::uint32_t, PresentTracker::kLatenessBins> stats_lateness{};
+  std::array<std::uint32_t, PresentTracker::kLatenessBins> stats_delay{};
   // A blocked latency wait resolved this frame's present: its return's
   // offset from the vblank the present was taken at.
   bool wait_blocked = false;
@@ -169,6 +177,8 @@ struct PacerTotals {
   // targets by them, whether or not they were the source.
   std::uint64_t stats_resolved = 0;
   std::uint64_t stats_missed = 0;
+  std::array<std::uint64_t, PresentTracker::kLatenessBins> stats_lateness{};
+  std::array<std::uint64_t, PresentTracker::kLatenessBins> stats_delay{};
   std::uint64_t stats_resets = 0;
   std::uint64_t represents = 0;
   std::uint64_t mode_changes = 0;
@@ -245,8 +255,10 @@ class FramePacer {
   [[nodiscard]] SamplerSample Sample(const VblankReading& reading) const;
   void RegisterPresent(std::uint64_t target_ns);
   // The waitable: a poll, then a bounded wait; its result feeds the
-  // WaitTracker when there are no statistics.
-  void WaitWaitable(std::uint64_t& now_ns);
+  // WaitTracker (the miss source when it can resolve the frame's present)
+  // and the statistics' composition delay, and is returned (empty without
+  // a waitable or in VRR).
+  WaitTracker::Result WaitWaitable(std::uint64_t& now_ns);
   void AddWaitResult(const WaitTracker::Result& result);
   void UpdatePolicies(const StepPlan& next, const FrameCosts& costs, bool modal,
                       const WaitTracker::Result& carried);
@@ -290,6 +302,9 @@ class FramePacer {
   std::uint64_t vrr_deadline_ns_ = 0;
   // The present this frame registers: its target.
   std::uint64_t frame_target_ns_ = 0;
+  // Standard HalfRate: the vblank the previous frame's own present was
+  // taken at (0: none known).
+  std::uint64_t half_rate_take_ns_ = 0;
   std::uint64_t last_present_id_ = 0;
   std::uint64_t submitted_ = 0;
   bool presented_this_frame_ = false;

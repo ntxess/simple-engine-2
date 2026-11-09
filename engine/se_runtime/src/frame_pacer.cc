@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <format>
 #include <string>
@@ -79,6 +80,7 @@ void FramePacer::Attach(PresentPort* port, VblankReader sampler) {
   latency_.Reset();
   target_ns_ = 0;
   vrr_deadline_ns_ = 0;
+  half_rate_take_ns_ = 0;
   last_present_id_ = 0;
   paced_since_ns_ = 0;
   if (port_ != nullptr && caps_.frame_latency_waitable) {
@@ -113,6 +115,7 @@ void FramePacer::SetDisplayRefresh(double hz) {
 void FramePacer::OnOutputChanged() {
   AssertMainThread();
   target_ns_ = 0;
+  half_rate_take_ns_ = 0;
   last_present_id_ = 0;
   paced_since_ns_ = 0;
   tracker_.Reset();
@@ -126,6 +129,7 @@ void FramePacer::ResetClock() noexcept {
   measured_vblank_sec_ = 0.0;
   target_ns_ = 0;
   vrr_deadline_ns_ = 0;
+  half_rate_take_ns_ = 0;
   tracker_.Reset();
   wait_tracker_.Reset();
 }
@@ -191,6 +195,7 @@ void FramePacer::SetMode(PacingMode mode, std::string_view reason) {
     ++totals_.mode_changes;
     target_ns_ = 0;
     vrr_deadline_ns_ = 0;
+    half_rate_take_ns_ = 0;
     last_present_id_ = 0;
     tracker_.Reset();
     wait_tracker_.Reset();
@@ -242,8 +247,14 @@ FrameClock FramePacer::BeginFrame(bool modal, FixedStepper& stepper) {
       frame_.stats_resolved = stats_result.resolved;
       frame_.stats_missed = stats_result.missed;
       frame_.stats_reset = stats_result.reset;
+      frame_.stats_lateness = stats_result.lateness;
+      frame_.stats_delay = stats_result.delay;
       totals_.stats_resolved += stats_result.resolved;
       totals_.stats_missed += stats_result.missed;
+      for (std::size_t bin = 0; bin < stats_result.lateness.size(); ++bin) {
+        totals_.stats_lateness[bin] += stats_result.lateness[bin];
+        totals_.stats_delay[bin] += stats_result.delay[bin];
+      }
       if (stats_result.reset) ++totals_.stats_resets;
     }
   }
@@ -308,14 +319,28 @@ FrameClock FramePacer::BeginFrame(bool modal, FixedStepper& stepper) {
       frame_target_ns_ = target_ns_;
     } else {
       start = GridFloor(now, reading.last_vblank_ns, vblank_ns);
-      // The target: one interval after the latest vblank, where a time just
-      // after a true vblank but before the sampler's stamp of it counts as
-      // after it (ADR-066); else a present taken at the next vblank would
-      // count as one late.
+      // The latest vblank, where a time just after a true vblank but before
+      // the sampler's stamp of it counts as after it (ADR-066); else a
+      // present taken at the next vblank would count as one late.
       const std::uint64_t latest =
           GridFloor(now + ToNs(EarlySlackNs(vblank_ns) * 1e-9),
                     reading.last_vblank_ns, vblank_ns);
-      frame_target_ns_ = latest + ToNs(present_ns * 1e-9);
+      if (mode_ == PacingMode::kStandard) {
+        // The frame starts just after a flip and presents at the next
+        // vblank. In HalfRate a frame holds the screen for two vblanks: its
+        // present targets two vblanks after the previous frame's own was
+        // taken, unless that has passed (ADR-071).
+        frame_target_ns_ = latest + ToNs(vblank_ns * 1e-9);
+        if (interval == 2 && half_rate_take_ns_ != 0) {
+          frame_target_ns_ =
+              std::max(frame_target_ns_,
+                       GridNearest(half_rate_take_ns_ + ToNs(present_ns * 1e-9),
+                                   reading.last_vblank_ns, vblank_ns));
+        }
+      } else {
+        // Paced without a target yet: one interval on.
+        frame_target_ns_ = latest + ToNs(present_ns * 1e-9);
+      }
     }
     clock.period_sec = period.period_sec * interval;
     clock.vblanks_known = true;
@@ -412,8 +437,8 @@ void FramePacer::Sleep(std::uint64_t now_ns, std::uint64_t wake_ns) {
                                 : -ToSec(wake_ns - woke));
 }
 
-void FramePacer::WaitWaitable(std::uint64_t& now_ns) {
-  if (!caps_.frame_latency_waitable) return;
+WaitTracker::Result FramePacer::WaitWaitable(std::uint64_t& now_ns) {
+  if (!caps_.frame_latency_waitable) return {};
   const std::uint64_t start = clock_->NowNs();
   // A poll first: only a wait that blocked returned when its present was
   // taken from the queue.
@@ -428,11 +453,16 @@ void FramePacer::WaitWaitable(std::uint64_t& now_ns) {
   frame_.waitable_wait_ns += now_ns - start;
   ++totals_.waitable_waits;
   if (result == PresentWait::kTimeout) ++totals_.waitable_timeouts;
-  if (mode_ == PacingMode::kVrr) return;
+  if (mode_ == PacingMode::kVrr) return {};
   const WaitTracker::Result waited =
       wait_tracker_.OnWait(result == PresentWait::kReady, blocked, now_ns,
                            latency_.Latency(), vblank_period_sec_ * kNsPerSec);
+  // The take calibrates the statistics' composition delay (ADR-072).
+  if (waited.blocked && caps_.present_stats) {
+    tracker_.OnPresentTaken(waited.target_ns, waited.take_ns);
+  }
   if (frame_.miss_source == MissSource::kLatencyWait) AddWaitResult(waited);
+  return waited;
 }
 
 void FramePacer::AddWaitResult(const WaitTracker::Result& result) {
@@ -480,11 +510,13 @@ void FramePacer::UpdatePolicies(const StepPlan& next, const FrameCosts& costs,
     if (half_rate_.OnFrame(input)) {
       if (half_rate_.Active()) {
         ++totals_.half_rate_entries;
+        // The window restarts at entry: log the fraction that entered.
         SE_LOG_INFO(
-            "pacing: HalfRate on at {:.2f} Hz (misses {:.1f}%, "
-            "full-rate cost {:.2f} ms)",
-            1.0 / vblank, 100.0 * half_rate_.MissFraction(),
-            input.planned_full_rate_sec * 1e3);
+            "pacing: HalfRate on at {:.2f} Hz by {} (misses {:.1f}% over "
+            "2 s, full-rate cost {:.2f} ms); leaves after {:.0f} s of margin",
+            1.0 / vblank, half_rate_.EnteredByCost() ? "cost" : "misses",
+            100.0 * half_rate_.EntryMissFraction(),
+            input.planned_full_rate_sec * 1e3, half_rate_.ExitDwellSec());
       } else {
         ++totals_.half_rate_exits;
         SE_LOG_INFO("pacing: HalfRate off ({:.2f} Hz)", 1.0 / vblank);
@@ -548,17 +580,44 @@ void FramePacer::EndFrame(const StepPlan& next, const FrameCosts& costs,
       break;
     }
     case PacingMode::kStandard: {
-      WaitWaitable(now);
+      const WaitTracker::Result own = WaitWaitable(now);
       wait_swapchain();
-      if (PresentInterval() == 2) {
-        // HalfRate: the same composite again, so each frame shows for two
-        // vblanks.
+      if (PresentInterval() != 2) {
+        half_rate_take_ns_ = 0;
+        break;
+      }
+      // HalfRate: each frame holds the screen for two vblanks. A frame whose
+      // present was taken at the first vblank after its start presents the
+      // same composite again for the second; a slower one already holds
+      // the screen until the next frame's present, and a re-present would
+      // make it three (ADR-071). Off the vblank grid it always re-presents.
+      bool represent = true;
+      std::uint64_t represent_target = 0;
+      half_rate_take_ns_ = 0;
+      const VblankReading reading = sampler_ ? sampler_(now) : VblankReading{};
+      if (frame_target_ns_ != 0 && reading.valid) {
+        const double vblank_ns = vblank_period_sec_ * kNsPerSec;
+        const std::uint64_t slack = ToNs(EarlySlackNs(vblank_ns) * 1e-9);
+        // The take: where a blocked wait for this very present (frame
+        // latency 1) returned; else the earliest it can be, the first
+        // vblank after the submit (a wait that was ready at once, the
+        // D3D12 waitable signalled at an idle vblank, or no waitable).
+        half_rate_take_ns_ = GridNearest(
+            own.blocked && own.take_ns != 0 && latency_.Latency() == 1
+                ? own.take_ns
+                : GridFloor(frame_.submit_ns + slack, reading.last_vblank_ns,
+                            vblank_ns) +
+                      ToNs(vblank_period_sec_),
+            reading.last_vblank_ns, vblank_ns);
+        represent = half_rate_take_ns_ <
+                    frame_.frame_start_ns + ToNs(1.5 * vblank_period_sec_);
+        represent_target = half_rate_take_ns_ + ToNs(vblank_period_sec_);
+      }
+      if (represent) {
         frame_.represented = port_->RepresentLast();
         if (frame_.represented) {
           ++totals_.represents;
-          RegisterPresent(frame_target_ns_ != 0
-                              ? frame_target_ns_ + ToNs(vblank_period_sec_)
-                              : 0);
+          RegisterPresent(represent_target);
           WaitWaitable(now);
           wait_swapchain();
         }

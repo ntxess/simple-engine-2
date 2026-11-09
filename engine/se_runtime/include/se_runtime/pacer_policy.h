@@ -19,8 +19,8 @@
 //   PresentTracker  hits and misses from present statistics: a present
 //                   shown after its target refresh is a miss.
 //   WaitTracker     hits and misses from the frame-latency wait on the
-//                   vblank grid, where the presentation path gives no
-//                   statistics (a composed window; ADR-066).
+//                   vblank grid, the pacer's source whenever it can resolve
+//                   a present (ADR-066).
 //   HalfRatePolicy  HalfRate above 100 Hz with hysteresis.
 //   LatencyPolicy   frame latency 1, or 2 when CPU and GPU each fit in the
 //                   period but their sum does not.
@@ -98,9 +98,9 @@ struct ModeChoice {
 
 // Paced when requested or the platform default, and the waitable and a
 // valid fixed-refresh sampler that agrees with the display mode exist (its
-// misses come from present statistics when the presentation path produces
-// them, else from the latency wait on the sampler's grid: ADR-066); VRR
-// when requested and tearing is supported; Standard otherwise.
+// misses come from the latency wait on the sampler's grid, with present
+// statistics counted beside it: ADR-066, ADR-072); VRR when requested and
+// tearing is supported; Standard otherwise.
 [[nodiscard]] ModeChoice ChooseMode(const ModeInputs& inputs) noexcept;
 
 enum class PeriodSource : std::uint8_t {
@@ -205,6 +205,8 @@ struct VrrDeadline {
 class PresentTracker {
  public:
   static constexpr std::size_t kCapacity = 16;
+  // Refresh-count bins: 0 (or fewer), 1, 2, 3, and 4 or more.
+  static constexpr std::size_t kLatenessBins = 5;
 
   struct Result {
     // Presents the statistics resolved, and the late ones among them.
@@ -212,6 +214,13 @@ class PresentTracker {
     std::uint32_t missed = 0;
     // Refreshes the late ones were shown after their targets, summed.
     std::uint64_t late_refreshes = 0;
+    // The resolved presents whose refresh the statistics tell (named, or
+    // shown between two samples, at the earliest), by the refreshes they
+    // were shown after their targets (ADR-072).
+    std::array<std::uint32_t, kLatenessBins> lateness{};
+    // The named ones whose take (OnPresentTaken) is known, by the
+    // refreshes they were shown after it: the path's composition delay.
+    std::array<std::uint32_t, kLatenessBins> delay{};
     // The statistics restarted: pending presents were dropped.
     bool reset = false;
   };
@@ -220,6 +229,9 @@ class PresentTracker {
   // A full queue drops its oldest entry (counted in Dropped()).
   void OnPresentIssued(std::uint64_t present_id,
                        std::uint64_t target_ns) noexcept;
+  // The frame-latency wait saw the pending present that targets
+  // |target_ns| taken at the vblank |take_ns|.
+  void OnPresentTaken(std::uint64_t target_ns, std::uint64_t take_ns) noexcept;
   // Resolves the pending presents |stats| shows displayed, with the
   // display's vblank period |period_ns|.
   Result OnStats(const PresentStatistics& stats, double period_ns) noexcept;
@@ -233,6 +245,8 @@ class PresentTracker {
   struct Entry {
     std::uint64_t id = 0;
     std::uint64_t target_ns = 0;
+    // 0: not known.
+    std::uint64_t take_ns = 0;
   };
   void PopFront() noexcept;
 
@@ -245,12 +259,32 @@ class PresentTracker {
   std::uint64_t resets_ = 0;
 };
 
-// Where a frame's hits and misses come from (ADR-066): present statistics
-// when the presentation path produces them (D3D12 in independent flip,
-// Vulkan with VK_GOOGLE_display_timing); else the frame-latency wait on the
-// vblank sampler's grid (a window DWM composes: D3D12's waitable, Vulkan's
-// present_wait); else nothing (no waitable, no sampler, VRR, a synthetic
-// clock).
+// Present statistics as a check of their own beside the pacer's source
+// (ADR-072). A window DWM composes shows every present some refreshes
+// after the vblank that took it (ADR-066), so the statistics are compared
+// with the targets after that composition delay, measured: the most
+// frequent of |delay| (shown minus taken, for presents whose take the
+// latency wait saw), else, without takes, the most frequent of |lateness|
+// (shown minus target); the smaller on a tie. Presents shown later than
+// their target plus that offset are the statistics' misses.
+struct StatisticsCheck {
+  // Presents with a known lateness, and with a known delay.
+  std::uint64_t counted = 0;
+  std::uint64_t delays = 0;
+  std::uint32_t offset = 0;
+  std::uint64_t beyond = 0;
+};
+[[nodiscard]] StatisticsCheck CheckStatistics(
+    const std::array<std::uint64_t, PresentTracker::kLatenessBins>& lateness,
+    const std::array<std::uint64_t, PresentTracker::kLatenessBins>&
+        delay) noexcept;
+
+// Where a frame's hits and misses come from (ADR-066): the frame-latency
+// wait on the vblank sampler's grid whenever it can resolve the frame's
+// present (D3D12's waitable, Vulkan's present_wait, with a target on the
+// grid); else present statistics (a path with statistics but no waitable,
+// such as Vulkan with VK_GOOGLE_display_timing and no present_wait); else
+// nothing (no waitable, no sampler, VRR, a synthetic clock).
 enum class MissSource : std::uint8_t { kNone, kStatistics, kLatencyWait };
 [[nodiscard]] std::string_view MissSourceName(MissSource source) noexcept;
 
@@ -287,9 +321,12 @@ class WaitTracker {
     std::uint64_t late_refreshes = 0;
     std::uint32_t unresolved = 0;
     // A blocked wait resolved a present: the return's offset from the
-    // vblank the present was taken at (diagnostics: the wake-up after it).
+    // vblank the present was taken at (diagnostics: the wake-up after it),
+    // the present's target and that vblank.
     bool blocked = false;
     std::int64_t phase_ns = 0;
+    std::uint64_t target_ns = 0;
+    std::uint64_t take_ns = 0;
   };
 
   // A present was issued at |submit_ns| for the vblank |target_ns| (0:
@@ -327,15 +364,22 @@ class WaitTracker {
 // HalfRate above 100 Hz, with hysteresis (docs/milestone-specs.md M6b):
 // entered when, over the last 2 s, more than 1% of the resolved presents
 // missed, or when a full-rate frame's planned cost (k_rt * S_hi + R_hi +
-// g_hi + m) has exceeded the vblank period for 2 s; left after 4 s of
-// margin, in which the full-rate p95 cost (k_rt * S_95 + R_95 + g_95 + m)
-// stayed below 0.75 of the vblank period. Modal frames neither count nor
-// reset the timers. At or below 100 Hz it is never active.
+// g_hi + m) has exceeded the vblank period for 2 s; left after a dwell of
+// margin (4 s at first), in which the full-rate p95 cost (k_rt * S_95 +
+// R_95 + g_95 + m) stayed below 0.75 of the vblank period and no more than
+// 1% of the presents resolved over the last 2 s at half rate missed. A
+// re-entry within kFlapSec of the previous exit doubles the dwell (up to
+// kMaxExitSec), so misses that HalfRate cures but full-rate cost does not
+// explain cannot make it flap; a later entry starts again at kExitSec
+// (ADR-071). Modal frames neither count nor reset the timers. At or below
+// 100 Hz it is never active.
 class HalfRatePolicy {
  public:
   static constexpr double kMinHz = 100.0;
   static constexpr double kEnterSec = 2.0;
   static constexpr double kExitSec = 4.0;
+  static constexpr double kMaxExitSec = 64.0;
+  static constexpr double kFlapSec = 10.0;
   static constexpr double kMissBudget = 0.01;
   static constexpr double kExitLoadFraction = 0.75;
 
@@ -361,8 +405,17 @@ class HalfRatePolicy {
   [[nodiscard]] int PresentInterval() const noexcept { return active_ ? 2 : 1; }
   [[nodiscard]] std::uint32_t Entries() const noexcept { return entries_; }
   [[nodiscard]] std::uint32_t Exits() const noexcept { return exits_; }
-  // The missed fraction over the last window (0 without presents).
+  // The missed fraction over the last window (0 without presents); the
+  // window restarts at each entry and exit.
   [[nodiscard]] double MissFraction() const noexcept;
+  // The last entry: the missed fraction over the 2 s before it, and whether
+  // the planned cost (rather than the misses) entered it.
+  [[nodiscard]] double EntryMissFraction() const noexcept {
+    return entry_miss_fraction_;
+  }
+  [[nodiscard]] bool EnteredByCost() const noexcept { return entered_by_cost_; }
+  // The margin the current (or next) HalfRate needs before it is left.
+  [[nodiscard]] double ExitDwellSec() const noexcept { return dwell_sec_; }
 
  private:
   static constexpr std::size_t kWindowFrames = 2048;
@@ -384,6 +437,12 @@ class HalfRatePolicy {
   bool active_ = false;
   std::uint32_t entries_ = 0;
   std::uint32_t exits_ = 0;
+  double entry_miss_fraction_ = 0.0;
+  bool entered_by_cost_ = false;
+  double dwell_sec_ = kExitSec;
+  // Time at full rate since the last exit (none yet: no back-off).
+  double since_exit_sec_ = 0.0;
+  bool exited_ = false;
 };
 
 // Frame latency: |base| (1, or 2 for the editor), or 2 when the CPU and

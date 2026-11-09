@@ -509,6 +509,79 @@ TEST_CASE("HalfRate in Standard presents the last composite again", "[pacer]") {
   REQUIRE(loop.pacer.Totals().half_rate_exits == 1);
 }
 
+// Standard with the waitable: the latency wait is the miss source.
+FramePacerConfig StandardConfig() {
+  FramePacerConfig config = WindowsConfig();
+  config.request = PacingRequest::kStandard;
+  return config;
+}
+
+TEST_CASE("Standard HalfRate: a frame's present one vblank late is a miss",
+          "[pacer]") {
+  const testing::MainThreadScope main;
+  Loop loop(Windowed(), StandardConfig());
+  // A full-rate frame plans more than the period; the frames themselves
+  // are fast (1 ms), so each is taken at the vblank after its start and
+  // presented again at the next one.
+  loop.costs.non_tick_hi = 5.0e-3;
+  loop.costs.non_tick_95 = 5.0e-3;
+  loop.Attach();
+  REQUIRE(loop.pacer.Mode() == PacingMode::kStandard);
+  loop.Run(2.5);
+  REQUIRE(loop.pacer.HalfRate());
+  for (int i = 0; i < 20; ++i) loop.Step();
+  const PacerTotals& totals = loop.pacer.Totals();
+  REQUIRE(totals.missed_presents == 0);
+  REQUIRE(totals.represents >= 20);
+  for (std::size_t i = loop.frames.size() - 19; i < loop.frames.size(); ++i) {
+    const PacerFrame& frame = loop.frames[i].pacer;
+    CHECK(frame.represented);
+    // The frame's own present targets the vblank after its start.
+    CHECK(std::abs(static_cast<double>(frame.target_ns - frame.frame_start_ns) -
+                   kPeriod165) < 2.0);
+  }
+  // The next frame's own present shows one vblank late (ADR-071).
+  loop.port.LatePresents(1);
+  for (int i = 0; i < 6; ++i) loop.Step();
+  REQUIRE(totals.missed_presents >= 1);
+}
+
+TEST_CASE("Standard HalfRate: a frame slower than a vblank holds two",
+          "[pacer]") {
+  const testing::MainThreadScope main;
+  // With the waitable the take is where the wait returned; without it, the
+  // first vblank after the submit.
+  PresentCaps caps = Windowed();
+  SECTION("the waitable") {}
+  SECTION("no waitable") { caps = Unpatched(); }
+  Loop loop(caps, StandardConfig());
+  loop.costs.non_tick_hi = 5.0e-3;
+  loop.costs.non_tick_95 = 5.0e-3;
+  loop.Attach();
+  // 8 ms frames: more than one vblank (6.06 ms), less than two.
+  constexpr std::uint64_t kSlow = 8'000'000;
+  // HalfRate's timers count presentation periods: these frames take two.
+  loop.Run(5.0, kSlow);
+  REQUIRE(loop.pacer.HalfRate());
+  for (int i = 0; i < 5; ++i) loop.Step(kSlow);
+  const PacerTotals& totals = loop.pacer.Totals();
+  const std::uint64_t represents = totals.represents;
+  const std::uint64_t missed = totals.missed_presents;
+  for (int i = 0; i < 20; ++i) loop.Step(kSlow);
+  // Taken at the second vblank: no re-present (it would hold the frame
+  // for three), frames two vblanks apart, every present on time.
+  CHECK(totals.represents == represents);
+  CHECK(totals.missed_presents == missed);
+  for (std::size_t i = loop.frames.size() - 19; i < loop.frames.size(); ++i) {
+    const FrameClock& clock = loop.frames[i].clock;
+    const double apart =
+        static_cast<double>(clock.frame_start_ns - clock.prev_frame_start_ns);
+    CHECK(std::abs(apart - 2.0 * kPeriod165) < 2.0);
+    REQUIRE(clock.elapsed_vblanks == 1);
+    CHECK_FALSE(loop.frames[i].pacer.represented);
+  }
+}
+
 TEST_CASE("Paced HalfRate targets every second vblank", "[pacer]") {
   const testing::MainThreadScope main;
   Loop loop(Patched());

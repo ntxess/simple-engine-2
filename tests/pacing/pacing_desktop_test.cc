@@ -30,8 +30,10 @@
 #include <SDL3/SDL_video.h>
 
 #include <algorithm>
+#include <array>
 #include <catch2/catch_test_macros.hpp>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -656,13 +658,34 @@ void PacedMisses(std::string_view driver, bool gate) {
   std::uint64_t resolved = 0;
   std::uint64_t missed = 0;
   std::uint64_t late_vblanks = 0;
+  std::array<std::uint64_t, PresentTracker::kLatenessBins> lateness{};
+  std::array<std::uint64_t, PresentTracker::kLatenessBins> delay{};
   for (const PacerFrame& frame : run.frames) {
     if (frame.mode != PacingMode::kPaced) continue;
     ++paced_frames;
     resolved += frame.resolved;
     missed += frame.missed;
     late_vblanks += frame.late_vblanks;
+    for (std::size_t bin = 0; bin < lateness.size(); ++bin) {
+      lateness[bin] += frame.stats_lateness[bin];
+      delay[bin] += frame.stats_delay[bin];
+    }
   }
+  // The M6 exit counts misses "by present statistics": the statistics'
+  // own check beside the pacer's source, after the composition delay
+  // measured from the latency wait's takes (ADR-072).
+  const StatisticsCheck stats = CheckStatistics(lateness, delay);
+  Print(std::format(
+      "present statistics on {}: {} presents with a known refresh, shown "
+      "0/1/2/3/4+ refreshes after their targets {}/{}/{}/{}/{}; {} with a "
+      "known take, shown after it {}/{}/{}/{}/{}: composition delay {} "
+      "refresh(es); {} ({:.2f}%) shown later than target + delay",
+      run.driver, stats.counted, lateness[0], lateness[1], lateness[2],
+      lateness[3], lateness[4], stats.delays, delay[0], delay[1], delay[2],
+      delay[3], delay[4], stats.offset, stats.beyond,
+      stats.counted > 0 ? 100.0 * static_cast<double>(stats.beyond) /
+                              static_cast<double>(stats.counted)
+                        : 0.0));
   Print(std::format(
       "Paced at {:.3f} Hz (display mode {:.3f} Hz) on {}: {} frames counted "
       "({} Paced), {} presents resolved, {} missed ({:.2f}%, {} vblanks "
@@ -685,6 +708,22 @@ void PacedMisses(std::string_view driver, bool gate) {
                                   "Vulkan in a window)");
   } else {
     CHECK(under);
+  }
+  // Where the path gives statistics for most presents (D3D12 in a window
+  // with the display awake), fewer than 1% of them may be shown later than
+  // their target plus the composition delay.
+  if (stats.counted * 10 < resolved * 8) {
+    Print("present statistics: too few to check on " + run.driver);
+    return;
+  }
+  CHECK(stats.delays * 10 >= stats.counted * 8);
+  const bool stats_under = stats.beyond * 100 < stats.counted;
+  if (!stats_under && desktop.Busy()) {
+    WARN("present statistics late with a busy desktop: " << desktop.Report());
+  } else if (!stats_under && !gate) {
+    WARN("present statistics late on " << run.driver << " (reported)");
+  } else {
+    CHECK(stats_under);
   }
 }
 

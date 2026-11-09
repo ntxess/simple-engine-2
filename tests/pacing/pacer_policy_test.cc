@@ -8,11 +8,14 @@
 
 #include "se_runtime/pacer_policy.h"
 
+#include <array>
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <cmath>
 #include <cstdint>
+#include <functional>
 #include <limits>
+#include <vector>
 
 #include "se_core/time.h"
 #include "se_runtime/present_port.h"
@@ -363,6 +366,7 @@ TEST_CASE("Misses: one late present", "[pacer]") {
   REQUIRE(result.resolved == 1);
   REQUIRE(result.missed == 1);
   REQUIRE(result.late_refreshes == 1);
+  CHECK(result.lateness == std::array<std::uint32_t, 5>{0, 1, 0, 0, 0});
   tracker.OnPresentIssued(4, RefreshTime(1005));
   result = tracker.OnStats(Stats(3, 1004, 4), kPeriod100);
   REQUIRE(result.missed == 0);
@@ -404,6 +408,8 @@ TEST_CASE("Misses: presents shown between two samples", "[pacer]") {
   REQUIRE(result.resolved == 3);
   REQUIRE(result.missed == 1);
   REQUIRE(result.late_refreshes == 3);
+  // 5 and 6 at their earliest (on time), 7 three refreshes late.
+  CHECK(result.lateness == std::array<std::uint32_t, 5>{2, 0, 0, 1, 0});
 }
 
 TEST_CASE("Misses: the statistics reset after a mode change", "[pacer]") {
@@ -430,6 +436,67 @@ TEST_CASE("Misses: the statistics reset after a mode change", "[pacer]") {
   CHECK(result.reset);
   // Nothing displayed yet resolves nothing.
   REQUIRE(tracker.OnStats(PresentStatistics{}, kPeriod100).resolved == 0);
+}
+
+using Bins = std::array<std::uint64_t, PresentTracker::kLatenessBins>;
+
+// 200 presents targeting refreshes 1001..1200, each taken at its target as
+// the latency wait saw it, and shown |delay| refreshes after the take
+// (DWM's composition); present 100 is taken one refresh late.
+void Composed(std::uint64_t delay, Bins& lateness, Bins& delays) {
+  PresentTracker tracker;
+  for (std::uint64_t i = 1; i <= 200; ++i) {
+    const std::uint64_t take = i == 100 ? 1000 + i + 1 : 1000 + i;
+    tracker.OnPresentIssued(i, RefreshTime(1000 + i));
+    tracker.OnPresentTaken(RefreshTime(1000 + i), RefreshTime(take));
+    const auto result = tracker.OnStats(Stats(i, take + delay, i), kPeriod100);
+    for (std::size_t bin = 0; bin < lateness.size(); ++bin) {
+      lateness[bin] += result.lateness[bin];
+      delays[bin] += result.delay[bin];
+    }
+  }
+}
+
+TEST_CASE("Statistics' own check: misses beyond the composition delay",
+          "[pacer]") {
+  for (const std::uint64_t delay : {0U, 1U, 2U}) {
+    INFO("composition delay " << delay);
+    Bins lateness{};
+    Bins delays{};
+    Composed(delay, lateness, delays);
+    const StatisticsCheck check = CheckStatistics(lateness, delays);
+    REQUIRE(check.counted == 200);
+    REQUIRE(check.delays == 200);
+    // Measured from the takes, whatever the targets say.
+    CHECK(check.offset == delay);
+    REQUIRE(check.beyond == 1);
+  }
+  // Every present taken one late and shown after DWM's two refreshes: the
+  // delay from the takes is still 2, so all 200 are beyond it, which the
+  // most frequent lateness alone (3) would hide.
+  PresentTracker tracker;
+  Bins lateness{};
+  Bins delays{};
+  for (std::uint64_t i = 1; i <= 200; ++i) {
+    tracker.OnPresentIssued(i, RefreshTime(1000 + i));
+    tracker.OnPresentTaken(RefreshTime(1000 + i), RefreshTime(1001 + i));
+    const auto result = tracker.OnStats(Stats(i, 1003 + i, i), kPeriod100);
+    for (std::size_t bin = 0; bin < lateness.size(); ++bin) {
+      lateness[bin] += result.lateness[bin];
+      delays[bin] += result.delay[bin];
+    }
+  }
+  const StatisticsCheck late = CheckStatistics(lateness, delays);
+  REQUIRE(late.offset == 2);
+  REQUIRE(late.beyond == 200);
+  REQUIRE(CheckStatistics(lateness, Bins{}).beyond == 0);
+
+  // Without takes, the most frequent lateness; the smaller on a tie.
+  REQUIRE(CheckStatistics({300, 2, 0, 0, 0}, Bins{}).offset == 0);
+  REQUIRE(CheckStatistics({300, 2, 0, 0, 0}, Bins{}).beyond == 2);
+  REQUIRE(CheckStatistics({5, 5, 0, 0, 0}, Bins{}).offset == 0);
+  REQUIRE(CheckStatistics(Bins{}, Bins{}).counted == 0);
+  REQUIRE(CheckStatistics(Bins{}, Bins{}).beyond == 0);
 }
 
 TEST_CASE("Misses: a full queue drops its oldest present", "[pacer]") {
@@ -658,6 +725,98 @@ TEST_CASE("HalfRate: entry by misses over 2 s, exit after 4 s of margin",
   REQUIRE(left <= 662);
   CHECK_FALSE(policy.Active());
   REQUIRE(policy.Exits() == 1);
+}
+
+TEST_CASE("HalfRate keeps the miss fraction that entered it", "[pacer]") {
+  HalfRatePolicy policy;
+  // 2% misses (1 in 50) for 3 s: entered by misses.
+  REQUIRE(RunFor(policy, 3.0, 50, 0.004, 0.004) > 0);
+  REQUIRE(policy.Active());
+  CHECK_FALSE(policy.EnteredByCost());
+  CHECK(policy.EntryMissFraction() == Catch::Approx(0.02).margin(0.002));
+  // The window restarted at the entry: what the log printed before.
+  CHECK(policy.MissFraction() == 0.0);
+  CHECK(policy.ExitDwellSec() == HalfRatePolicy::kExitSec);
+
+  HalfRatePolicy by_cost;
+  REQUIRE(RunFor(by_cost, 3.0, 0, 1.2 * k165, 0.9 * k165) > 0);
+  CHECK(by_cost.EnteredByCost());
+  CHECK(by_cost.EntryMissFraction() == 0.0);
+}
+
+// HalfRate over |sec| of virtual time at 165 Hz, the frames as long as
+// the presentation interval, each resolving one present; |miss_rate| gives
+// the fraction of presents missed at a time and rate (spread evenly), the
+// full-rate cost leaves margin. Returns the times of entries and exits.
+struct Transitions {
+  std::vector<double> entries;
+  std::vector<double> exits;
+};
+Transitions Simulate(HalfRatePolicy& policy, double& now, double sec,
+                     const std::function<double(double, bool)>& miss_rate) {
+  Transitions out;
+  double owed = 0.0;
+  const double end = now + sec;
+  while (now < end) {
+    const bool half = policy.Active();
+    owed += miss_rate(now, half);
+    std::uint32_t missed = 0;
+    if (owed >= 1.0) {
+      missed = 1;
+      owed -= 1.0;
+    }
+    HalfRatePolicy::FrameInput frame = Frame165(missed, 0.004, 0.004);
+    frame.frame_sec = k165 * policy.PresentInterval();
+    now += frame.frame_sec;
+    if (policy.OnFrame(frame)) {
+      (policy.Active() ? out.entries : out.exits).push_back(now);
+    }
+  }
+  return out;
+}
+
+TEST_CASE("HalfRate does not flap at a miss load it does not cure", "[pacer]") {
+  // 3% of the presents miss at either rate, at a low cost: entered once,
+  // then kept (the half-rate presents miss too).
+  HalfRatePolicy policy;
+  double now = 0.0;
+  const Transitions flaps =
+      Simulate(policy, now, 30.0, [](double, bool) { return 0.03; });
+  REQUIRE(flaps.entries.size() == 1);
+  CHECK(flaps.exits.empty());
+  CHECK(policy.Active());
+}
+
+TEST_CASE("HalfRate backs off when misses return soon after it leaves",
+          "[pacer]") {
+  // 3% of the full-rate presents miss, none at half rate, and the
+  // full-rate cost leaves margin: each stay ends after its dwell, and each
+  // re-entry within 10 s doubles the next dwell.
+  HalfRatePolicy policy;
+  double now = 0.0;
+  const auto misses = [](double, bool half) { return half ? 0.0 : 0.03; };
+  const Transitions flaps = Simulate(policy, now, 60.0, misses);
+  INFO("entries " << flaps.entries.size() << ", exits " << flaps.exits.size());
+  REQUIRE(flaps.entries.size() <= 4);
+  REQUIRE(flaps.exits.size() >= 3);
+  // Stays of 4, 8 and 16 s.
+  for (std::size_t i = 0; i < 3; ++i) {
+    const double stay = flaps.exits[i] - flaps.entries[i];
+    CHECK(stay ==
+          Catch::Approx(4.0 * static_cast<double>(1U << i)).margin(0.05));
+  }
+  // Quiet at full rate for longer than kFlapSec: the next entry starts
+  // again at 4 s.
+  if (policy.Active()) {
+    static_cast<void>(
+        Simulate(policy, now, 70.0, [](double, bool) { return 0.0; }));
+  }
+  REQUIRE_FALSE(policy.Active());
+  static_cast<void>(
+      Simulate(policy, now, 12.0, [](double, bool) { return 0.0; }));
+  const Transitions again = Simulate(policy, now, 3.0, misses);
+  REQUIRE(again.entries.size() == 1);
+  CHECK(policy.ExitDwellSec() == HalfRatePolicy::kExitSec);
 }
 
 TEST_CASE("HalfRate: misses below 1% never enter", "[pacer]") {

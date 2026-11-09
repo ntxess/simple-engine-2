@@ -49,6 +49,7 @@
 #include "se_runtime/frame_pacer.h"
 #include "se_runtime/integration.h"
 #include "se_runtime/lifecycle.h"
+#include "se_runtime/pacer_policy.h"
 #include "se_runtime/quit.h"
 #include "se_runtime/render_present_port.h"
 #include "se_sim/game_module.h"
@@ -866,11 +867,19 @@ SDL_AppResult App::Iterate() {
     }
   }
 
+  const bool probe_rendered = report.rendered;
+
   // The N-L fence, present statistics into hits and misses (reported to
   // the stepper), and the FrameClock.
   const FrameClock frame_clock =
       pacer_.BeginFrame(lifecycle_.Modal(), stepper_);
   report.clock = frame_clock;
+  // The probe's frame went out before BeginFrame (it decides whether this
+  // iterate leaves Suspended): report it to this frame like any other, so
+  // that the pacer counts it and EndFrame waits for its present (ADR-071).
+  if (probe_rendered) {
+    pacer_.OnFrameSubmitted(report.presented, report.render.null_acquire);
+  }
   // The N-L fence wait is GPU time, not CPU work: it stays out of R.
   const double fence_wait_sec =
       static_cast<double>(pacer_.LastFrame().fence_wait_ns) * kNsToSec;
@@ -1066,6 +1075,21 @@ SDL_AppResult App::Shutdown(SDL_AppResult result) {
       pacing.resolved_by_statistics, pacing.resolved_by_wait,
       pacing.unresolved_waits, pacing.half_rate_entries, pacing.sleeps,
       pacing.fence_waits);
+  if (pacing.stats_resolved > 0) {
+    // The statistics' own check (ADR-072).
+    const StatisticsCheck check =
+        CheckStatistics(pacing.stats_lateness, pacing.stats_delay);
+    const auto& late = pacing.stats_lateness;
+    const auto& delay = pacing.stats_delay;
+    SE_LOG_INFO(
+        "present statistics at shutdown: {} resolved; shown 0/1/2/3/4+ "
+        "refreshes after their targets {}/{}/{}/{}/{}, after their takes "
+        "{}/{}/{}/{}/{}; composition delay {}, {} later than target + "
+        "delay",
+        pacing.stats_resolved, late[0], late[1], late[2], late[3], late[4],
+        delay[0], delay[1], delay[2], delay[3], delay[4], check.offset,
+        check.beyond);
+  }
   if (device_recoveries_ > 0) {
     SE_LOG_INFO("device losses recovered: {}", device_recoveries_);
   }
