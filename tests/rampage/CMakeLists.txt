@@ -100,7 +100,10 @@ foreach(_se_name stress effects patrol)
                      ${_se_name})
 endforeach()
 
-# refcmp itself: a projection equals itself, and a changed stat is found.
+# refcmp itself: a projection equals itself, and a changed stat is found;
+# refcmp.planted pins each rule on planted projections (tools/refcmp/planted:
+# the tolerance boundaries, rotation wrap, stat text, missing entities and
+# ticks, and bad input).
 add_test(NAME refcmp.self
   COMMAND Python3::Interpreter "${_se_refcmp}"
           "${_se_ref}/v1/effects.seproj.gz" "${_se_ref}/v1/effects.seproj.gz")
@@ -109,8 +112,11 @@ add_test(NAME refcmp.detects_difference
           "${_se_ref}/v1/effects.seproj.gz" "${_se_ref}/v1/patrol.seproj.gz")
 set_tests_properties(refcmp.detects_difference PROPERTIES
   PASS_REGULAR_EXPRESSION "FIRST DIFFERENCE")
-set_tests_properties(refcmp.self refcmp.detects_difference PROPERTIES
-  LABELS "tools;rampage")
+add_test(NAME refcmp.planted
+  COMMAND Python3::Interpreter
+          "${CMAKE_SOURCE_DIR}/tools/refcmp/refcmp_test.py")
+set_tests_properties(refcmp.self refcmp.detects_difference refcmp.planted
+  PROPERTIES LABELS "tools;rampage")
 
 # se_replay runs the module (this replaces M2's replay.rampage_not_yet).
 add_test(NAME replay.rampage.sandbox_60hz
