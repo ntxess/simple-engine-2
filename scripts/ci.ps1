@@ -14,6 +14,8 @@
   scripts/ci.ps1 -Presets legacy-msvc-debug,legacy-msvc-release
                                        # the legacy reference (build + "legacy" tests)
   scripts/ci.ps1 -Legacy               # appends both legacy presets to the selection
+                                       # (built before the engine presets, which
+                                       # run the legacy build in a test)
   scripts/ci.ps1 -Desktop              # the desktop label (real windows on this
                                        # desktop) on msvc-dev and msvc-asan, and
                                        # pacing.unpatched_standard in
@@ -64,6 +66,22 @@ function ConvertTo-WslPath([string]$Path) {
   '/mnt/' + $full.Substring(0, 1).ToLowerInvariant() + ($full.Substring(2) -replace '\\', '/')
 }
 $failed = @()
+# Engine and legacy builds test each other: render.legacy_image.* runs the
+# legacy build's legacy_replay, and legacy.image_compare.* runs the engine
+# build's render_shot. Each must see the other built from this checkout, not
+# from an older one, so with both kinds selected the legacy presets are
+# built (not tested) first; their workflows then test after the engine's.
+$legacySelected = @($Presets | Where-Object { $_.StartsWith('legacy-') })
+$engineSelected = @($Presets | Where-Object {
+  -not $_.StartsWith('legacy-') -and -not $_.StartsWith('wsl:') })
+if ($legacySelected.Count -gt 0 -and $engineSelected.Count -gt 0) {
+  foreach ($preset in $legacySelected) {
+    Write-Host "=== build first: $preset ===" -ForegroundColor Cyan
+    $msvc = "`"$repo\scripts\with-msvc.cmd`""
+    & cmd.exe /c "$msvc cmake --preset $preset && $msvc cmake --build --preset $preset"
+    if ($LASTEXITCODE -ne 0) { $failed += "build:$preset" }
+  }
+}
 foreach ($preset in $Presets) {
   Write-Host "=== $preset ===" -ForegroundColor Cyan
   if ($preset.StartsWith('wsl:')) {
