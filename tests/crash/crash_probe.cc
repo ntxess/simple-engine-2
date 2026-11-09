@@ -214,13 +214,15 @@ InputFrame FrameOfTick(std::uint32_t t) {
   return frame;
 }
 
-// Writes frame |t| as the World owner's ring does: the slot's stamp is odd
-// while it is written, and the head is published after it.
+// Writes frame |t| as the World owner's ring does (InputFrameRing): frame n
+// has stamp 2n + 1 while it is written and 2n + 2 once it is complete, and
+// the head is published after it.
 void PushFrame(std::uint32_t t) {
-  InputFrameSlot& slot = g_input.slots[g_input.header.head % kInputCapacity];
-  ++slot.stamp;
+  const std::uint64_t index = g_input.header.head;
+  InputFrameSlot& slot = g_input.slots[index % kInputCapacity];
+  slot.stamp = (2 * index) + 1;
   slot.frame = FrameOfTick(t);
-  ++slot.stamp;
+  slot.stamp = (2 * index) + 2;
   ++g_input.header.head;
 }
 
@@ -251,10 +253,11 @@ void FillStreams(std::uint64_t main_tid) {
   for (std::uint32_t t = 1; t <= kInputFrames; ++t) {
     PushFrame(t);
   }
-  // Tick 21 is being written when the dump is taken: its slot (the oldest
-  // frame, tick 5) has an odd stamp and the head still says 20.
+  // Tick 21 (frame 20) is being written when the dump is taken: its slot
+  // (the oldest frame, tick 5) has stamp 2 * 20 + 1 and the head still
+  // says 20.
   InputFrameSlot& torn = g_input.slots[g_input.header.head % kInputCapacity];
-  ++torn.stamp;
+  torn.stamp = (2 * g_input.header.head) + 1;
   torn.frame.tick = kInputFrames + 1;
 
   InitHeader(g_flight.header, DumpStreamKind::kFlightRecorder,

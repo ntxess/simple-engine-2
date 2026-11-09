@@ -830,6 +830,32 @@ and main never waits on it; a queue main fills and a semaphore it releases
 keep both true. Declaring hangs needs M12's GPU and compositor labels, so
 M4 gives the interface and the boot budget only, as the spec asks.
 
+## ADR-046 The dump reader checks every record against its index (2026-11-09)
+
+**Decision.** tools/minidump/read_dump.py relies on two writer rules and
+reports records that break them under "problems" (and `--strict`):
+- InputFrame stamps follow InputFrameRing: 2n + 1 while frame n is being
+  written, 2n + 2 once complete (se_core/input_frame_ring.h). A slot in
+  the ring must say "frame n, complete"; each record gets a `status` (ok,
+  torn, overwritten, not written) and the frame it `holds`, and only ok
+  slots are decoded. The crash probe writes its synthetic ring the same
+  way (it used to count writes per slot).
+- Log records in one ring take increasing sequence numbers (one producer
+  at a time; the library ring assigns them under its lock).
+One record is exempt: the oldest slot of a full ring is the one the
+producer writes next, so a dump of a running writer may catch it being
+overwritten. Such a slot is marked (an InputFrame slot holding frame
+`head`, torn or not yet published; a log record flagged `may_be_torn`, and
+`torn` when its sequence shows the next record's header) and not decoded
+as its own index, but it is not a problem. Anything else that does not fit
+is.
+
+**Why.** The reader is both the diagnostic tool and the crash tests'
+oracle; it accepted a slot holding a later frame, and a log record with a
+new header over old text, as valid records of their index. Treating the
+oldest slot of a live ring as a problem would make every dump of a busy
+thread fail `--strict` (the probe's torn slot is that case on purpose).
+
 ## ADR-048 The M4 bans have no opt-out and cover more forms (2026-11-09)
 
 **Decision.** check_banned_api.py's rules thread, debugbreak, dump,

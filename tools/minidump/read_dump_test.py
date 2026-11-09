@@ -4,8 +4,11 @@ The synthetic dumps carry what the crash handler writes for the engine:
 the standard thread, thread-name, module, exception and misc streams,
 crashpad's annotations, and first-party streams in the layout of
 docs/milestone-specs.md ("Dump stream layout"), including a wrapped log ring
-and an InputFrame ring with a torn slot. Malformed inputs must be reported,
-not decoded. CTest runs this as minidump.read_dump; the crash tests
+and an InputFrame ring with a torn slot, with the stamps the engine's
+InputFrameRing writes (2n + 1 while frame n is written, 2n + 2 after).
+Malformed inputs must be reported, not decoded; a record that does not fit
+its index is a problem unless it is the one a running writer was
+overwriting. CTest runs this as minidump.read_dump; the crash tests
 (tests/crash/crash_test.py) check read_dump.py on real dumps.
 
 usage:
@@ -94,10 +97,12 @@ def log_record(i):
                        100 + i, i % 5, 1, len(message), b"probe.cc", message)
 
 
-def log_stream(capacity=4, head=6, kind=2):
+def log_stream(capacity=4, head=6, kind=2, slots_override=None):
     slots = [b"\0" * 512] * capacity
     for i in range(head):
         slots[i % capacity] = log_record(i)
+    for slot, record in (slots_override or {}).items():
+        slots[slot] = record
     return (se_header(kind, 512, capacity, head, dropped=2, tid=100, role=1,
                       name=b"main") + b"".join(slots))
 
@@ -114,11 +119,14 @@ def input_slot(stamp, tick):
     return struct.pack("<Q", stamp) + bytes(frame)
 
 
-def input_stream(record_size=968):
-    # Ticks 1..5 in a 4-slot ring: index i holds tick i + 1, so the ring
-    # holds ticks 2..5; the write of tick 6 into slot 1 (tick 2) is torn.
-    slots = [input_slot(4, 5), input_slot(3, 6), input_slot(2, 3),
-             input_slot(2, 4)]
+def input_stream(record_size=968, slots_override=None):
+    # Ticks 1..5 in a 4-slot ring: frame i holds tick i + 1 with stamp
+    # 2i + 2, so the ring holds frames 1..4 (ticks 2..5); frame 5 (tick 6)
+    # is being written over slot 1 (frame 1), whose stamp is 2 * 5 + 1.
+    slots = [input_slot(10, 5), input_slot(11, 6), input_slot(6, 3),
+             input_slot(8, 4)]
+    for slot, (stamp, tick) in (slots_override or {}).items():
+        slots[slot] = input_slot(stamp, tick)
     if record_size != 968:
         slots = [s[:record_size].ljust(record_size, b"\0") for s in slots]
     return (se_header(3, record_size, 4, 5, tid=100, role=1, name=b"input")
@@ -270,7 +278,11 @@ class FirstPartyStreams(unittest.TestCase):
         records = stream["records"]
         self.assertEqual([r["slot"] for r in records], [1, 2, 3, 0])
         self.assertTrue(records[0]["torn"])
+        self.assertEqual((records[0]["status"], records[0]["holds"]),
+                         ("torn", 5))
         self.assertNotIn("frame", records[0])
+        self.assertEqual([r["status"] for r in records[1:]], ["ok"] * 3)
+        self.assertEqual(self.dump["problems"], [])
         ticks = [r["frame"]["tick"] for r in records[1:]]
         self.assertEqual(ticks, [3, 4, 5])
         frame = records[3]["frame"]
@@ -304,9 +316,91 @@ class FirstPartyStreams(unittest.TestCase):
         self.assertNotIn("TORN", out)  # the oldest slot is not shown
         status, out, _ = run_cli(full_dump())
         self.assertEqual(status, 0)
-        self.assertIn("[1] slot 1 stamp 3 TORN (being written)", out)
+        self.assertIn("[1] slot 1 stamp 11 TORN (frame 5 being written)",
+                      out)
         self.assertIn("se.terminate = 'std::terminate with exception: boom'",
                       out)
+
+
+class RecordsThatDoNotFitTheirIndex(unittest.TestCase):
+
+    def test_input_frame_written_but_not_published(self):
+        # Frame 5 is complete in slot 1 but the head still says 5: slot 1
+        # no longer holds frame 1. Marked, not decoded, not a problem.
+        data = full_dump([
+            (0x53450002, input_stream(slots_override={1: (12, 6)}))])
+        dump = read_dump.read_dump(data)
+        first = se_stream(dump, 0x53450002)["records"][0]
+        self.assertEqual((first["index"], first["status"], first["holds"],
+                          first["torn"]), (1, "overwritten", 5, False))
+        self.assertNotIn("frame", first)
+        self.assertEqual(dump["problems"], [])
+        status, out, _ = run_cli(data)
+        self.assertEqual(status, 0)
+        self.assertIn("[1] slot 1 stamp 12 OVERWRITTEN (holds frame 5)", out)
+
+    def test_stale_or_torn_input_slots_inside_the_ring_are_problems(self):
+        # Slot 2 still holds frame 0 (stamp 2), not frame 2; slot 3 says
+        # frame 3 is being written although the head says it was published.
+        data = full_dump([
+            (0x53450002, input_stream(slots_override={2: (2, 1),
+                                                      3: (7, 4)}))])
+        dump = read_dump.read_dump(data)
+        records = se_stream(dump, 0x53450002)["records"]
+        self.assertEqual([r["status"] for r in records],
+                         ["torn", "not written", "torn", "ok"])
+        self.assertEqual([r["slot"] for r in records if "frame" in r], [0])
+        self.assertEqual(dump["problems"], [
+            "stream 0x53450002: InputFrame slot 2 has stamp 2 where frame 2 "
+            "needs 6 (not written)",
+            "stream 0x53450002: InputFrame slot 3 has stamp 7 where frame 3 "
+            "needs 8 (torn)"])
+        status, _, _ = run_cli(data, "--strict")
+        self.assertEqual(status, 1)
+
+    def test_overwritten_input_slot_inside_the_ring_is_a_problem(self):
+        # Slot 3 holds frame 7 (a later frame) where frame 3 should be.
+        dump = read_dump.read_dump(full_dump([
+            (0x53450002, input_stream(slots_override={3: (16, 8)}))]))
+        records = se_stream(dump, 0x53450002)["records"]
+        self.assertEqual((records[2]["status"], records[2]["holds"]),
+                         ("overwritten", 7))
+        self.assertIn("InputFrame slot 3 has stamp 16 where frame 3 needs 8 "
+                      "(overwritten)", dump["problems"][0])
+
+    def test_log_record_half_overwritten_by_the_next_push(self):
+        # Record 6 has written its header over record 2 (the oldest, in
+        # slot 2), whose message is still there.
+        torn = log_record(6)[:28] + log_record(2)[28:]
+        data = full_dump([(0x53450100, log_stream(slots_override={2: torn}))])
+        dump = read_dump.read_dump(data)
+        records = se_stream(dump, 0x53450100)["records"]
+        self.assertEqual([(r["index"], r["torn"], r["may_be_torn"])
+                          for r in records],
+                         [(2, True, True), (3, False, False),
+                          (4, False, False), (5, False, False)])
+        self.assertEqual(dump["problems"], [])
+        status, out, _ = run_cli(data)
+        self.assertEqual(status, 0)
+        self.assertIn("[2] slot 2 TORN (overwritten by record 6 while the "
+                      "dump was written)", out)
+        self.assertNotIn("log 2", out)
+
+    def test_log_ring_out_of_order_inside_is_a_problem(self):
+        # Slots 3 and 0 (records 3 and 4) hold each other's record.
+        dump = read_dump.read_dump(full_dump([
+            (0x53450100, log_stream(slots_override={3: log_record(4),
+                                                    0: log_record(3)}))]))
+        self.assertEqual(dump["problems"], [
+            "stream 0x53450100: log record 4 (slot 0) has sequence 1003, "
+            "not after 1004 of record 3"])
+
+    def test_a_ring_that_has_not_wrapped_has_no_suspect_slot(self):
+        dump = read_dump.read_dump(full_dump([
+            (0x53450100, log_stream(capacity=8, head=6))]))
+        records = se_stream(dump, 0x53450100)["records"]
+        self.assertEqual([r["may_be_torn"] for r in records], [False] * 6)
+        self.assertEqual(dump["problems"], [])
 
 
 class MalformedInput(unittest.TestCase):
@@ -351,7 +445,8 @@ class MalformedInput(unittest.TestCase):
         dump = read_dump.read_dump(full_dump([
             (0x53450002, input_stream(record_size=100))]))
         stream = se_stream(dump, 0x53450002)
-        self.assertEqual([r["stamp"] for r in stream["records"]], [3, 2, 2, 4])
+        self.assertEqual([r["stamp"] for r in stream["records"]],
+                         [11, 6, 8, 10])
         self.assertNotIn("frame", stream["records"][1])
         self.assertIn("unknown InputFrame layout", dump["problems"][0])
 

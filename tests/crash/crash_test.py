@@ -198,9 +198,10 @@ def check_input_ring(failures, dump, ids):
     records = ring["records"]
     if not failures.equal(len(records), 16, "InputFrame slots"):
         return
-    # Index 4 (slot 4, tick 5) was being overwritten by tick 21.
+    # Index 4 (slot 4, tick 5) was being overwritten by frame 20 (tick 21).
     failures.equal((records[0]["slot"], records[0]["torn"],
-                    records[0]["stamp"]), (4, True, 3), "the torn slot")
+                    records[0]["stamp"], records[0]["holds"]),
+                   (4, True, 41, 20), "the torn slot")
     valid = records[1:]
     failures.equal([r["frame"]["tick"] for r in valid if "frame" in r],
                    list(range(6, 21)), "InputFrame ticks")
@@ -210,11 +211,12 @@ def check_input_ring(failures, dump, ids):
             failures.check(False, f"slot {record['slot']} not decoded")
             continue
         t = frame["tick"]
-        writes = 2 if record["slot"] < 4 else 1
+        # Tick t is frame t - 1: stamp 2 (t - 1) + 2.
         failures.equal(
-            (record["stamp"], frame["held"], frame["axes"][0],
-             frame["edge_count"], frame["pressed"], frame["platform_live"]),
-            (2 * writes, f"{1 | (1 << (t % 64)):#018x}", t * 0.25, t % 3,
+            (record["stamp"], record["status"], frame["held"],
+             frame["axes"][0], frame["edge_count"], frame["pressed"],
+             frame["platform_live"]),
+            (2 * t, "ok", f"{1 | (1 << (t % 64)):#018x}", t * 0.25, t % 3,
              {str(t % 64): 1}, True), f"frame of tick {t}")
         failures.equal([(e["action"], e["down"], e["stamp_ns"], e["order"],
                          e["source"]) for e in frame["edges"]],

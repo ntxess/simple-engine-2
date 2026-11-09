@@ -9,9 +9,19 @@ crashpad's annotations, and decodes every first-party stream (type
 
   kind 1  breadcrumbs: one record per ThreadRegistry slot, with the packed
           breadcrumb split into role, phase, system, chunk and tick
-  kind 2  a log ring: the records still in the ring, oldest first, as text
+  kind 2  a log ring: the records still in the ring, oldest first, as text;
+          sequence numbers must increase through the ring
   kind 3  the InputFrame ring: the slots oldest first, with their seqlock
-          stamps; a slot with an odd stamp was being written and is torn
+          stamps, which must say "frame n, complete" (2n + 2,
+          se_core/input_frame_ring.h); an odd stamp means the slot was
+          being written (torn)
+
+A ring whose writer was running when the dump was taken may show one
+record in progress: the oldest slot of a full ring, which the next write
+reuses. It is marked (torn, or overwritten by the next record) and not
+decoded as its own index, but it is not a problem. Any other record that
+does not fit its index (a stale or torn slot inside the ring, a sequence
+number out of order) is listed under "problems".
   kind 4  the SessionLog tail and kind 5 the flight recorder: listed, not
           decoded (their record formats come with later milestones)
 
@@ -405,7 +415,14 @@ def ring_order(header):
             for index in range(first, header["head"])]
 
 
-def decode_log_ring(data, header, out):
+def next_write_slot(header, index):
+    """True for the oldest record of a full ring: the slot the producer
+    writes next, which a write in progress may have overwritten in part."""
+    return (header["head"] >= header["capacity"]
+            and index == header["head"] - header["capacity"])
+
+
+def decode_log_ring(data, header, out, problems, label):
     for index, slot in ring_order(header):
         offset = DUMP_STREAM_HEADER_SIZE + slot * header["record_size"]
         (timestamp, sequence, tick, line, level, role, length) = (
@@ -428,7 +445,23 @@ def decode_log_ring(data, header, out):
             "role_name": role_name(role),
             "file": file_name,
             "message": message.decode("utf-8", "replace"),
+            "may_be_torn": next_write_slot(header, index),
+            "torn": False,
         })
+    # Each ring has one producer at a time and its records take their
+    # sequence numbers in push order (the library ring under its lock).
+    for previous, record in zip(out, out[1:]):
+        if record["sequence"] > previous["sequence"]:
+            continue
+        if previous is out[0] and previous["may_be_torn"]:
+            # The record in progress (number head) has written its header
+            # over the oldest one.
+            previous["torn"] = True
+            continue
+        problems.append(
+            f"{label}: log record {record['index']} (slot {record['slot']}) "
+            f"has sequence {record['sequence']}, not after "
+            f"{previous['sequence']} of record {previous['index']}")
 
 
 def decode_input_frame(data, offset):
@@ -469,12 +502,34 @@ def decode_input_ring(data, header, out, problems, label):
         problems.append(f"{label}: unknown InputFrame layout (record size "
                         f"{header['record_size']}, expected "
                         f"{INPUT_SLOT_SIZE}); frames not decoded")
+    head = header["head"]
     for index, slot in ring_order(header):
         offset = DUMP_STREAM_HEADER_SIZE + slot * header["record_size"]
         stamp, = struct.unpack_from("<Q", data, offset)
+        complete = 2 * index + 2
+        # The frame the stamp names: 2n + 1 while frame n is written, 2n + 2
+        # once it is complete; 0 for a slot never written.
+        holds = (stamp - 1) // 2 if stamp else None
+        if stamp == complete:
+            status = "ok"
+        elif stamp % 2 == 1:
+            status = "torn"
+        elif stamp > complete:
+            status = "overwritten"
+        else:
+            status = "not written"
         record = {"index": index, "slot": slot, "stamp": stamp,
+                  "status": status, "holds": holds,
                   "torn": stamp % 2 == 1}
-        if known_layout and not record["torn"]:
+        # Frame |head| in progress over the oldest slot: being written, or
+        # written while the head is not yet published.
+        in_progress = (next_write_slot(header, index)
+                       and stamp in (2 * head + 1, 2 * head + 2))
+        if status != "ok" and not in_progress:
+            problems.append(
+                f"{label}: InputFrame slot {slot} has stamp {stamp} where "
+                f"frame {index} needs {complete} ({status})")
+        if known_layout and status == "ok":
             record["frame"] = decode_input_frame(data,
                                                  offset + INPUT_FRAME_OFFSET)
         out.append(record)
@@ -546,7 +601,7 @@ def decode_se_stream(stream_type, data, problems):
             problems.append(f"{label}: log records of {record_size} bytes, "
                             f"expected {LOG_RECORD_SIZE}")
         else:
-            decode_log_ring(data, result, result["records"])
+            decode_log_ring(data, result, result["records"], problems, label)
     elif kind == 3:
         decode_input_ring(data, result, result["records"], problems, label)
     else:
@@ -659,14 +714,30 @@ def format_record(stream, record):
                 f"{crumb['phase_name']} system {crumb['system']} chunk "
                 f"{crumb['chunk']} tick {crumb['tick']}")
     if kind == 2:
+        if record["torn"]:
+            return (f"[{record['index']}] slot {record['slot']} TORN "
+                    f"(overwritten by record {stream['head']} while the "
+                    f"dump was written)")
         seconds = record["timestamp_ns"] / 1e9
+        note = (" (may be torn: the next write reuses this slot)"
+                if record["may_be_torn"] else "")
         return (f"[{record['index']}] {seconds:.6f} {record['level_letter']} "
                 f"{record['role_name']} t={record['tick']} "
-                f"{record['file']}:{record['line']} {record['message']}")
+                f"{record['file']}:{record['line']} {record['message']}"
+                f"{note}")
     if kind == 3:
-        if record["torn"]:
+        status = record.get("status", "ok")
+        if status == "torn":
             return (f"[{record['index']}] slot {record['slot']} stamp "
-                    f"{record['stamp']} TORN (being written)")
+                    f"{record['stamp']} TORN (frame {record['holds']} being "
+                    f"written)")
+        if status == "overwritten":
+            return (f"[{record['index']}] slot {record['slot']} stamp "
+                    f"{record['stamp']} OVERWRITTEN (holds frame "
+                    f"{record['holds']})")
+        if status == "not written":
+            return (f"[{record['index']}] slot {record['slot']} stamp "
+                    f"{record['stamp']} NOT WRITTEN")
         frame = record.get("frame")
         if frame is None:
             return (f"[{record['index']}] slot {record['slot']} stamp "
