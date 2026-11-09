@@ -33,6 +33,7 @@
 #include "se_os/thread.h"
 #include "se_os/unbiased_clock.h"
 #include "se_platform/sdl_context.h"
+#include "se_platform/vblank_sampler.h"
 #include "se_runtime/app_config.h"
 
 namespace se::integration {
@@ -229,13 +230,26 @@ std::expected<CpuInfo, Error> ReadCpuTopology() {
 
 std::expected<HelperThreads, Error> StartHelperThreads(
     const AppConfig& /*config*/, const WatchdogInputs& inputs,
-    std::uint64_t boot_start_ns) {
+    std::uint64_t boot_start_ns, const VblankStart& vblank) {
+  HelperThreads threads;
+  // The vblank sampler before the watchdog (docs/design/mt-design.md
+  // "Booting -> Running"). Not a boot failure when it cannot run: the
+  // pacer runs Standard without it.
+  if (vblank.enabled && VblankSampler::Supported()) {
+    VblankSamplerConfig sampler_config;
+    sampler_config.monitor = vblank.monitor;
+    auto sampler = VblankSampler::Start(sampler_config);
+    if (sampler) {
+      threads.vblank_ = std::move(*sampler);
+    } else {
+      SE_LOG_WARN("no vblank sampler: {}", sampler.error().message);
+    }
+  }
   crash::WatchdogConfig watchdog_config;
   watchdog_config.inputs = inputs;
   watchdog_config.boot_start_ns = boot_start_ns;
   auto watchdog = crash::Watchdog::Start(watchdog_config);
   if (!watchdog) return std::unexpected(std::move(watchdog.error()));
-  HelperThreads threads;
   threads.watchdog_ = std::make_unique<crash::Watchdog>(std::move(*watchdog));
   return threads;
 }
@@ -246,6 +260,7 @@ HelperThreads::HelperThreads(HelperThreads&& other) noexcept = default;
 HelperThreads& HelperThreads::operator=(HelperThreads&& other) noexcept {
   if (this != &other) {
     Stop();
+    vblank_ = std::move(other.vblank_);
     watchdog_ = std::move(other.watchdog_);
   }
   return *this;
@@ -253,7 +268,15 @@ HelperThreads& HelperThreads::operator=(HelperThreads&& other) noexcept {
 
 HelperThreads::~HelperThreads() { Stop(); }
 
+VblankStop HelperThreads::StopSamplers() noexcept {
+  if (!vblank_) return VblankStop::kNotRunning;
+  const VblankStop stopped = vblank_->Stop();
+  vblank_.reset();
+  return stopped;
+}
+
 void HelperThreads::Stop() noexcept {
+  StopSamplers();
   if (!watchdog_) return;
   watchdog_->Stop();
   watchdog_.reset();

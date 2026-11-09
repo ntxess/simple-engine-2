@@ -141,6 +141,14 @@ class Thread {
   void Join() noexcept {
     if (thread_.joinable()) thread_.join();
   }
+  // Lets the body run on without this object (it keeps its RoleScope, and
+  // so its registry slot, until it returns). Only for a thread that may be
+  // stuck in an OS wait at shutdown (the vblank sampler in WaitForVBlank,
+  // docs/design/mt-design.md "Shutdown Order" step 9); whatever the body
+  // uses must outlive it, so it owns that state.
+  void Detach() noexcept {
+    if (thread_.joinable()) thread_.detach();
+  }
   [[nodiscard]] std::thread::native_handle_type NativeHandle() noexcept {
     return thread_.native_handle();
   }

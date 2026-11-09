@@ -2,6 +2,7 @@
 
 #include "se_platform/fatal.h"
 
+#include <SDL3/SDL_assert.h>
 #include <SDL3/SDL_messagebox.h>
 #include <SDL3/SDL_stdinc.h>
 #include <SDL3/SDL_video.h>
@@ -53,6 +54,19 @@ class FixedText {
   std::size_t size_ = 0;
 };
 
+// SDL's assertions without SDL's dialog: report, then abort (the CRT's
+// abort dialog is off as well). SDL's own ABORT result would call SDL_Quit
+// first, which can block or assert again inside a GPU call.
+SDL_AssertState SDLCALL AbortOnSdlAssertion(const SDL_AssertData* data,
+                                            void* /*userdata*/) {
+  std::fprintf(stderr, "SDL assertion failed: '%s' at %s:%d (%s)\n",
+               data->condition != nullptr ? data->condition : "?",
+               data->filename != nullptr ? data->filename : "?", data->linenum,
+               data->function != nullptr ? data->function : "?");
+  std::fflush(stderr);
+  std::abort();
+}
+
 }  // namespace
 
 bool MessageBoxesSuppressed() noexcept {
@@ -61,7 +75,11 @@ bool MessageBoxesSuppressed() noexcept {
 }
 
 void ConfigureFaultDialogs() noexcept {
-  if (!MessageBoxesSuppressed()) return;
+  if (MessageBoxesSuppressed()) SuppressFaultDialogs();
+}
+
+void SuppressFaultDialogs() noexcept {
+  SDL_SetAssertionHandler(AbortOnSdlAssertion, nullptr);
 #if defined(_WIN32)
   SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX |
                SEM_NOOPENFILEERRORBOX);

@@ -703,7 +703,9 @@ wait for a swapchain image.
 
 **Why.** Counted as CPU time, the VSYNC wait makes R about one period, k_95
 falls below k_rt and the stepper enters Overloaded after a second, running
-one tick per frame: at 60 Hz the game would run at half speed.
+one tick per frame: at 60 Hz the game would run at half speed. *(Since
+M7 R leaves out only the swapchain wait: the render build, recording and
+submit are CPU work and count; ADR-064.)*
 
 **Decision (frame clock).** The FrameClock's period is SDL's display mode
 unless a moving average of the frame deltas (weight 0.1, stalls over
@@ -960,3 +962,1054 @@ start (ADR-029): the log worker starts at boot step 2, before the profiler.
 
 **Why.** Tracy names a thread only through that thread's own events, and
 neither helper had any, so the "named threads" gate could not pass.
+
+## ADR-050 The SDL presentation patch: one header, hooks, files of its own (2026-11-09)
+
+**Decision.** cmake/patches/sdl3-3.4.20-se-presentation.patch (a `git
+diff` against the extracted SDL3-3.4.20 tarball, with a short description
+above the first hunk) adds:
+- `include/SDL3/SDL_gpu_se.h`, the only new public header: nine
+  `SDL_SE_`-prefixed functions (capabilities, frame latency set and wait,
+  present statistics, GPU timing begin/end/read, device status, native
+  handles) and their types, versioned by `SDL_SE_GPU_PRESENTATION_VERSION`
+  (1);
+- `src/gpu/SDL_gpu_se.c`, the entry points: argument checks, then a
+  dispatch on the device's backend name ("direct3d12", "vulkan") to an
+  `SDL_SE_GPUBackend` table (`src/gpu/SDL_gpu_se_c.h`); other backends
+  report every capability unsupported;
+- per backend, `SDL_gpu_<backend>_se.h` (the state the backend's window,
+  renderer and command-buffer structures carry as one `se` member each,
+  and the hook prototypes), included once after the backend's fence type,
+  and `SDL_gpu_<backend>_se_impl.h` (the hooks and the table), included
+  right before the backend's `SDL_GPUBootstrap`, so it sees the private
+  structures and static functions. Both are headers so that SDL's
+  `*.c` source glob does not compile them on their own.
+
+The edits to SDL's own files are hook calls and the three `se` members,
+each marked `// simple-engine-2 presentation patch`: 20 lines in
+SDL_gpu_d3d12.c and 30 in SDL_gpu_vulkan.c (docs/deps.md lists them). The
+new functions are not entered in SDL's dynamic API tables: the engine links
+SDL statically, where that is not needed; a shared build or an upstream
+offer would run SDL's gendynapi.py. Nothing changes until a new function is
+called: the D3D12 waitable flag is added when SetFrameLatency first asks
+for it, Vulkan present ids only while a latency is set, display timing
+after the first statistics query, timestamp query objects at the first
+Begin; the Vulkan extensions are enabled at device creation when the
+device has them (ADR-051), which changes no behaviour. `.gitattributes`
+keeps `cmake/patches/*.patch` byte-exact (`-text`): git's CRLF conversion
+on Windows would break both `git apply` against the LF tarball and the
+SHA256 the build checks. cmake/Dependencies.cmake sets `SE_SDL_PATCHED`
+when it applies the patch and se_render passes it on as the compile
+definition `SE_SDL_PATCHED=0/1`; `base` sets `SE_SDL_PATCH=ON` explicitly
+and msvc-unpatched-dev `OFF`. msvc-unpatched-dev gains test and workflow
+presets (labels bench and desktop excluded, as in msvc-dev) and
+`SE_TRACY=ON`, so that it is msvc-dev without the patch: without Tracy,
+clang-tidy rejects the non-profiling expansion of SE_PROFILE_ZONE_DYNAMIC
+(`sizeof` of a string_view, bugprone-sizeof-container), which no other
+preset that runs the lint label builds.
+
+present.h is the spec's API with two additions that change no call: every
+function carries `SE_REQUIRES(g_main)` (the thread-safety analysis, as in
+gpu_device.h), and `present_count` is documented with DXGI's meaning, the
+present count of the most recently displayed present in the numbering of
+`last_present_count` (the spec's comment "presents the swapchain issued"
+describes `last_present_count`).
+
+**Why.** Rebasing onto a later SDL has to stay mechanical: the new code
+lives in files SDL does not have, and each touched line in SDL's files is a
+one-line hook whose position a later SDL keeps. SDL's backends keep their
+structures private to one translation unit, so the backend code is
+included into it rather than compiled beside it.
+
+**Note.** The SDL 3.4.20 tarball's AGENTS.md and CLAUDE.md say that
+contributions made with generative AI are not accepted by SDL. This patch
+was written by an AI agent, so it must not be offered upstream as it is
+(the design's "offered upstream" needs the owner's decision; docs/gates.md).
+
+## ADR-051 The frame-latency wait on D3D12 and Vulkan (2026-11-09)
+
+**Decision.**
+- D3D12: SetFrameLatency(n) on a swapchain without the waitable records n,
+  waits for the GPU (D3D12_Wait), destroys and recreates the swapchain as
+  SetSwapchainParameters does; every swapchain created while a latency is
+  set gets `DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT` (with
+  ALLOW_TEARING when supported), every `ResizeBuffers` passes the same
+  flags, and after each creation the patch calls
+  `IDXGISwapChain2::SetMaximumFrameLatency(n)` and takes
+  `GetFrameLatencyWaitableObject` (closed when the swapchain is released).
+  Later calls only set the maximum latency. WaitFrameLatency waits on the
+  waitable and a high-resolution waitable timer due at the timeout
+  (`CreateWaitableTimerExW` with `CREATE_WAITABLE_TIMER_HIGH_RESOLUTION`,
+  100 ns units rounded down, a millisecond backstop), so the wait never
+  exceeds the timeout by the 15.6 ms timer tick; a zero timeout polls.
+  Present mode changes and resizes keep the waitable (desktop test).
+- Vulkan: at device creation the patch appends `VK_KHR_present_id`,
+  `VK_KHR_present_wait` and `VK_GOOGLE_display_timing` when the physical
+  device has them and the application did not already request them, and
+  chains `VkPhysicalDevicePresentIdFeaturesKHR` and
+  `VkPhysicalDevicePresentWaitFeaturesKHR` when
+  `vkGetPhysicalDeviceFeatures2KHR` reports the features (it needs
+  VK_KHR_get_physical_device_properties2 on SDL's 1.0 instance). If
+  vkCreateDevice fails with the additions, it is called again without
+  them. While a latency L is set each present carries its window's present
+  number as its present id; WaitFrameLatency waits with
+  `vkWaitForPresentKHR` for id `last + 1 - L`, the present L back from the
+  next one. Ready without waiting: fewer than L presents with ids, or a
+  target that went to an earlier swapchain; VK_TIMEOUT is kTimeout; out of
+  date, surface lost and device lost return kReady (and record a lost
+  device) so the pacer never blocks on a swapchain SDL is about to
+  recreate. SetFrameLatency fails without both features.
+
+**Why.** DXGI accepts the waitable flag only at creation and refuses a
+`ResizeBuffers` whose flags differ. vkWaitForPresentKHR waits until the
+swapchain's presented id reaches the target, so a target from an earlier
+swapchain could wait for a present that never comes. Retrying device
+creation keeps "missing extensions never fail device creation" even for a
+driver that lists an extension it cannot enable. Measured on this machine
+(RTX 3080, 165 Hz output): 120 of 120 waits ready within two refreshes at
+latency 1 and 2 on both backends; NVIDIA's Vulkan driver has present_id and
+present_wait.
+
+## ADR-052 Present statistics, and composed windows without them (2026-11-09)
+
+**Decision.**
+- D3D12: GetPresentStats returns `IDXGISwapChain::GetFrameStatistics`
+  (PresentCount, PresentRefreshCount, SyncRefreshCount) and
+  `GetLastPresentCount`; SyncQPCTime is converted into the SDL_GetTicksNS
+  domain by sampling SDL_GetPerformanceCounter (QPC) around SDL_GetTicksNS.
+  False while minimized, on a DXGI error (DISJOINT) and while PresentCount
+  is 0. `Caps::present_stats` means the backend can report statistics, not
+  that the current presentation path produces them.
+- Measured: on this machine (Windows 11 26200, RTX 3080) DXGI returns
+  S_OK with every field zero for a windowed flip-model swapchain that DWM
+  composes, with and without the waitable, for a small unfocused window
+  and a large topmost one; `IDXGIOutput::GetFrameStatistics` returns
+  DXGI_ERROR_INVALID_CALL in windowed mode. DXGI fills the statistics for
+  independent flip (a borderless fullscreen window in front), which a
+  desktop test may not take the screen and the focus for. The windowed
+  statistics test therefore skips on D3D12 with that reason when no
+  statistics arrive, and a hidden Catch2 test (`[.fullscreen]`, never
+  discovered by CTest) checks them fullscreen; docs/gates.md has the
+  command.
+- Vulkan: `VK_GOOGLE_display_timing` when the device has it: the first
+  statistics query enables `VkPresentTimesInfoGOOGLE` on the following
+  presents (ids are the window's present numbers);
+  `vkGetPastPresentationTimingGOOGLE` gives the newest displayed present;
+  refresh counts are derived from actualPresentTime and
+  `vkGetRefreshCycleDurationGOOGLE` from the first displayed present of
+  the swapchain (refresh 1), and sync equals present (the sample is the
+  vblank of that present). Times are CLOCK_MONOTONIC on Linux and taken as
+  QPC nanoseconds on Windows (unverified: NVIDIA's Windows driver does not
+  offer the extension, so the statistics tests skip on Vulkan here).
+
+**Consequence for M6b and the integration.** With the windowed D3D12 path
+reporting no statistics on this machine, a pacer that requires statistics
+for Paced mode runs Standard in a window. A composed-mode miss source that
+needs no new SDL API: at frame latency 1, WaitFrameLatency returns when DWM
+latched the previous present, so its return time placed on the vblank
+sampler's grid tells the refresh that took the present. That choice (or
+borderless fullscreen for Paced) is the owner's; docs/gates.md, "Present
+statistics in independent flip". Corrected at the integration (ADR-066): the
+zeros were measured while the display slept; with it awake DXGI fills a
+window's statistics, with DWM's displayed refresh (one after the vblank
+that took the present), and the pacer's misses come from the latency
+wait on the sampler's grid.
+
+**Why.** The spec's statistics are DXGI's; reporting zeros as statistics
+would make every present look undisplayed, and inventing them from DWM's
+desktop-wide timing would bring back red team P2.
+
+## ADR-053 GPU timestamps, device status, native handles, tearing (2026-11-09)
+
+**Decision.**
+- Timestamps: one query heap (D3D12, `D3D12_QUERY_HEAP_TYPE_TIMESTAMP`) or
+  query pool (Vulkan) of 64 slots of two queries, one readback buffer
+  (D3D12), created at the first BeginGpuTiming. Begin takes the next slot
+  that no command buffer is recording into and writes the start timestamp
+  (Vulkan: `vkCmdResetQueryPool` first, so Begin and End must be outside
+  any pass, which SDL_SE_BeginGPUTiming asserts); End writes the end
+  timestamp, and Submit writes it when End was not called, resolves both
+  (D3D12 `ResolveQueryData` before the command list closes) and binds the
+  slot to the submission's fence, taking a reference so the pooled fence
+  cannot be reused while the result waits. ReadGpuTime finds the slot by
+  fence: nullopt (false) while the fence has not signalled or when the
+  submission was not timed; a successful read converts with
+  GetTimestampFrequency (D3D12) or timestampPeriod with the queue family's
+  timestampValidBits (Vulkan) and frees the slot. A slot whose result
+  nobody reads is reused 64 timings later; a cancelled command buffer
+  frees its slot. This replaces the spec's "a query heap and a readback
+  buffer per frame in flight" with one ring that serves any number of
+  frames in flight up to 64 outstanding results; it is no contract change.
+- Device status: D3D12 `GetDeviceRemovedReason` (S_OK is kOk). Vulkan:
+  every result checked by SDL's `CHECK_VULKAN_ERROR_AND_RETURN` (one hook
+  line in the macro) and every result of the patch's own calls records
+  VK_ERROR_DEVICE_LOST, and an unsubmitted fence created on first use is
+  polled with vkGetFenceStatus, which reports a lost device.
+- Native handles: ID3D12Device, the direct ID3D12CommandQueue and the
+  window's IDXGISwapChain3; VkInstance, VkPhysicalDevice, VkDevice, SDL's
+  single queue and its family, and the window's VkSwapchainKHR (a 64-bit
+  value in SDL's struct, a pointer-sized value in present.h). Borrowed;
+  the swapchain changes whenever SDL recreates it.
+- Tearing: SDL 3.4.20 already presents IMMEDIATE with sync interval 0 and
+  `DXGI_PRESENT_ALLOW_TEARING`, and creates every swapchain with
+  `ALLOW_TEARING`, when `CheckFeatureSupport(PRESENT_ALLOW_TEARING)`
+  reports it (SDL_gpu_d3d12.c, D3D12_INTERNAL_Submit and CreateSwapchain;
+  verified in the source, unchanged by the patch); `Caps::tearing` reports
+  that support on D3D12 and the surface's IMMEDIATE support on Vulkan.
+  SetPresentMode calls SDL_SetGPUSwapchainParameters with SDR composition,
+  which recreates the swapchain (keeping the waitable, ADR-051).
+
+- Amended at the integration: SDL_SE_BeginGPUTiming and EndGPUTiming
+  check the command buffer's submitted and pass flags only when the device
+  is in SDL's debug mode. SDL_AcquireGPUCommandBuffer resets those fields
+  only in debug mode, so on a Release device (debug mode off) a pooled
+  command buffer still said "submitted" from its last use, and
+  SDL_assert_release stopped every timed frame with an assertion dialog
+  (msvc-release: `present.vulkan.GPU timing of a 4096x4096 clear` and the
+  `render_gpu.d3d12.*` tests timed out waiting on it). The patch grows by
+  five lines in src/gpu/SDL_gpu_se.c (docs/deps.md).
+
+**Why.** A fixed ring needs no allocation per frame and no bookkeeping of
+frames in flight, which the pacer's latency changes; the fence reference
+is what makes "Read after its fence signalled" safe against SDL's fence
+pool. SDL already reports device loss from nearly every Vulkan call
+through that macro, so one line covers them.
+
+## ADR-054 The pacer presents through a PresentPort; the clear-only port until the integration (2026-11-09)
+
+**Decision.** The FramePacer talks to `se::PresentPort`
+(`se_runtime/present_port.h`) and never to `se::present`. Its data types
+mirror the present API under their own names, so that the header needs no
+SDL include and the pure PacerPolicy can use them: `PresentCaps`,
+`PresentWait`, `PresentStatistics` (DXGI_FRAME_STATISTICS semantics, plus
+`last_present_count`), `GpuTiming`, `GpuDeviceStatus`,
+`PresentNativeHandles`, and `SwapchainMode` (VSYNC, IMMEDIATE, MAILBOX) for
+SDL_GPUPresentMode; the SDL handles in the GPU-timing calls are forward
+declared. Beyond the present API the port has:
+- `OnFrameSubmitted(SDL_GPUFence*)`: each frame's fence, owned by the port
+  from then on (nullptr when the recorder has none);
+- `WaitFrameFence(frames_back, timeout_ns)`: the N-L wait; a zero timeout
+  polls, which is how the pacer learns `gpu_fence_pending_at_start`;
+- `RepresentLast()`: HalfRate's Standard re-present;
+- `WaitSwapchain()`: Standard's SDL_WaitForGPUSwapchain, so a fake can stand
+  in for it.
+The pacer reads `GetPresentStats` right after each present to learn that
+present's id (`last_present_count`); the integration's adapter must report
+it then, before the present is displayed (DXGI's GetLastPresentCount does).
+
+Until the integration, `ClearOnlyPresentPort` (clear_present_port.h) runs
+over M5's GpuDevice and FrameRecorder, both unchanged. It reports what the
+unpatched SDL 3.4.20 has: `tearing` from SDL_WindowSupportsGPUPresentMode
+(IMMEDIATE), every other cap false. Its fences come from an empty command
+buffer submitted with SDL_SubmitGPUCommandBufferAndAcquireFence after each
+frame (it signals once the frame's work before it on the queue is done);
+SDL has no timed fence wait, so WaitFrameFence polls or blocks in
+SDL_WaitForGPUFences. RepresentLast records another clear frame, the whole
+composite in M5.
+
+**Why.** The spec makes the port the contract between M6a and M6b. Mirrored
+types under distinct names keep PacerPolicy free of SDL and make the
+adapter a field-by-field copy; a fence behind the frame gives the N-L wait
+real data now without rewriting M5's FrameRecorder, which M7 replaces.
+
+## ADR-055 SDL's 60.001 Hz is the wrong number; the pacer uses the OS's current mode (2026-11-09)
+
+**Decision.** M5 saw SDL report 60.001 Hz for the window's display while
+VSYNC presents ran at about 165 Hz. Measured on 2026-11-09 (the
+`pacing.display_rates` desktop test and probes; one active output,
+`\\.\DISPLAY2`, an ASUS VG27AQL1A on the RTX 3080 at 2560x1440):
+- QueryDisplayConfig's target refresh for the path: 165003/1000 Hz;
+  EnumDisplaySettings(ENUM_CURRENT_SETTINGS): 165 Hz; DWM's
+  DwmGetCompositionTimingInfo: 10000000/60606 (165.0 Hz) and DwmFlush
+  every 6.05 ms (median); VSYNC presents of a clear frame: 164.987 Hz.
+- SDL 3.4.20's WIN_GetRefreshRate (src/video/windows/SDL_windowsmodes.c)
+  starts from dmDisplayFrequency (165), then replaces it with the refresh
+  of IDXGIOutput::FindClosestMatchingMode for 2560x1440 R8G8B8A8. DXGI's
+  mode list for this output has one mode at that size, 60.001 Hz (24 modes
+  in all, every one near 60 Hz; GDI's mode list likewise has only 60 Hz at
+  2560x1440), so SDL reports 60.001 Hz. The test reproduces SDL's
+  computation from the OS queries and checks it equals SDL's number.
+So SDL's display query is wrong and the present rate is right. The vblank
+sampler could not add its own measurement: the display had been idle for
+2.8 hours and was asleep (WaitForVBlank returned at once, and
+D3DKMTWaitForVerticalBlankEvent failed with
+STATUS_GRAPHICS_PRESENT_OCCLUDED); whether DXGI's mode list also lacks
+165 Hz while the monitor is awake is a gates.md entry. A list of only
+near-60 Hz modes looks like the driver's list without the monitor's own
+modes, so SDL may be right while the monitor is awake and wrong whenever
+it sleeps (as during unattended test runs, M5's included); the pacer does
+not depend on which, because it reads the current mode. (Measured at the
+integration with the display awake: DXGI lists 7 modes at 2560x1440 up to
+165.003 Hz, SDL reports 165.003 Hz, and the sampler 164.965 Hz; the
+60.001 Hz is the sleeping display's.)
+
+The "display mode" the pacer compares the sampler with, and the period it
+falls back to, is therefore the OS's current mode of the window's monitor:
+`se_platform/display_output.h` QueryMonitorMode reads QueryDisplayConfig's
+target refresh of the monitor's active path (MonitorOfWindow, then the
+path whose source GDI name is the monitor's). SDL's refresh is used only
+when that query has no answer (Linux, no active path). Both are logged at
+boot and after every display change ("display: SDL reports 60.001 Hz; the
+OS reports `\\.\DISPLAY2` ... at 165.003 Hz ..."). ADR-039's measured-period
+fallback stays for a mode that is unknown or wrong anyway.
+
+**Why.** With SDL's number every comparison with a correct sampler would
+fail and Paced could never run on this machine. This deviates from the
+spec's "SDL's mode" in M6b's period and mode rules.
+
+## ADR-056 The vblank sampler: when it runs, what it ignores, how it stops (2026-11-09)
+
+**Decision.**
+- It runs whenever the App has a window on Windows, started at boot step 9
+  before the watchdog and stopped at shutdown step 9 (HelperThreads::
+  StopSamplers; HelperThreads::Stop stops it too). Not only in Paced: the
+  pacer needs it to choose Paced, and Standard's frame clock uses its grid
+  (ADR-057). A sampler that cannot start is logged and the App runs
+  without it. EngineThreadsRunning counts it; its registry slot is in the
+  dumps (crash.rampage_* check it).
+- Stamps are QueryPerformanceCounter values after WaitForVBlank returns,
+  mapped to SDL_GetTicksNS by one calibration pair taken on main at Start
+  (SDL's ticks are QPC scaled from SDL's start). The period is the median
+  of the last 64 intervals, published after 16; the spread is p90 - p10.
+  An interval over 1.5 periods counts as that many vblanks and stays out of
+  the ring.
+- A wait that returns less than 1 ms after the previous one is not a
+  vblank: WaitForVBlank returns at once while the display is off (measured,
+  ADR-055). Such returns publish nothing; three in a row mark the output
+  off and back off for 50 ms.
+- The 100 ms watchdog is the stamp's age, judged by every reader against
+  its own clock (Read(now)): a WaitForVBlank that never returns cannot mark
+  itself, so a reading is fresh only while the newest vblank is younger
+  than 100 ms. A reading is valid when the thread runs, the output of the
+  latest SetMonitor is resolved, the reading is fresh, the output is not
+  off and the period is known.
+- Stop waits min(period, 100 ms) + 50 ms for the thread to leave its wait,
+  then joins; otherwise it marks the sampler stale and detaches the thread
+  (new `se::Thread::Detach`), which owns its state through a shared_ptr and
+  ends when the wait returns (design "Shutdown Order" step 9). Stop does
+  not log (it is noexcept); the App logs a detach after its teardown.
+- SetMonitor is two atomic stores (the monitor, then a generation with
+  release); main never takes the sampler's lock or wakes it, and the
+  sampler checks the generation every vblank and every 20 ms of a backoff.
+  Each resolve creates a new DXGI factory (an old one does not see outputs
+  a display change added). `MonitorHandle` is an opaque pointer (the
+  HMONITOR). se_platform now links se_os (StartThread) and dxgi, the only
+  module that does.
+
+**Why.** The spec bounds Stop and asks for staleness when WaitForVBlank
+does not return, which only a reader or a timed join can see; the early
+returns were found on this machine and would otherwise publish a
+2.5 MHz "display".
+
+## ADR-057 Frame starts on the vblank grid; misses against each present's target (2026-11-09)
+
+**Decision.**
+- FrameClock. With a valid sampler whose period agrees with the display
+  mode, frames start on its grid: Paced one presentation interval before
+  the frame's target vblank (ADR-016), Standard at the grid vblank at or
+  before now (Standard waits for the swapchain at the end of the previous
+  iterate, so now is just after a flip), VRR at its deadline; elapsed
+  intervals are the rounded grid difference, so `vblanks_known` is true.
+  Otherwise the frame starts on the wall clock with the period from
+  ChoosePeriod (the mode, or ADR-039's measured period), as in M5.
+  `--fixed-frame-dt` keeps M5's synthetic clock.
+- Targets. Paced: the vblank PlanPacedWake chose. Standard: the frame
+  start plus one presentation interval. RepresentLast's present targets
+  one vblank later. Each present is registered with the id
+  GetPresentStats reports right after it.
+- Misses (PresentTracker): the statistics name the newest displayed
+  present and its refresh; it missed when that refresh is after its
+  target's refresh (the target time converted through the statistics' sync
+  pair). A present the statistics skipped over missed only when its target
+  is before the earliest refresh it could have shown on. Counters that go
+  backwards or a present id that restarts reset the tracking. BeginFrame
+  reports one result per frame to FixedStepper::OnPresentResult: missed
+  when any present it resolved missed.
+- The N-L fence: BeginFrame polls the fence of frame N-L; pending sets
+  `gpu_fence_pending_at_start` (so k_max holds at k_rt while g is
+  unknown), then it waits, except while Modal.
+- EndFrame waits only after a frame that presented, and never while Modal.
+  Paced sleeps to target - StepPlan::budget_b of PlanNext (B capped at the
+  period plus the stepper's miss offset) with SDL_DelayNS; the timer p99
+  in m is the measured lateness of these sleeps once 16 exist (0.5 ms
+  before).
+- The mode is chosen at Attach and re-evaluated every 0.5 s and after an
+  output change. Paced is taken only after the sampler has been valid and
+  agreeing for 0.5 s; leaving Paced is immediate (at the next frame when
+  the sampler goes invalid). So a boot usually starts in Standard and turns
+  Paced within a second, and every change is logged with its reason. A
+  display is fixed-refresh when the sampler's spread is at most 10% of its
+  period.
+
+**Why.** Frame starts on the grid let Locked cadence count vblanks rather
+than round wall deltas, in Standard too. Per-present targets catch the
+"one refresh late" equilibrium (red team P1), which refresh deltas alone
+cannot see. A delayed promotion keeps a sampler that has just re-resolved
+from flapping the mode.
+
+## ADR-058 HalfRate, adaptive latency and VRR in the pacer; the M6b options (2026-11-09)
+
+**Decision.**
+- HalfRate is PacerPolicy's HalfRatePolicy with the M6b rule: above 100 Hz,
+  entered when more than 1% of the presents resolved over the last 2 s
+  missed or a full-rate frame's planned cost ((T/dt) S_hi + R_hi + g_hi +
+  m) exceeded the vblank period for 2 s; left after 4 s in which the
+  full-rate p95 cost stayed below 0.75 T. Modal frames do not count. It is
+  a pacer state (FramePacer::HalfRate, PresentInterval 2, the title, the
+  log), not a Lifecycle state. se_core's HalfRateController (M2, a 5 s
+  exit) stays for the stepper's virtual-display scenarios.
+- Frame latency 2 when k_rt S_95 + R_95 and g_95 each fit in the
+  presentation period but their sum does not, for 2 s; back to 1 after 4 s
+  without that; an unknown g never asks for 2; a base latency of 2 (the
+  editor, M10) is fixed. Each change calls SetFrameLatency.
+- VRR: IMMEDIATE, a deadline every 1/120 s, or 1/60 s when the display mode
+  is below 119.5 Hz (Windows does not report a panel's VRR range; its mode
+  is the range's top). A deadline already past re-anchors at now, so a
+  late frame causes no burst. The sleep aims early by the median measured
+  lateness (at most 1 ms): over 10 s here frame starts were within
+  0.287 ms p99 of their deadlines (`pacing.vrr_deadline`). No miss or
+  HalfRate logic runs in VRR.
+- `--pacing paced|standard|vrr|auto` (AppConfig). Auto is Paced when
+  possible on Windows and Standard elsewhere; `paced` asks for Paced on any
+  platform, with the same requirements. Without the SDL patch the App runs
+  Standard, or VRR when asked.
+- `--inject-late-frame FRAME:MS` (test builds): iterate FRAME sleeps MS
+  milliseconds after its ticks, before it renders.
+- Test builds show FramePacer::Summary() ("Paced 165.00 Hz x1 L1 miss 0")
+  in the window title; the pacer logs its per-second statistics at debug
+  level and its totals at shutdown.
+
+**Why.** These are the spec's rules with the choices it leaves open made
+explicit; the VRR lead keeps frame starts centred on the deadline instead of
+always late by the timer's lateness.
+
+## ADR-059 One HLSL source for DXIL and SPIR-V; SPIR-V committed, DXIL built (2026-11-09)
+
+**Decision.** The renderer's shaders are HLSL in engine/se_render/shaders/
+(`<name>.<vert|frag>.hlsl`). Vertex inputs and interstage values carry both
+`TEXCOORD<n>` semantics (SDL's D3D12 backend binds attribute location n to
+TEXCOORD n) and `[[vk::location(n)]]`; resources follow SDL's sets and
+spaces (vertex uniforms b0/space1, fragment textures t0+s0/space2).
+- SPIR-V: `tools/shaders/build_shaders.py spirv` runs glslangValidator
+  `-D -V -S <stage> -e main --auto-sampled-textures` (through wsl.exe on
+  Windows) and commits one lint-clean header per shader under
+  shaders/generated/. `--auto-sampled-textures` is added to the spec's
+  command: SDL_GPU's Vulkan backend binds sampled textures as combined
+  image samplers, and without it glslang emits a separate image and
+  sampler. The WSL presets run `checks.shaders.spirv_fresh` (regenerate,
+  fail on any difference, a missing header or one without a shader) and
+  `checks.planted.spirv_stale` (a header with one byte changed must be
+  reported).
+- DXIL: se_render's build runs the Windows SDK's dxc.exe (`-T vs_6_0|ps_6_0
+  -E main -Wno-ignored-attributes`; dxc ignores the vk attributes) into
+  build-tree headers; configure fails with the searched paths when dxc is
+  missing. Linux builds have SPIR-V only (`kHasDxil`).
+- `se_render/shaders.h` lists every shader with the resource counts given to
+  SDL_CreateGPUShader; `render_gpu.Every SPIR-V blob ...` and `... DXIL
+  blob ...` reflect the blobs (SPIR-V DescriptorSet decorations, the DXIL
+  container's PSV0 resource table) and compare, and a planted mismatch
+  must be caught.
+
+**Why.** One source keeps the two backends from drifting; glslang's output
+does not depend on the source path and was checked to be deterministic, so
+the committed bytes can be checked exactly.
+
+## ADR-060 stb in se_render: PNG decoding at boot, PNG writing for tests and tools (2026-11-09)
+
+**Decision.** `se::stb` is an INTERFACE target over the pinned archive's
+headers (SYSTEM, so its warnings stay out). se_render defines each
+implementation macro in exactly one translation unit: image_decode.cc
+(stb_image, `STBI_ONLY_PNG`, `STBI_NO_STDIO`: files are read through
+se::fs) and png_write.cc (stb_image_write, `STB_IMAGE_WRITE_STATIC`). Only
+the readback test hook, tests and tools call the writer; executables that
+do not leave its object file out of the link. The texture table
+(config/texture.json, ADR-026) is read by a small parser for its one shape,
+an object of strings (`ParseTextureTable`), so glaze stays confined. At
+boot step 7 the App decodes every texture of `GameSetup::texture_table` on
+main and flushes the uploads before the first frame (no magenta flash); a
+missing or undecodable file is an Error naming the path in the load report,
+logged as an error, and its sprites draw magenta.
+
+**Why.** SFML decodes PNGs with stb_image too, so the engine samples the
+same texels as the legacy reference; the comparison and goldens need PNG
+output in tests and tools only.
+
+## ADR-061 The sprite pipeline matches SFML's sprites: straight alpha, nearest texels (2026-11-09)
+
+**Decision.**
+- Straight (not premultiplied) alpha, blended as SFML's BlendAlpha:
+  colour = src.a * src + (1 - src.a) * dst, alpha = src.a + (1 - src.a) *
+  dst.a. Textures are uploaded as decoded; the tint multiplies the texel as
+  sf::Sprite's vertex colour does.
+- Nearest sampling, clamp to edge, no mipmaps; no culling (flips reverse
+  the winding).
+- Vertices stay in canvas pixels with texel coordinates (ADR-022): 20 bytes
+  (position, texel, tint as UBYTE4_NORM). A per-draw uniform block carries
+  the canvas-to-clip transform and 1/texture size, so a texture reloaded at
+  another size needs no new vertices. Indices are 32-bit, the same two
+  triangles per quad, written once per growth.
+- One vertex/index buffer pair and one transfer buffer, grown by doubling in
+  the build phase (logged); vertices go through the transfer buffer mapped
+  with cycle and are uploaded with cycle. One draw per QuadBatch.
+- The camera's canvas maps into a target with `FitCanvas`: letterboxed,
+  centred on whole pixels, Camera2D::integer_scale honoured when the
+  canvas fits at least once. Targets (the composite, viewports) are
+  R8G8B8A8_UNORM; their passes clear with cycle. The composite follows the
+  window's pixel size at each frame start (a minimized window keeps the
+  last size); the blit draws it with a full-target triangle and nearest
+  sampling, or clears the swapchain while the composite has never been
+  drawn.
+
+**Why.** The legacy textures are pixel art drawn by SFML with smoothing off
+and BlendAlpha; matching both keeps the legacy comparison within tolerance
+(99.994% of the stress scenario's pixels within 8/255 at tick 600) and the
+goldens identical across D3D12 and Vulkan on this machine.
+
+## ADR-062 The frame transaction's fault boundary and each step's policy (2026-11-09)
+
+**Decision.** engine/se_render/src/frame_recorder.cc is the
+`// se-fault-boundary` file ADR-006 means by "the FrameRecorder
+transaction": `FrameRecorder::RunBuildPhase` runs the build phase and
+returns a throw as an Error (text copied into a fixed buffer first,
+ADR-038). Policies, which `--inject-frame-fault STEP[:EVERY[:UNTIL]]`
+exercises (frames are iterates, as for --inject-null-acquire; UNTIL, the
+last faulting frame, is an addition to the spec's syntax so a test can see
+drawing resume):
+- build, vertices: nothing was acquired; in the game build this is a fault
+  like any other callback fault: the App requests a dump, shows the
+  message box (suppressed in tests) and returns SDL_APP_FAILURE, so the
+  shutdown order runs (M10's editor will enter Play.Faulted instead).
+- prepare (the frame command buffer): the frame is skipped and logged
+  (first, then every 120th); the uploads still go out through
+  PumpUploads.
+- upload (the upload command buffer): the uploads stay queued.
+- copy_pass: no new vertices, so no target is drawn; each keeps its last
+  image and the blit still presents the last composite.
+- viewport_pass: that target keeps its last image.
+- acquire: a NULL swapchain texture, never a state change (the lifecycle
+  counts it as M5 does).
+- swapchain_pass: no blit; the acquired texture is still submitted and
+  presented.
+- submit: SDL_SubmitGPUCommandBufferAndAcquireFence runs (a buffer that
+  holds a swapchain texture cannot be cancelled) and the failure is
+  reported as SDL would: no fence is kept, the frame is not counted as
+  presented.
+Prepare acquires the frame command buffer first and the upload command
+buffer second (the spec lists them the other way round), so a failed frame
+buffer never leaves an upload buffer to cancel. The only cancel left is of
+an upload buffer on which nothing was recorded; it goes through
+`CancelUnacquired`, which asserts that no swapchain texture was acquired.
+The guard submits the uploads (with their own fence) and the frame,
+keeps the frame's fence (`TakeFence`; Renderer2D keeps the last three for
+the pacer's N-L wait) and runs the retire queue. The INTEGRATION(M6) marks
+are in frame_recorder.cc.
+
+**Why.** The design's game build treats every exception as fatal, the
+editor isolates Play; containing the throw in the renderer leaves that
+choice to the caller. The other steps are SDL calls that report failure by
+value, and a frame that cannot draw must not stop the game.
+
+## ADR-063 GpuResources: handles survive reloads; lifetimes are counted (2026-11-09)
+
+**Decision.**
+- `Handle<Texture>{index, generation}`: the generation changes only when a
+  slot is removed, so a handle stays valid across reloads and device loss.
+  The spec's "generation flip" at residency is the slot's content
+  generation (`ContentGeneration`), which M10's ImGui ids can key on.
+- Resolve never returns null: null, unknown and removed handles
+  (`stale_resolves`) and valid handles with nothing resident yet
+  (`unresident_resolves`) get the built-in 1x1 magenta.
+- QueueUpload creates the slot's next texture at once and keeps the payload
+  (for RecreateAll). PlanUploads takes whole rows, oldest upload first, at
+  512-byte-aligned offsets into one 8 MB transfer buffer; an upload becomes
+  resident only after the fence of the batch with its last rows signalled,
+  and a newer upload of the slot supersedes older ones (retired, counted).
+  Allocation happens in PlanUploads (build phase); RecordUploads and
+  UploadsSubmitted are noexcept.
+- The retire queue runs after every submit: the frame's, an upload-only
+  iterate's, a readback's.
+- Every SDL_GPU object the renderer creates goes through counting helpers;
+  ~GpuResources releases what is left and logs "GPU objects: N created, N
+  released, 0 alive", or an error naming the counts per kind. The
+  fault-injection tests check that line: MSVC's AddressSanitizer has no
+  leak detection.
+- Device loss: ReleaseAll retires everything and keeps slots and payloads;
+  after the old device is idle and the queue has run, RecreateAll creates
+  render targets again (empty) and queues every payload, so handles and
+  ViewportTargets keep working (`render_gpu.*.Device loss ...` recreates
+  the device and matches the image before).
+
+**Why.** Panels and sprites name textures by handle every frame; a reload
+that invalidated handles would force every holder to look them up again,
+and SDL's D3D12 backend frees a released texture's container at once (red
+team C2), so releases must wait for the submit.
+
+## ADR-064 The App draws its render sources; R includes the frame's CPU work (2026-11-09)
+
+**Decision.**
+- GameSetup gains `texture_table` (relative to the content root; empty: no
+  textures) and `camera` (the Camera2D a World is drawn with; default its
+  primary camera). Boot step 7 creates Renderer2D after the device claims
+  the window and loads the table (ADR-060); no boot step was added, so
+  --fail-init-step keeps its numbering.
+- Each rendering iterate draws `GameStateStack::RenderSources(plan)` as
+  layers, bottom first; iterates that do not render (Suspended) call
+  PumpUploads, so uploads finish while the window is minimized.
+- FrameCosts' R is the iterate minus its ticks minus the swapchain wait;
+  the render build, recording and submit count. This replaces ADR-039's
+  "minus the whole frame transaction", which predates any CPU work in the
+  frame.
+- Test hooks: `--reload-texture NAME@FRAME[=FILE]` (FILE relative to the
+  content root) and `--readback FRAME:FILE` (the first rendered frame at or
+  after FRAME), both repeatable, frames being iterates.
+- The minimized-reload desktop test minimizes and restores its own window
+  with ShowWindow(SW_SHOWMINNOACTIVE / SW_SHOWNOACTIVATE), as M5's
+  Suspended test does, not with SDL_MinimizeWindow and SDL_RestoreWindow,
+  which activate the next window and ours (SW_MINIMIZE, SW_RESTORE) and so
+  take the focus from whoever uses the machine. The window events and
+  states are the same.
+
+**Why.** The runtime stays game-agnostic (the camera and the table are the
+game's); the swapchain wait is not CPU cost, while building and recording
+are, and the pacer's B needs them.
+
+## ADR-065 The legacy image comparison runs headless; goldens per driver (2026-11-09)
+
+**Decision.**
+- `legacy_replay --image-out TICK:FILE` (legacy tree, app/headless only)
+  runs to TICK (it replaces --ticks), then draws the registry's Sprites in
+  Sandbox::render's order into a fresh sf::RenderTexture of the configured
+  resolution cleared to opaque black, created before the run while the
+  headless engine's hidden 64x64 window provides the OpenGL context. No
+  visible window is needed, so the gates.md fallback is not used; the
+  comparison is a gpu and legacy test.
+- tools/render_shot runs the same scenario, input and tick headless
+  (rampage_test_support, one tick per frame) and draws the RenderList at
+  alpha 1 into a composite of the camera's canvas size cleared to opaque
+  black. `--compare` applies the tolerance in C++ (stb decoding): Python's
+  stdlib decodes a 1920x1080 PNG in seconds; tools/render_shot/
+  compare_images.py is the same rule as a stdlib tool with its own test.
+- The engine presets register `render.legacy_image.<driver>` when this
+  checkout has a legacy build tree (out/build/legacy-msvc-release or
+  -debug) or SE_LEGACY_REPLAY names one; the legacy presets register
+  `legacy.image_compare.stress` when an engine build has render_shot.
+  Configure-time discovery, so a tree built later needs a reconfigure.
+- The legacy Sandbox draws in EnTT's view order (newest first), the engine
+  by (layer, texture, z, spawn serial); overlapping sprites can differ, and
+  the tolerance absorbs it.
+- Golden images (tests/golden/render/d3d12, vulkan) are compared in C++
+  with the same rule; on this machine both drivers produce identical
+  files.
+- The comparison adds one condition to the spec's tolerance (same size,
+  98% of the pixels within 8/255, mean absolute difference at most
+  2/255): at least 90% of the drawn pixels are within 8/255, a drawn pixel
+  being one more than 8/255 from the background (the expected image's
+  most frequent colour) in either image. The spec's three conditions
+  alone pass an image that is missing almost all of a sparse scene: the
+  stress scenario's ships cover 4205 pixels at tick 600 (0.2% of
+  1920x1080), and an image with only the player drawn passed against the
+  sandbox (99.81% within, mean 0.294/255). With the condition the stress
+  scenario still matches at tick 600 (97.19% of the drawn pixels within,
+  on both drivers), as do the goldens and the fault-test readbacks, and a
+  blank image fails (`render_gpu.An image missing its sparse sprites does
+  not match`, tools.compare_images).
+- `checks.gpu_texture_members` (tools/checks/check_gpu_members.py) scans
+  every module but se_render, tests and tools included, for an
+  SDL_GPUTexture* stored in a class, struct or union (a pointer member or a
+  container of them), following braces through each file;
+  `checks.planted.gpu_texture_member` must catch a struct member, a class
+  member with a brace initializer and a vector of pointers.
+
+**Why.** Rendering the reference headless keeps the comparison in the
+commit gate instead of a desktop-only test; a separate checker keeps the
+member scan (which needs brace tracking) out of the line-based banned-API
+scan; the drawn-pixel condition makes "matches the legacy image" fail
+when the sprites are missing, which the background alone would hide.
+
+## ADR-066 Paced counts misses from the frame-latency wait on the vblank grid; statistics are counted beside it (2026-11-09)
+
+**Context.** M6a found (ADR-052) that DXGI kept a window's frame
+statistics at zero, and NVIDIA's Windows Vulkan driver has no
+VK_GOOGLE_display_timing, so a source of hits and misses other than the
+statistics was needed for Paced in a window. Measured at the integration
+on 2026-11-09:
+- While the display sleeps (as in every M6a and M6b run, and the
+  integration's first ones) WaitForVBlank returns at once, the vblank
+  sampler has no valid reading, Paced cannot run, and DXGI's window
+  statistics are zero.
+- With the display awake, DXGI fills a window's statistics, but they
+  describe DWM's composition: over 20 s of Paced rampage on D3D12 each of
+  3296 presents was reported displayed one refresh after the vblank its
+  latency wait showed it taken at, although every present was submitted
+  at least 0.8 ms (p50 1.5 ms) before its target vblank and every wait
+  returned 0.35 ms (p50; p99 1.2 ms) after that vblank. Counted as misses
+  against the target they read as 54% to 100% late (HalfRate's own phase
+  sometimes lets DWM take a present one vblank early) and put Paced into
+  HalfRate for nothing; M6a's per-refresh invariant also fails at times
+  (one refresh shows two presents).
+
+**Decision.**
+- The pacer's miss source, per frame: the frame-latency wait on the vblank
+  sampler's grid whenever it can resolve the frame's present (the waitable
+  or present_wait exists, and the frame has a target on the grid: Paced,
+  or Standard with a valid sampler); otherwise present statistics (a
+  backend with statistics but no waitable, such as Vulkan with display
+  timing and no present_wait); otherwise none. Present statistics are
+  still read every frame and counted beside the source
+  (PacerFrame::stats_resolved/stats_missed, PacerTotals::stats_*), and
+  `pacing.paced_misses` prints both.
+
+| Backend | Path | Pacer's source | Statistics |
+|---|---|---|---|
+| D3D12 | a window DWM composes | the waitable's return on the grid | DWM's displayed refresh (taken + 1), reported beside |
+| D3D12 | independent flip (borderless fullscreen in front) | the waitable's return on the grid | DXGI's displayed refresh, reported beside (not measured: gates.md) |
+| Vulkan | present_id and present_wait (NVIDIA here) | vkWaitForPresentKHR's return on the grid | none (no display timing) |
+| Vulkan | display timing, no present_wait | present statistics (ADR-052's derived counts) | the source |
+| any | no waitable (unpatched), no valid sampler (display asleep, Linux), VRR, `--fixed-frame-dt` | none: Standard, or no miss logic | |
+
+- The wait. With frame latency L the wait after a present returns once the
+  present L - 1 before it has left the present queue: DXGI signals the
+  waitable when the compositor (or the display) takes the present at a
+  vblank; vkWaitForPresentKHR returns when it has been presented. Every
+  wait polls (timeout 0) first and then blocks. A wait that blocked
+  returned at the vblank that took its present: it was taken
+  floor((return - target + slack) / period) vblanks after its target,
+  slack = min(1.5 ms, period / 4) (the sampler's stamps, taken after
+  WaitForVBlank returns, trail the true vblank); one or more is a miss.
+  A wait that was ready at once or timed out does not say when: the D3D12
+  waitable is also signalled at vblanks while the queue has room, so the
+  wait after a late frame (idle vblanks) is ready at once. Such a present
+  is a miss when it was submitted after its target plus the slack (it
+  cannot have been taken before it was submitted: at least
+  floor((submit - target - slack) / period) + 1 vblanks late), and
+  unresolved otherwise, never a hit. Presents without a target or whose
+  wait never ran (Modal frames) are unresolved.
+- The offset is 0, measured over six 20 s runs: the waits return after
+  the target's sampler stamp at p50 0.02 to 0.35 ms and p99 0.12 to
+  1.2 ms on both backends, at most 2.4 ms, against a 6.06 ms period; a
+  one-vblank offset would have shown as every present late.
+- Targets lie ahead of now by the same slack (EarlySlackNs): PlanPacedWake
+  takes the first grid vblank after now + slack, and Standard's target is
+  one interval after the grid vblank at or before now + slack (its frame
+  start stays the vblank at or before now). Without this a fake display
+  whose stamps trail the waits' returns by 0.5 ms put Paced into a
+  one-refresh-late equilibrium (every target a vblank that had just
+  passed), which the latency wait reported as every present missed.
+- Paced needs the waitable and a valid, agreeing, fixed-refresh sampler,
+  no longer present statistics. PacerFrame carries `miss_source`,
+  `late_vblanks`, `unresolved`, `wait_blocked`, `wait_phase_ns` and
+  `submit_ns`; PacerTotals counts the presents each source resolved and
+  the unresolved waits; the per-second log, the shutdown line and the
+  desktop tests print them. A wait's result is recorded in the frame that
+  waited and reported to FixedStepper::OnPresentResult and HalfRate at the
+  next frame; statistics' results arrive at a frame start.
+- In Standard's HalfRate the re-presented composite is registered and
+  waited for like the frame's own present (one wait per present).
+- Measured with the display awake (desktop tests, 20 s of rampage, Paced
+  at 165 Hz): D3D12 0 or 1 of about 3298 presents late (0.03% at most); the injected 30 ms frame one
+  miss (submitted 28 ms after its target), on time from the next frame.
+  Vulkan 50 to 82 of about 2250 (2.2% to 3.6%) one vblank late, with the
+  same submit lead as the hits (p50 2.3 ms against 2.2 ms): NVIDIA's
+  Vulkan path in a window drops that many whatever the lead, so
+  `pacing.paced_misses_vulkan` reports it and the M6 exit stays on
+  rampage's default D3D12 (gates.md).
+
+**Why.** What the pacer controls is whether a present is taken at the
+vblank it was planned for; the wait measures exactly that on both
+backends, against the sampler's clock of the window's output. A window's
+DXGI statistics add DWM's own refresh of composition, which the pacer can
+neither avoid nor act on, and its displayed latency is what PresentMon's
+capture measures (gates.md). This reverses the integration brief's order
+("statistics preferred when they are non-zero"), whose premise was that
+non-zero statistics come only from independent flip. Counting unknown
+waits as hits would report numbers the hardware did not give.
+
+## ADR-067 The PresentPort adapter and the GPU timing hooks (2026-11-09)
+
+**Decision.**
+- `RenderPresentPort` (se_runtime/render_present_port.h) is the PresentPort
+  over se::present and Renderer2D, and replaces M6b's ClearOnlyPresentPort
+  (deleted). Caps, latency, waits, statistics, timing, status, handles and
+  the present mode are se::present field by field. Without the SDL patch
+  `tearing` and SetPresentMode come from SDL itself
+  (SDL_WindowSupportsGPUPresentMode, SDL_SetGPUSwapchainParameters), so
+  VRR still runs unpatched as ADR-058 says; every other cap is false.
+- Fences: Renderer2D keeps each submission's fence
+  (FrameRecorder::TakeFence) in its ring of three, so OnFrameSubmitted has
+  nothing to keep (a fence handed in is released) and WaitFrameFence reads
+  Renderer2D::FrameFence(frames_back): a zero timeout polls, a longer one
+  blocks in SDL_WaitForGPUFences (SDL has no timed wait). RepresentLast is
+  Renderer2D::RepresentLast; WaitSwapchain is SDL_WaitForGPUSwapchain.
+- GPU timing: FrameRecorder::Prepare calls present::BeginGpuTiming right
+  after the frame command buffer is acquired, Submit calls EndGpuTiming
+  after ending any pass and before SDL_SubmitGPUCommandBufferAndAcquireFence;
+  at each Frame() start Renderer2D reads, oldest first, the kept frames
+  whose fences have signalled (present::ReadGpuTime consumes the result)
+  and reports the newest in Renderer2DStats (`gpu_timed`, `gpu_ns`).
+  RepresentLast's blit is timed by the patch but not read. The App passes
+  it to CostTracker::AddFrame, so FrameCosts' g_hi and g_95 are measured
+  (unknown, NaN, when nothing arrived: unpatched, or a frame that did not
+  render). Measured here: 0.012 ms (D3D12) and 0.017 ms (Vulkan) for the
+  sandbox frame.
+- FrameCosts' R is ADR-064's (the iterate minus its ticks minus the
+  recorder's swapchain wait) minus the pacer's N-L fence wait at
+  BeginFrame, which is GPU time. The pacer's other waits run in EndFrame,
+  after the costs are recorded. Without the fence term, an unpatched build
+  (no waitable, so the fence of the last frame is pending at each frame
+  start for most of a vblank) carried the wait in R_hi, held k_max at 1 at
+  165 Hz, and a 64 Hz modal loop then ran 65 ticks a second instead of
+  120 (`platform.Ticks continue during a modal loop with Modal set`
+  failed in msvc-unpatched-dev with the display awake).
+- Measured on D3D12: in Standard the N-L fence (frame latency 1) is still
+  pending at nearly every frame start, about 0.3 ms after the waitable
+  returned (164 fence waits a second); in Paced, after the sleep, about
+  one a second; on Vulkan none.
+
+**Why.** Renderer2D already owns the frame's fences and the composite, so
+the adapter is a thin copy; reading timings at the next frame start needs
+no wait, and timing only the frame's own command buffer keeps g the cost
+of a frame.
+
+## ADR-068 Device loss: DeviceLost, recreation on main, the test hook (2026-11-09)
+
+**Decision.**
+- The App reads present::QueryDeviceStatus at every iterate's start and
+  after a submit that failed (a failed submit only sets a flag for the next
+  start). kRemoved, and nothing else, enters the lifecycle's new
+  DeviceLost condition (dominant after the quit phases): no rendering, no
+  gameplay, a 10 Hz callback rate while recreation keeps failing.
+- Entering it: the pacer detaches from the port (the sampler keeps
+  running), the port goes, Renderer2D::ReleaseGpuObjects moves every GPU
+  object through the retire queue (the GPU idle, the queue run), and the
+  old device releases the window. The old device stays alive until the new
+  one exists, so the renderer never refers to a destroyed device.
+- Recreation, in the same iterate when it succeeds: a new GpuDevice with
+  the same driver claims the window, Renderer2D::RecreateGpuObjects
+  (GpuResources::RecreateAll re-uploads every kept payload and flushes;
+  handles keep their values), a new RenderPresentPort, the pacer attached
+  again (it chooses its mode and frame latency afresh), and the lifecycle
+  back to Running with a frame-clock reset (no catch-up). Worlds are
+  untouched. A recreation that fails is logged and retried every second;
+  the fifth failure takes the callbacks' fault path ("GPU device
+  recreation").
+- `--inject-device-lost FRAME` (test builds): at the start of iterate FRAME
+  the port reports kRemoved once. The desktop tests
+  `render.fault.<driver>.device_lost` run rampage with it at frame 100 on
+  the fault suite's synthetic clock and require DeviceLost, the recovery,
+  exit 0 after 150 presented frames, every GPU object released, and the
+  frame-140 readback to match the suite's no-fault reference readback
+  within the golden tolerance (ADR-065). The reference readback is the
+  "golden" here: the sandbox's committed golden is drawn by render_shot at
+  another size.
+- Measured: recovery takes about 70 ms on D3D12 and 150 ms on Vulkan with
+  the debug layers on.
+
+**Why.** The design enters DeviceLost only on a device-removed status and
+recreates on main with handles kept; keeping the old device until the new
+one is ready makes a failed recreation safe to retry, and recovering at the
+frame start keeps the tick sequence, so the readback can be compared frame
+for frame.
+
+## ADR-069 The image comparison judges each sprite; the GPU-object checks close their gaps (2026-11-09)
+
+**Context.** The M6/M7 review found that ADR-065's drawn-pixel condition
+still passed an image with one sprite erased or drawn in the fallback
+magenta: one ship of the stress scenario is about 6% of the 4205 drawn
+pixels at tick 600 against about 7 points of headroom (97.19% within), and
+each of the 60 sprites of `sprite_grid.png`, 19 of the 21 of `rotated.png`
+and all 47 of `sandbox_600.png` could be erased with the golden still
+matching. The legacy and engine images differ where ships overlap in
+another draw order (ADR-065), and that difference is not small: the
+largest connected group of differing pixels is 114 pixels, more than the
+smallest ship (56 pixels), so a cap on differing clumps cannot tell a
+missing sprite from draw order. Measured on the real pairs instead: no
+pixel is drawn in one image and background in the other together with all
+8 of its neighbours, no pixel shows the fallback magenta, and every object
+(an 8-connected group of one image's drawn pixels) has at least 75% of its
+pixels within 8/255 (46.8% for an untested pair at tick 604). The review
+also found that check_gpu_members.py missed a texture pointer kept through
+an alias or a smart pointer, and that se::present asserted only the
+engine's main thread, not SDL's.
+
+**Decision.**
+- The comparison (tests/render_gpu/support/image_compare.h and its Python
+  twin tools/render_shot/compare_images.py) keeps the spec's three
+  conditions and ADR-065's 90% of the drawn pixels, and adds three:
+  - every object of either image with at least 8 pixels has at least 25%
+    of its pixels within 8/255 (specks under 8 pixels are left to the
+    image-wide conditions): an isolated sprite that is missing, added or
+    drawn in other colours has none;
+  - at most 8 solid mismatches, pixels drawn in one image and background
+    in the other whose 8 neighbours are too: a sprite missing from a group
+    of overlapping ones leaves such a block (19 to 24 for the smallest
+    ships), draw order and rasterization leave thin edges (0 measured);
+  - at most 8 pixels within 8/255 of opaque magenta (GpuResources' fallback
+    texture) in the actual image where the expected one is not.
+- The legacy image of the stress scenario at tick 600 is committed
+  (tests/golden/render/legacy/stress_600.png, 89 KB, byte-identical in
+  every preset's run). `render.legacy_image.*` and `legacy.image_compare.*`
+  fail when legacy_replay's image differs from it (SE_UPDATE_GOLDENS=1
+  rewrites it), so the unit test `render_gpu.The sandbox golden matches the
+  legacy image, sprite by sprite` sweeps the real pair in every preset,
+  WSL included: every object of the engine image erased, and drawn
+  magenta, must fail, and one moved by 40 pixels too. `render_gpu.Every
+  object of each golden, erased or magenta, fails` does the same for each
+  golden against itself (every eighth object of the 1920x1080 sandbox,
+  which the legacy sweep covers in full). Synthetic cases pin each
+  condition and show overlapping sprites in another order and sprites
+  shifted by one pixel still matching. With the old conditions these
+  tests fail; the real pairs keep their margins.
+- check_gpu_members.py reports any class, struct or union member that
+  names SDL_GPUTexture (a pointer, a reference, a container, a smart
+  pointer, any template argument), an SDL struct that holds one
+  (SDL_GPUTextureLocation, SDL_GPUTextureRegion, SDL_GPUBlitRegion,
+  SDL_GPUBlitInfo, SDL_GPUColorTargetInfo, SDL_GPUDepthStencilTargetInfo,
+  SDL_GPUTextureSamplerBinding, SDL_GPUStorageTextureReadWriteBinding), or
+  an alias of either (using or typedef, aliases of aliases, collected over
+  every scanned file first). Member function declarations, function
+  pointers and members initialized by a call are told apart. The planted
+  fixture adds an alias, a typedef chain, a unique_ptr, an SDL struct and
+  initialized and annotated members;
+  `checks.planted.gpu_texture_member_allowed` holds the allowed forms and
+  must report nothing.
+- se_render asserts `SE_ASSERT_GPU_THREAD` (the engine's main thread and
+  SDL_IsMainThread) in every function, present.cc included;
+  check_banned_api.py's rule gpu_thread bans `SE_ASSERT_MAIN_THREAD` in
+  se_render, with no opt-out (planted: `checks.planted.gpu_thread`).
+
+**Why.** Each added condition answers one way a frame can be wrong while
+most of it is right, with thresholds set from the real pairs' measured
+margins; nothing the spec's tolerance passed before fails now except the
+planted damage.
+
+## ADR-070 Unattended runs show no dialog: SDL's assertions print and abort (2026-11-09)
+
+**Context.** SE_NO_MESSAGE_BOX=1 suppressed the engine's and the CRT's
+boxes, but a failed SDL assertion (SDL's own, or the presentation patch's
+debug-mode checks) opened SDL's Abort/Retry/Ignore box, which hung
+msvc-release once until the CTest timeout, on the owner's desktop. The M6
+exit "rampage runs in Standard unpatched" (`pacing.unpatched_standard`)
+also ran in no scripts/ci.ps1 path: the patched desktop presets skip it and
+the unpatched test preset excludes the desktop label.
+
+**Decision.**
+- `se::SuppressFaultDialogs()` (se_platform/fatal.h) turns off the CRT and
+  Windows Error Reporting dialogs as ConfigureFaultDialogs did and installs
+  an SDL assertion handler that prints `SDL assertion failed: '<condition>'
+  at <file>:<line> (<function>)` to stderr and aborts. It does not return
+  SDL's ABORT, which calls SDL_Quit first and can block or assert again
+  inside a GPU call. ConfigureFaultDialogs calls it under
+  SE_NO_MESSAGE_BOX=1; every Catch2 executable that links se_platform
+  (the platform, pacing, present and render_gpu tests) calls it
+  unconditionally through tests/support/no_dialogs_listener.cc, and so does
+  render_shot.
+- scripts/ci.ps1 also sets SDL_ASSERT=abort (SDL's default handler honours
+  it) for any process that installs no handler.
+- Tests: `platform.Test executables never show SDL's assertion dialog`,
+  `platform.SE_NO_MESSAGE_BOX=1 replaces SDL's assertion dialog`, and
+  `platform.sdl_assertion_aborts`, which runs a hidden case that fails an
+  SDL_assert_release through tests/platform/run_app.py (`--expect-abort`:
+  the process must end in abort(), exit status 3 on Windows or SIGABRT
+  elsewhere, having printed the line; a dialog would run into the
+  timeout). The case restores SIGABRT's default action first, since
+  Catch2's own report allocates inside the signal handler, which TSan
+  flags.
+- `scripts/ci.ps1 -Desktop` (and so -Milestone) also builds
+  msvc-unpatched-dev and runs `ctest -L desktop -R
+  pacing[.]unpatched_standard --no-tests=error` there.
+
+**Why.** Tests run unattended on a desktop someone may be using; a
+diagnosable abort is the only acceptable end of a failed assertion there.
+
+## ADR-071 HalfRate does not flap; Standard's HalfRate holds each frame for two vblanks; the probe's present is paced (2026-11-09)
+
+**Context.** The review found four pacing defects. HalfRate entered on
+misses above 1% but left on cost margin alone, so misses that cost does not
+explain made it toggle: on NVIDIA's Vulkan path in a window it went on and
+off three times in 20 s (2 s at full rate, 4 s at half), against the
+design's "HalfRate does not flap at a 1% miss load". The entry log printed
+the miss fraction after HalfRatePolicy had cleared its window (always
+0.0%). In Standard, HalfRate registered each frame's present one vblank
+later than it can be taken, so a present one vblank late counted as a hit;
+it also re-presented after every frame, so a frame slower than one vblank
+(HalfRate entered by cost) held the screen for three vblanks and the frame
+starts were three apart. And the Suspended probe's present (the frame that
+leaves Suspended) was never reported to the pacer: not counted, its fence
+not waited for N-L, its present not waited for.
+
+**Decision.**
+- HalfRatePolicy leaves after a dwell of margin in which the full-rate p95
+  cost stays below 0.75 T *and* at most 1% of the presents resolved over
+  the last 2 s at half rate missed. The dwell is 4 s (ADR-058) and doubles,
+  up to 64 s, at each entry within 10 s of the previous exit; an entry
+  later than that starts again at 4 s. Unit tests: a constant 3% miss load
+  enters once in 30 s and stays (five entries before); 3% at full rate and
+  none at half rate stays 4, 8 and 16 s, four entries in 60 s (ten
+  before). Measured on Vulkan with the display awake: one entry in 20 s,
+  kept (its misses continue at half rate, 4.1% overall).
+- The entry log names the cause and the fraction over the 2 s that entered
+  it, and the dwell (`EntryMissFraction`, `EnteredByCost`, `ExitDwellSec`).
+- Standard: a frame starts just after a flip, and its own present targets
+  the next vblank; in HalfRate it targets two vblanks after the previous
+  frame's own present was taken, unless that is earlier. The composite is
+  presented again only when the frame's present was taken at the first
+  vblank after its start (a slower frame already holds the screen for two
+  vblanks), and the re-present targets the vblank after that take. Off the
+  vblank grid (no valid sampler) it re-presents after every frame,
+  untargeted, as before. This replaces ADR-057's "Standard: the frame
+  start plus one presentation interval" and the re-present target of
+  ADR-066. Unit tests: in Standard HalfRate a present one vblank late is a
+  miss, and 8 ms frames at 165 Hz start two vblanks apart without
+  re-presents or misses (both fail with the old targets).
+- The App reports the probe's frame to the pacer (OnFrameSubmitted) right
+  after BeginFrame, like any other frame. Desktop test `platform.The
+  Suspended probe's present reaches the pacer` pushes an
+  SDL_EVENT_WINDOW_OCCLUDED for its own window (nothing on the desktop
+  changes) and requires the pacer to count every present the App made (it
+  fails without the change).
+
+**Why.** Hysteresis must be on the quantity that entered the state; a
+cause HalfRate does not cure should keep it rather than toggle it, and one
+it cures but cost does not predict should back off. Standard has no sleep
+to keep a phase, so the take of each frame's own present is its phase.
+
+## ADR-072 Present statistics are checked on their own, after the measured composition delay (2026-11-09)
+
+**Context.** The M6 exit counts Paced misses "by present statistics";
+ADR-066 made the latency wait the pacer's source, because DXGI's
+statistics for a window DWM composes report every present after the
+vblank that took it. Counted against the targets they read 100% late
+(3295 of 3295 in the review's run), so the exit passed on ADR-066's source
+alone, which needs the owner's acceptance. Measured now with the display
+awake: each present of the 20 s D3D12 run (3295) is shown exactly two
+refreshes after its target and two after the vblank its latency wait saw
+it taken at (ADR-066 recorded one; its count did not separate the two).
+
+**Decision.**
+- PresentTracker reports, for each present whose refresh the statistics
+  tell, the refreshes it was shown after its target (0 or fewer, 1, 2, 3,
+  4 or more), and for each named present whose take the latency wait saw
+  (`OnPresentTaken`, from each blocked wait), the refreshes it was shown
+  after that take. PacerFrame and PacerTotals carry both
+  (`stats_lateness`, `stats_delay`); the shutdown log prints them.
+- `CheckStatistics`: the composition delay is the most frequent
+  shown-after-take value (without takes, the most frequent lateness; the
+  smaller on a tie); the statistics' misses are the presents shown later
+  than their target plus that delay. The delay is a property of the
+  presentation path, measured per run rather than assumed, and the
+  lateness is counted against the targets, so a pacer that took its
+  presents late still shows them beyond it (a unit test: every present
+  taken one late and shown after DWM's two refreshes is a miss by the
+  statistics).
+- `pacing.paced_misses` (D3D12, the exit's gate) requires, beside the
+  latency wait's under 1%, when the statistics resolved at least 80% as
+  many presents as the wait: takes known for at least 80% of them, and
+  under 1% shown later than target plus delay. It prints both histograms.
+  Measured: 0 of 3295 beyond a delay of 2. `paced_misses_vulkan` reports
+  only (NVIDIA's Vulkan has no display timing).
+- Whether ADR-066's source with this check satisfies the exit's "by
+  present statistics" is the owner's decision (docs/gates.md).
+
+**Why.** The spec asks for the statistics' verdict; this gives it with the
+one correction the composed path needs, measured on the run itself, so
+the exit no longer rests on the change of source alone.

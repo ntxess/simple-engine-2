@@ -21,6 +21,8 @@ std::string_view LifecycleStateName(LifecycleState state) noexcept {
       return "Idle";
     case LifecycleState::kSuspended:
       return "Suspended";
+    case LifecycleState::kDeviceLost:
+      return "DeviceLost";
     case LifecycleState::kQuitPending:
       return "QuitPending";
     case LifecycleState::kShuttingDown:
@@ -116,6 +118,21 @@ void Lifecycle::OnAnyEvent() {
 
 void Lifecycle::OnNullAcquire() { ++null_acquires_; }
 
+void Lifecycle::OnDeviceLost() {
+  device_lost_ = true;
+  idle_ = false;
+  NoteState();
+}
+
+void Lifecycle::OnDeviceRecovered() {
+  if (device_lost_) {
+    device_lost_ = false;
+    // No catch-up for the time recreation took.
+    reset_frame_clock_ = true;
+  }
+  NoteState();
+}
+
 void Lifecycle::OnSuspendProbe(bool window_visible, bool acquire_succeeded) {
   if (window_suspended_ && window_visible && acquire_succeeded) {
     SetWindowSuspended(false);
@@ -125,7 +142,7 @@ void Lifecycle::OnSuspendProbe(bool window_visible, bool acquire_succeeded) {
 
 void Lifecycle::Update(std::uint64_t now_ns) {
   const bool can_idle = config_.idle_allowed && phase_ == Phase::kRunning &&
-                        !Suspended() && !modal_;
+                        !Suspended() && !modal_ && !device_lost_;
   if (!can_idle) {
     idle_ = false;
   } else if (woke_) {
@@ -170,6 +187,7 @@ LifecycleState Lifecycle::State() const noexcept {
     case Phase::kRunning:
       break;
   }
+  if (device_lost_) return LifecycleState::kDeviceLost;
   if (Suspended()) return LifecycleState::kSuspended;
   if (modal_) return LifecycleState::kModal;
   if (idle_) return LifecycleState::kIdle;
@@ -183,19 +201,20 @@ CallbackRate Lifecycle::Rate() const noexcept {
     return CallbackRate::kFull;
   }
   // A draining quit keeps iterating, at 10 Hz while nothing is visible.
-  if (Suspended()) return CallbackRate::kSuspended;
+  // A device recreation that failed is retried at 10 Hz too.
+  if (Suspended() || device_lost_) return CallbackRate::kSuspended;
   if (phase_ == Phase::kRunning && idle_) return CallbackRate::kWaitEvent;
   return CallbackRate::kFull;
 }
 
 bool Lifecycle::ShouldRender() const noexcept {
   if (phase_ != Phase::kRunning && phase_ != Phase::kQuitPending) return false;
-  return !Suspended();
+  return !Suspended() && !device_lost_;
 }
 
 bool Lifecycle::GameplayRuns() const noexcept {
   if (phase_ != Phase::kRunning && phase_ != Phase::kQuitPending) return false;
-  if (Suspended()) return false;
+  if (Suspended() || device_lost_) return false;
   if (!focused_ && config_.pause_on_focus_lost) return false;
   return true;
 }

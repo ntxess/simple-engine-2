@@ -29,19 +29,29 @@
 #include "se_core/thread_role.h"
 #include "se_core/time.h"
 #include "se_core/world.h"
+#include "se_platform/display_output.h"
 #include "se_platform/fatal.h"
 #include "se_platform/fs.h"
 #include "se_platform/inbox.h"
 #include "se_platform/sdl_context.h"
+#include "se_platform/vblank_sampler.h"
 #include "se_platform/wake.h"
 #include "se_platform/window.h"
 #include "se_render/frame_recorder.h"
 #include "se_render/gpu_device.h"
+#include "se_render/image_io.h"
+#include "se_render/renderer_2d.h"
+#include "se_render/texture_table.h"
+#include "se_render_core/render_components.h"
+#include "se_render_core/render_list.h"
 #include "se_runtime/app_config.h"
 #include "se_runtime/basic_input.h"
+#include "se_runtime/frame_pacer.h"
 #include "se_runtime/integration.h"
 #include "se_runtime/lifecycle.h"
+#include "se_runtime/pacer_policy.h"
 #include "se_runtime/quit.h"
+#include "se_runtime/render_present_port.h"
 #include "se_sim/game_module.h"
 #include "se_sim/game_state.h"
 #include "se_sim/replay.h"
@@ -86,6 +96,9 @@ namespace {
 constexpr std::uint64_t kTitleIntervalNs = 250'000'000;
 constexpr std::uint64_t kLogIntervalNs = 2'000'000'000;
 constexpr double kNsToSec = 1e-9;
+// A failed device recreation is retried this often, this many times.
+constexpr std::uint64_t kRecreateRetryNs = 1'000'000'000;
+constexpr std::uint32_t kMaxRecreateAttempts = 5;
 
 // A standard-library throw, the kind the fault boundaries contain (test
 // hook; engine code never writes `throw`).
@@ -108,6 +121,18 @@ void InjectedThrow(std::string_view site) {
 std::string GpuDriverFromEnvironment() {
   const char* value = SDL_getenv("SE_GPU_DRIVER");
   return value != nullptr ? std::string(value) : std::string();
+}
+
+FramePacerConfig PacerConfigFrom(const AppConfig& config) {
+  FramePacerConfig pacer;
+  pacer.request = config.pacing;
+#if defined(_WIN32)
+  // Paced is the Windows runtime default; elsewhere it is not claimed
+  // until measured.
+  pacer.paced_by_default = true;
+#endif
+  pacer.fixed_frame_dt_sec = config.fixed_frame_dt_ms * 1e-3;
+  return pacer;
 }
 
 }  // namespace
@@ -135,7 +160,7 @@ App::App(const AppConfig& config, GameSetup setup)
     : config_(config),
       setup_(std::move(setup)),
       lifecycle_(setup_.lifecycle),
-      clock_(config.fixed_frame_dt_ms * 1e-3),
+      pacer_(PacerConfigFrom(config)),
       stepper_(setup_.tick_rate) {}
 
 App::~App() {
@@ -228,7 +253,7 @@ std::expected<void, Error> App::Boot() {
     if (!window) return std::unexpected(std::move(window.error()));
     window_ = std::move(*window);
     window_->SetListener(this);
-    refresh_hz_ = window_->Refresh().hz;
+    UpdateDisplay(/*force=*/true);
   }
 
   // 7. The GPU device, claiming the window with VSYNC.
@@ -247,6 +272,10 @@ std::expected<void, Error> App::Boot() {
     }
     SE_LOG_INFO("GPU device '{}' (debug mode {}), display {:.3f} Hz",
                 gpu_->Driver(), gpu_->DebugMode(), refresh_hz_);
+    if (auto started = StartRenderer(); !started) {
+      return started;
+    }
+    present_ = std::make_unique<RenderPresentPort>(*gpu_, *renderer_);
   }
 
   // 8. The CPU topology.
@@ -276,8 +305,11 @@ std::expected<void, Error> App::Boot() {
   inputs.modal = &modal_flag_;
   inputs.suspended = &suspended_flag_;
   inputs.heartbeat = &heartbeat_flag_;
+  integration::VblankStart vblank;
+  vblank.enabled = window_ != nullptr;
+  vblank.monitor = monitor_;
   auto helpers =
-      integration::StartHelperThreads(config_, inputs, boot_start_ns_);
+      integration::StartHelperThreads(config_, inputs, boot_start_ns_, vblank);
   if (!helpers) return std::unexpected(std::move(helpers.error()));
   helpers_.emplace(std::move(*helpers));
 
@@ -296,6 +328,10 @@ std::expected<void, Error> App::Boot() {
   for (QuitProvider* provider : setup_.quit_providers) {
     quit_.AddProvider(provider);
   }
+  // The pacer: the present port and the vblank sampler; it chooses the
+  // mode (Standard until the sampler has measured, when Paced is possible).
+  pacer_.SetDisplayRefresh(PacingRefreshHz());
+  pacer_.Attach(present_.get(), MakeVblankReader());
   const bool focused = window_ == nullptr || window_->Focused();
   const bool visible = window_ == nullptr || window_->Visible();
   lifecycle_.BootComplete(SDL_GetTicksNS(), focused, visible);
@@ -385,6 +421,37 @@ std::expected<void, Error> App::StartGame() {
                 std::format("the start state '{}' could not be pushed", start));
   }
   return {};
+}
+
+std::expected<void, Error> App::StartRenderer() {
+  auto renderer = Renderer2D::Create(*gpu_);
+  if (!renderer) return std::unexpected(std::move(renderer.error()));
+  renderer_ = std::move(*renderer);
+  if (kRuntimeTestHooks) renderer_->Faults().Configure(config_.frame_fault);
+  readbacks_done_.assign(config_.readbacks.size(), false);
+  if (setup_.texture_table.empty()) return {};
+  auto report = LoadTextureTable(renderer_->Resources(), paths_.content_root,
+                                 setup_.texture_table);
+  if (!report) return std::unexpected(std::move(report.error()));
+  // A texture that does not load draws magenta; the game still boots.
+  for (const Error& error : report->errors) {
+    SE_LOG_ERROR("{} ({})", error.message, error.path);
+  }
+  textures_ = std::move(report->entries);
+  if (auto flushed = renderer_->Resources().FlushUploads(); !flushed) {
+    return flushed;
+  }
+  SE_LOG_INFO("renderer: {} of {} textures from {} resident", report->loaded,
+              textures_.size(), setup_.texture_table);
+  return {};
+}
+
+Camera2D App::CameraFor(const World& world) const {
+  if (setup_.camera) return setup_.camera(world);
+  if (const std::optional<Camera2D> primary = PrimaryCamera(world)) {
+    return *primary;
+  }
+  return Camera2D{};
 }
 
 Tick App::NextTick() const noexcept {
@@ -489,7 +556,10 @@ SDL_AppResult App::HandleEvent(const SDL_Event& event) {
       break;
     case SDL_EVENT_WINDOW_DISPLAY_CHANGED:
     case SDL_EVENT_DISPLAY_CURRENT_MODE_CHANGED:
-      if (window_ != nullptr) refresh_hz_ = window_->Refresh().hz;
+      UpdateDisplay(/*force=*/true);
+      break;
+    case SDL_EVENT_WINDOW_MOVED:
+      if (ours) UpdateDisplay(/*force=*/false);
       break;
     case SDL_EVENT_KEY_DOWN:
     case SDL_EVENT_KEY_UP:
@@ -516,10 +586,124 @@ SDL_AppResult App::HandleEvent(const SDL_Event& event) {
   return SDL_APP_CONTINUE;
 }
 
-bool App::RenderClear(bool& presented, double& render_sec) {
-  presented = false;
-  if (gpu_ == nullptr) return false;
-  const std::uint64_t start = SDL_GetTicksNS();
+double App::PacingRefreshHz() const noexcept {
+  return display_mode_.known && display_mode_.hz > 0.0 ? display_mode_.hz
+                                                       : refresh_hz_;
+}
+
+void App::UpdateDisplay(bool force) {
+  if (window_ == nullptr) return;
+  const MonitorHandle monitor = MonitorOfWindow(window_->NativeHandle());
+  const double sdl_hz = window_->Refresh().hz;
+  const bool moved = monitor != monitor_;
+  if (!force && !moved && sdl_hz == refresh_hz_) return;
+  refresh_hz_ = sdl_hz;
+  monitor_ = monitor;
+  display_mode_ = QueryMonitorMode(monitor);
+  SE_LOG_INFO("display: SDL reports {:.3f} Hz; the OS reports {}", refresh_hz_,
+              DescribeMonitorMode(display_mode_));
+  // The sampler re-resolves the output on its next wake (a release store).
+  if (helpers_ && helpers_->Vblank() != nullptr) {
+    helpers_->Vblank()->SetMonitor(monitor);
+  }
+  if (booted_) {
+    pacer_.SetDisplayRefresh(PacingRefreshHz());
+    pacer_.OnOutputChanged();
+  }
+}
+
+VblankReader App::MakeVblankReader() const {
+  if (!helpers_ || helpers_->Vblank() == nullptr) return {};
+  const VblankSampler* sampler = helpers_->Vblank();
+  return [sampler](std::uint64_t now_ns) { return sampler->Read(now_ns); };
+}
+
+std::expected<void, Error> App::CheckDevice() {
+  if (!lifecycle_.DeviceLost()) {
+    if (present_ == nullptr) return {};
+    if (kRuntimeTestHooks && config_.device_lost_at > 0 &&
+        !device_lost_injected_ &&
+        static_cast<std::int64_t>(iterates_) >= config_.device_lost_at) {
+      // The --inject-device-lost hook: the status reports removed once.
+      device_lost_injected_ = true;
+      SE_LOG_WARN("injecting a device loss at iterate {}", iterates_);
+      present_->InjectDeviceLost();
+    }
+    const bool removed =
+        std::exchange(device_removed_, false) ||
+        present_->QueryDeviceStatus() == GpuDeviceStatus::kRemoved;
+    if (!removed) return {};
+    EnterDeviceLost();
+  }
+  const std::uint64_t now = SDL_GetTicksNS();
+  if (now < next_recreate_ns_) return {};
+  auto recreated = RecreateDevice();
+  if (!recreated) {
+    ++recreate_failures_;
+    SE_LOG_ERROR("GPU device recreation failed ({} of {}): {}",
+                 recreate_failures_, kMaxRecreateAttempts,
+                 recreated.error().message);
+    if (recreate_failures_ >= kMaxRecreateAttempts) {
+      return std::unexpected(std::move(recreated.error()));
+    }
+    next_recreate_ns_ = now + kRecreateRetryNs;
+    return {};
+  }
+  recreate_failures_ = 0;
+  ++device_recoveries_;
+  lifecycle_.OnDeviceRecovered();
+  SE_LOG_INFO(
+      "device recovered: '{}' recreated and {} textures re-uploaded in "
+      "{:.1f} ms (recovery {}); Running",
+      gpu_->Driver(), textures_.size(),
+      static_cast<double>(SDL_GetTicksNS() - device_lost_ns_) * 1e-6,
+      device_recoveries_);
+  return {};
+}
+
+void App::EnterDeviceLost() {
+  device_lost_ns_ = SDL_GetTicksNS();
+  SE_LOG_ERROR(
+      "GPU device '{}' removed (iterate {}): DeviceLost; releasing every GPU "
+      "object",
+      gpu_->Driver(), iterates_);
+  lifecycle_.OnDeviceLost();
+  // The pacer lets go of the port; the renderer's objects go through the
+  // retire queue (the GPU idle first); the window is released so that the
+  // new device can claim it. The old device lives until the new one does.
+  pacer_.Detach();
+  present_.reset();
+  renderer_->ReleaseGpuObjects();
+  gpu_->ReleaseWindow();
+}
+
+std::expected<void, Error> App::RecreateDevice() {
+  GpuDeviceConfig gpu_config;
+  gpu_config.driver = std::string(gpu_->Driver());
+  auto device = GpuDevice::Create(gpu_config);
+  if (!device) return std::unexpected(std::move(device.error()));
+  auto fresh = std::make_unique<GpuDevice>(std::move(*device));
+  if (auto claimed = fresh->ClaimWindow(window_->Native()); !claimed) {
+    return claimed;
+  }
+  if (auto objects = renderer_->RecreateGpuObjects(*fresh); !objects) {
+    // The renderer now refers to the new device: keep it, release what
+    // was made and try again later.
+    renderer_->ReleaseGpuObjects();
+    fresh->ReleaseWindow();
+    gpu_ = std::move(fresh);
+    return objects;
+  }
+  gpu_ = std::move(fresh);
+  present_ = std::make_unique<RenderPresentPort>(*gpu_, *renderer_);
+  pacer_.Attach(present_.get(), MakeVblankReader());
+  return {};
+}
+
+std::expected<void, Error> App::RenderFrame(FrameReport& report,
+                                            double& wait_sec) {
+  report.presented = false;
+  if (renderer_ == nullptr) return {};
   if (kRuntimeTestHooks && config_.null_acquire_count > 0) {
     const auto frame = static_cast<std::int64_t>(iterates_);
     if (frame >= config_.null_acquire_from &&
@@ -527,27 +711,95 @@ bool App::RenderClear(bool& presented, double& render_sec) {
       gpu_->ForceNullAcquires(1);
     }
   }
-  bool recorded = false;
-  {
-    auto frame = FrameRecorder::Prepare(*gpu_);
-    if (!frame) {
-      if (render_failures_ == 0) {
-        SE_LOG_ERROR("frame not recorded: {}", frame.error().message);
-      }
-      ++render_failures_;
+  layers_.clear();
+  for (const WorldRenderSource& source :
+       game_->states.RenderSources(report.plan)) {
+    if (source.world == nullptr) continue;
+    RenderLayer layer;
+    layer.world = source.world;
+    layer.camera = CameraFor(*source.world);
+    layer.alpha = source.alpha;
+    layers_.push_back(layer);
+  }
+  FrameRequest request;
+  request.layers = layers_;
+  request.clear = setup_.clear_color;
+  renderer_->Faults().SetFrame(iterates_);
+  FrameResult result = renderer_->Frame(request);
+  report.rendered = result.submitted;
+  report.presented = result.presented;
+  report.render = renderer_->LastFrame();
+  wait_sec = static_cast<double>(report.render.swapchain_wait_ns) * kNsToSec;
+  if (result.build_fault) {
+    return std::unexpected(std::move(*result.build_fault));
+  }
+  if (result.error) {
+    ++frames_skipped_;
+    if (frames_skipped_ == 1 || frames_skipped_ % 120 == 0) {
+      SE_LOG_WARN("frame {} not rendered ({} so far): {}", iterates_,
+                  frames_skipped_, result.error->message);
+    }
+  }
+  if (result.null_acquire) lifecycle_.OnNullAcquire();
+  if (result.submit_failed && present_ != nullptr &&
+      present_->QueryDeviceStatus() == GpuDeviceStatus::kRemoved) {
+    // The next iterate enters DeviceLost.
+    device_removed_ = true;
+  }
+  return {};
+}
+
+void App::RunTextureReloads() {
+  if (renderer_ == nullptr) return;
+  for (const TextureReloadHook& reload : config_.texture_reloads) {
+    if (reload.frame != static_cast<std::int64_t>(iterates_)) continue;
+    GpuResources& resources = renderer_->Resources();
+    const TextureHandle handle = resources.Find(TextureKeyOf(reload.name));
+    std::string path;
+    if (!reload.file.empty()) {
+      path = fs::Join(paths_.content_root, reload.file);
     } else {
-      recorded = true;
-      if (frame->AcquireSwapchain() != nullptr) {
-        frame->Clear(setup_.clear_color);
-        presented = true;
-      } else {
-        lifecycle_.OnNullAcquire();
+      for (const TextureTableEntry& entry : textures_) {
+        if (entry.name == reload.name) path = entry.path;
       }
     }
-    // ~FrameRecorder submits here.
+    if (handle.IsNull() || path.empty()) {
+      SE_LOG_ERROR("--reload-texture: no texture '{}' in the table",
+                   reload.name);
+      continue;
+    }
+    if (auto loaded = LoadTextureFile(resources, handle, path); !loaded) {
+      SE_LOG_ERROR("--reload-texture {}: {} ({})", reload.name,
+                   loaded.error().message, loaded.error().path);
+      continue;
+    }
+    SE_LOG_INFO("reloading texture '{}' from {} at frame {}", reload.name, path,
+                iterates_);
   }
-  render_sec = static_cast<double>(SDL_GetTicksNS() - start) * kNsToSec;
-  return recorded;
+}
+
+void App::RunReadbacks(const FrameReport& report) {
+  if (renderer_ == nullptr || !report.rendered) return;
+  for (std::size_t i = 0; i < config_.readbacks.size(); ++i) {
+    const ReadbackHook& readback = config_.readbacks[i];
+    if (readbacks_done_[i] ||
+        static_cast<std::int64_t>(iterates_) < readback.frame) {
+      continue;
+    }
+    readbacks_done_[i] = true;
+    auto image = renderer_->Readback();
+    if (!image) {
+      SE_LOG_ERROR("--readback {}: {}", readback.file, image.error().message);
+      continue;
+    }
+    if (auto written = WritePng(readback.file, *image); !written) {
+      SE_LOG_ERROR("--readback {}: {}", readback.file, written.error().message);
+      continue;
+    }
+    SE_LOG_INFO("readback of frame {} (tick {}, {}x{}) written to {}",
+                iterates_, game_->driver.NextTick() - 1, image->width,
+                image->height, readback.file);
+  }
 }
 
 SDL_AppResult App::Iterate() {
@@ -580,10 +832,15 @@ SDL_AppResult App::Iterate() {
   const std::uint64_t now = SDL_GetTicksNS();
   if (window_ != nullptr) lifecycle_.SetModal(window_->Modal());
   lifecycle_.Update(now);
+  // The device status at frame start: DeviceLost recreates the device here
+  // on main (ADR-068).
+  if (auto device = CheckDevice(); !device) {
+    return OnCallbackFault("GPU device recreation", device.error().message);
+  }
   ApplyCallbackRate();
   if (lifecycle_.TakeClearHeldInput()) game_->input.ClearHeld();
   if (lifecycle_.TakeFrameClockReset()) {
-    clock_.Reset();
+    pacer_.ResetClock();
     stepper_.ResetAccumulator();
   }
   suspended_flag_.store(lifecycle_.Suspended(), std::memory_order_release);
@@ -592,21 +849,40 @@ SDL_AppResult App::Iterate() {
   FrameReport report;
   report.iterate = iterates_;
   report.now_ns = now;
-  double render_sec = 0.0;
+  double wait_sec = 0.0;
+  const bool device_ok = !lifecycle_.DeviceLost();
+  if (kRuntimeTestHooks && device_ok) RunTextureReloads();
   // While Suspended (10 Hz), probe: a window that is visible again and
   // acquires a texture leaves Suspended.
-  if (lifecycle_.WindowSuspended() && !lifecycle_.PowerSuspended() &&
-      window_ != nullptr && window_->Visible()) {
-    report.rendered = RenderClear(report.presented, render_sec);
+  if (device_ok && lifecycle_.WindowSuspended() &&
+      !lifecycle_.PowerSuspended() && window_ != nullptr &&
+      window_->Visible()) {
+    if (auto rendered = RenderFrame(report, wait_sec); !rendered) {
+      return OnCallbackFault("render build", rendered.error().message);
+    }
     lifecycle_.OnSuspendProbe(true, report.presented);
     if (lifecycle_.TakeFrameClockReset()) {
-      clock_.Reset();
+      pacer_.ResetClock();
       stepper_.ResetAccumulator();
     }
   }
 
+  const bool probe_rendered = report.rendered;
+
+  // The N-L fence, present statistics into hits and misses (reported to
+  // the stepper), and the FrameClock.
   const FrameClock frame_clock =
-      clock_.Next(now, refresh_hz_, lifecycle_.Modal());
+      pacer_.BeginFrame(lifecycle_.Modal(), stepper_);
+  report.clock = frame_clock;
+  // The probe's frame went out before BeginFrame (it decides whether this
+  // iterate leaves Suspended): report it to this frame like any other, so
+  // that the pacer counts it and EndFrame waits for its present (ADR-071).
+  if (probe_rendered) {
+    pacer_.OnFrameSubmitted(report.presented, report.render.null_acquire);
+  }
+  // The N-L fence wait is GPU time, not CPU work: it stays out of R.
+  const double fence_wait_sec =
+      static_cast<double>(pacer_.LastFrame().fence_wait_ns) * kNsToSec;
   report.gameplay_ran = lifecycle_.GameplayRuns() &&
                         game_->states.SimRunning() && !exit_test_hold_;
   report.plan =
@@ -625,23 +901,50 @@ SDL_AppResult App::Iterate() {
   }
   report.next_tick = game_->driver.NextTick();
   if (kRuntimeTestHooks) RunExitTests(report.next_tick);
+  if (kRuntimeTestHooks && config_.late_frame_ms > 0.0 &&
+      !late_frame_injected_ &&
+      static_cast<std::int64_t>(iterates_) >= config_.late_frame_at) {
+    // The --inject-late-frame hook: this frame finishes late.
+    late_frame_injected_ = true;
+    SE_LOG_WARN("injecting a late frame: {:.1f} ms at iterate {}",
+                config_.late_frame_ms, iterates_);
+    SDL_DelayNS(static_cast<std::uint64_t>(config_.late_frame_ms * 1e6));
+  }
 
   if (!report.rendered && lifecycle_.ShouldRender()) {
-    report.rendered = RenderClear(report.presented, render_sec);
+    if (auto rendered = RenderFrame(report, wait_sec); !rendered) {
+      // The game build's policy for a render build fault: the callbacks'
+      // fault path (ADR-062).
+      SE_LOG_ERROR("frame {}: {}", iterates_, rendered.error().message);
+      return OnCallbackFault("render build", rendered.error().message);
+    }
+    if (report.rendered) {
+      pacer_.OnFrameSubmitted(report.presented, report.render.null_acquire);
+    }
+  } else if (!report.rendered && renderer_ != nullptr && device_ok) {
+    // Uploads continue while nothing renders (a minimized window).
+    renderer_->PumpUploads();
   }
+  if (kRuntimeTestHooks) RunReadbacks(report);
   if (report.presented) {
     ++presented_frames_;
     SE_PROFILE_FRAME();
   }
-  stepper_.OnPresentResult(/*missed=*/false, lifecycle_.Modal());
 
-  // The non-tick CPU cost, without the swapchain wait and submit (M6's
-  // pacer and M7's renderer measure those separately).
+  // The non-tick CPU cost R: the iterate without its ticks, the swapchain
+  // wait (ADR-064) and the pacer's N-L fence wait (ADR-067); the render
+  // build, recording and submit count.
   const double busy_sec =
       static_cast<double>(SDL_GetTicksNS() - iterate_start) * kNsToSec;
-  const double non_tick_sec = std::max(0.0, busy_sec - ticks_sec - render_sec);
-  costs_.AddFrame(frame_clock.real_delta, non_tick_sec,
-                  std::numeric_limits<double>::quiet_NaN());
+  const double non_tick_sec =
+      std::max(0.0, busy_sec - ticks_sec - wait_sec - fence_wait_sec);
+  // g: the GPU duration of an earlier frame that arrived this frame
+  // (se::present timestamps), else unknown.
+  const double gpu_sec =
+      report.render.gpu_timed
+          ? static_cast<double>(report.render.gpu_ns) * kNsToSec
+          : std::numeric_limits<double>::quiet_NaN();
+  costs_.AddFrame(frame_clock.real_delta, non_tick_sec, gpu_sec);
 
   report.state = lifecycle_.State();
   report.rate = lifecycle_.Rate();
@@ -657,6 +960,12 @@ SDL_AppResult App::Iterate() {
     quit_.Request(QuitReason::kFrames);
     SyncQuitState();
   }
+  // The pacer's wait, the last thing an iterate does: the waitable, then
+  // Paced's sleep to the vblank minus B(next), Standard's swapchain wait or
+  // VRR's deadline; nothing while Modal.
+  pacer_.EndFrame(stepper_.PlanNext(frame_clock, costs_.Current()),
+                  costs_.Current(), lifecycle_.Modal());
+  report.pacer = pacer_.LastFrame();
   if (setup_.on_frame) setup_.on_frame(*this, report);
   return SDL_APP_CONTINUE;
 }
@@ -709,19 +1018,36 @@ void App::RunExitTests(Tick next_tick) {
 void App::UpdateTitle(std::uint64_t now_ns) {
   if (window_ == nullptr || now_ns - last_title_ns_ < kTitleIntervalNs) return;
   last_title_ns_ = now_ns;
-  window_->SetTitle(std::format("{} | tick {} | {}", setup_.title,
-                                game_->driver.NextTick() - 1,
-                                LifecycleStateName(lifecycle_.State())));
+  std::string title = std::format("{} | tick {} | {}", setup_.title,
+                                  game_->driver.NextTick() - 1,
+                                  LifecycleStateName(lifecycle_.State()));
+  // Test builds show the pacer's mode, rate, interval, latency and misses.
+  if (kRuntimeTestHooks) title += " | " + pacer_.Summary();
+  window_->SetTitle(title);
 }
 
 void App::LogProgress(std::uint64_t now_ns) {
   if (last_log_ns_ == 0) last_log_ns_ = now_ns;
   if (now_ns - last_log_ns_ < kLogIntervalNs) return;
   last_log_ns_ = now_ns;
-  SE_LOG_INFO("tick {} | {} | {} iterates, {} presented, {} NULL acquires",
+  SE_LOG_INFO("tick {} | {} | {} iterates, {} presented, {} NULL acquires | {}",
               game_->driver.NextTick() - 1,
               LifecycleStateName(lifecycle_.State()), iterates_,
-              presented_frames_, lifecycle_.NullAcquires());
+              presented_frames_, lifecycle_.NullAcquires(), pacer_.Summary());
+  if (renderer_ != nullptr) {
+    const Renderer2DStats& last = renderer_->LastFrame();
+    SE_LOG_DEBUG(
+        "render frame {}: {} quads, {} batches, {} draws, {} upload bytes, "
+        "build {:.3f} ms, record {:.3f} ms, swapchain wait {:.3f} ms, GPU "
+        "{}",
+        last.frame, last.quads, last.batches, last.draws, last.upload_bytes,
+        static_cast<double>(last.build_ns) * 1e-6,
+        static_cast<double>(last.record_ns) * 1e-6,
+        static_cast<double>(last.swapchain_wait_ns) * 1e-6,
+        last.gpu_timed
+            ? std::format("{:.3f} ms", static_cast<double>(last.gpu_ns) * 1e-6)
+            : std::string("unknown"));
+  }
 }
 
 SDL_AppResult App::Shutdown(SDL_AppResult result) {
@@ -738,7 +1064,44 @@ SDL_AppResult App::Shutdown(SDL_AppResult result) {
       result == SDL_APP_FAILURE ? "failure" : "success", iterates_,
       presented_frames_, ticks_run_, NextTick(), lifecycle_.NullAcquires(),
       inbox_events_);
+  const PacerTotals& pacing = pacer_.Totals();
+  SE_LOG_INFO(
+      "pacing at shutdown: {} ({}); {} mode changes, {} missed presents "
+      "({} vblanks) of {} resolved ({} by present statistics, {} by the "
+      "latency wait, {} waits unresolved), {} HalfRate entries, {} sleeps, "
+      "{} fence waits",
+      PacingModeName(pacer_.Mode()), pacer_.ModeReason(), pacing.mode_changes,
+      pacing.missed_presents, pacing.missed_vblanks, pacing.resolved_presents,
+      pacing.resolved_by_statistics, pacing.resolved_by_wait,
+      pacing.unresolved_waits, pacing.half_rate_entries, pacing.sleeps,
+      pacing.fence_waits);
+  if (pacing.stats_resolved > 0) {
+    // The statistics' own check (ADR-072).
+    const StatisticsCheck check =
+        CheckStatistics(pacing.stats_lateness, pacing.stats_delay);
+    const auto& late = pacing.stats_lateness;
+    const auto& delay = pacing.stats_delay;
+    SE_LOG_INFO(
+        "present statistics at shutdown: {} resolved; shown 0/1/2/3/4+ "
+        "refreshes after their targets {}/{}/{}/{}/{}, after their takes "
+        "{}/{}/{}/{}/{}; composition delay {}, {} later than target + "
+        "delay",
+        pacing.stats_resolved, late[0], late[1], late[2], late[3], late[4],
+        delay[0], delay[1], delay[2], delay[3], delay[4], check.offset,
+        check.beyond);
+  }
+  if (device_recoveries_ > 0) {
+    SE_LOG_INFO("device losses recovered: {}", device_recoveries_);
+  }
+  // The renderer's totals and leak check, while logging still runs; the
+  // teardown below only destroys it.
+  if (renderer_) renderer_->Shutdown();
   Teardown();
+  if (vblank_detached_) {
+    SE_LOG_WARN(
+        "the vblank sampler was still in WaitForVBlank at shutdown: detached "
+        "(it ends when the wait returns)");
+  }
   return shutdown_faulted_ ? SDL_APP_FAILURE : result;
 }
 
@@ -767,7 +1130,16 @@ void App::Teardown() {
     if (!RunGameHook("GameState::OnExit", clear)) shutdown_faulted_ = true;
     game_.reset();
   }
-  // Step 12: release the window from the device, destroy the device.
+  // Step 9: the vblank sampler (the pacer lets go of it first).
+  pacer_.Detach();
+  if (helpers_ && helpers_->StopSamplers() == VblankStop::kDetached) {
+    vblank_detached_ = true;
+  }
+  // Step 12: the present port's fences, the renderer's objects (the GPU
+  // is idle), then release the window from the device and destroy the
+  // device.
+  present_.reset();
+  renderer_.reset();
   gpu_.reset();
   // Step 14: remove the subclass, destroy the window.
   if (window_) window_->SetListener(nullptr);

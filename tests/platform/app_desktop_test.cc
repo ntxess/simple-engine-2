@@ -312,6 +312,55 @@ TEST_CASE("Minimize suspends at 10 Hz; restore resets the frame clock",
   REQUIRE(max_steps <= 3);
   REQUIRE(resumed_steps <= 12);
   CHECK(frames.back().state != LifecycleState::kSuspended);
+
+  // The pacer hears of every present (ADR-071).
+  for (const FrameReport& frame : frames) {
+    INFO("iterate " << frame.iterate);
+    CHECK(frame.pacer.presented == frame.presented);
+  }
+  desktop.Check(hwnd.load());
+}
+
+TEST_CASE("The Suspended probe's present reaches the pacer", "[desktop][app]") {
+  const DesktopUntouched desktop;
+  std::atomic<HWND> hwnd{nullptr};
+  std::vector<FrameReport> frames;
+  std::uint64_t occluded_at = 0;
+  GameSetup setup = TestGameSetup();
+  setup.on_boot = [&](App& app) { hwnd.store(HwndOf(app)); };
+  setup.on_frame = [&](App& app, const FrameReport& report) {
+    AssertMainThread();
+    frames.push_back(report);
+    if (report.iterate == 30) {
+      // SDL reports the window covered while it is not: Suspended, and the
+      // next iterate's probe presents and leaves it. Nothing on the desktop
+      // changes.
+      SDL_Event event{};
+      event.type = SDL_EVENT_WINDOW_OCCLUDED;
+      event.window.windowID = app.GetWindow()->Id();
+      CHECK(SDL_PushEvent(&event));
+      occluded_at = report.iterate;
+    }
+    if (occluded_at != 0 && report.iterate == occluded_at + 30) {
+      app.RequestQuit();
+    }
+    if (report.iterate > kSafetyIterates) app.RequestQuit();
+  };
+  REQUIRE(RunTestApp(std::move(setup), {}) == 0);
+  REQUIRE(occluded_at != 0);
+  // The first present after the occlusion is the probe's: the pacer counts
+  // it and waits for it like any other present (ADR-071).
+  const FrameReport* probe = nullptr;
+  for (const FrameReport& frame : frames) {
+    INFO("iterate " << frame.iterate);
+    CHECK(frame.pacer.presented == frame.presented);
+    if (probe == nullptr && frame.iterate > occluded_at && frame.presented) {
+      probe = &frame;
+    }
+  }
+  REQUIRE(probe != nullptr);
+  CHECK(probe->pacer.presented);
+  CHECK(probe->state != LifecycleState::kSuspended);
   desktop.Check(hwnd.load());
 }
 

@@ -69,6 +69,33 @@ TEST_CASE("Minimize suspends; restore resumes and resets the frame clock",
   CHECK_FALSE(lifecycle.TakeFrameClockReset());
 }
 
+TEST_CASE("DeviceLost stops rendering and gameplay until recovered",
+          "[lifecycle]") {
+  Lifecycle lifecycle = Booted();
+  lifecycle.OnDeviceLost();
+  CHECK(lifecycle.State() == LifecycleState::kDeviceLost);
+  REQUIRE(LifecycleStateName(LifecycleState::kDeviceLost) == "DeviceLost");
+  CHECK(lifecycle.DeviceLost());
+  CHECK_FALSE(lifecycle.ShouldRender());
+  CHECK_FALSE(lifecycle.GameplayRuns());
+  // A recreation that failed is retried at 10 Hz; DeviceLost dominates
+  // Suspended.
+  CHECK(lifecycle.Rate() == CallbackRate::kSuspended);
+  lifecycle.OnWindow(WindowSignal::kMinimized, 11 * kSec);
+  CHECK(lifecycle.State() == LifecycleState::kDeviceLost);
+  lifecycle.OnWindow(WindowSignal::kRestored, 12 * kSec);
+  static_cast<void>(lifecycle.TakeFrameClockReset());
+  lifecycle.OnDeviceRecovered();
+  CHECK(lifecycle.State() == LifecycleState::kRunning);
+  CHECK(lifecycle.ShouldRender());
+  CHECK(lifecycle.GameplayRuns());
+  // No catch-up for the recreation.
+  CHECK(lifecycle.TakeFrameClockReset());
+  // Recovering again changes nothing.
+  lifecycle.OnDeviceRecovered();
+  CHECK_FALSE(lifecycle.TakeFrameClockReset());
+}
+
 TEST_CASE("Hidden and occluded suspend; shown and exposed resume",
           "[lifecycle]") {
   Lifecycle lifecycle = Booted();

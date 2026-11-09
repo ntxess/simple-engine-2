@@ -17,6 +17,10 @@ Rules (docs/style.md and docs/decisions.md):
       CreateThread, CreateRemoteThread, _beginthreadex, pthread_create, the
       Win32 thread pool, the standard parallel execution policies) outside
       se_os: engine threads come from se::StartThread
+  se_render, additionally
+    - no SE_ASSERT_MAIN_THREAD: every function asserts SE_ASSERT_GPU_THREAD
+      (the engine's main thread and SDL_IsMainThread), since SDL_GPU does
+      no thread checks (docs/milestone-specs.md M7, ADR-069)
   deterministic (simulation) modules, additionally
     - no wall clocks: steady_clock, system_clock, high_resolution_clock,
       SDL_GetTicks
@@ -29,8 +33,8 @@ Rules (docs/style.md and docs/decisions.md):
 
 A line may opt out of one rule with `// se-allow(<rule>): <reason>`, except
 for the rules the M4 spec states without exceptions (NO_OPT_OUT: thread,
-debugbreak, dump, dump_header, timer). Test modules (kind "test") are
-exempt from everything but the timer rule.
+debugbreak, dump, dump_header, timer, gpu_thread). Test modules (kind
+"test") are exempt from everything but the timer rule.
 
 usage:
   check_banned_api.py <build>/se_checks.json
@@ -75,11 +79,15 @@ THREAD_RULE = ("thread", re.compile(
     r"|TrySubmitThreadpoolCallback)\s*\("))
 # The only module that may create threads (ADR-029).
 THREAD_MODULES = {"se_os"}
+# se_render's functions assert SDL's main thread as well as the engine's.
+GPU_THREAD_RULE = ("gpu_thread", re.compile(r"\bSE_ASSERT_MAIN_THREAD\s*\("))
+GPU_THREAD_MODULES = {"se_render"}
 # Rules matched on the raw line: stripping would drop the <...> of an include.
 RAW_RULES = {"header", "dump_header"}
 # Rules a `// se-allow(<rule>)` comment cannot silence: the spec bans these
 # without exceptions (the thread rule's only exception is the se_os module).
-NO_OPT_OUT = {"thread", "debugbreak", "dump", "dump_header", "timer"}
+NO_OPT_OUT = {"thread", "debugbreak", "dump", "dump_header", "timer",
+              "gpu_thread"}
 DETERMINISM_RULES = [
     ("clock", re.compile(
         r"\b(steady_clock|system_clock|high_resolution_clock|SDL_GetTicks\w*)\b")),
@@ -136,6 +144,8 @@ def rules_for(kind, deterministic, name):
     rules = ALL_RULES + ENGINE_RULES
     if name not in THREAD_MODULES:
         rules.append(THREAD_RULE)
+    if name in GPU_THREAD_MODULES:
+        rules.append(GPU_THREAD_RULE)
     if deterministic:
         rules += DETERMINISM_RULES
     return rules
@@ -188,8 +198,9 @@ def main():
 
     if args.planted:
         # A planted fixture is an engine module other than se_os, with the
-        # determinism rules on, so every rule applies to it.
-        found = scan(args.planted, rules_for("engine", True, "planted"),
+        # determinism and se_render rules on, so every rule applies to it.
+        found = scan(args.planted,
+                     rules_for("engine", True, "planted") + [GPU_THREAD_RULE],
                      include_planted=True)
         missed = []
         if args.expect:

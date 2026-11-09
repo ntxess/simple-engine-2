@@ -7,12 +7,15 @@
 // frame should do. Unit-tested without a window (tests/platform).
 //
 // States (M5): Booting, Running, Modal, FocusLost, Idle, Suspended,
-// QuitPending, ShuttingDown, Exited. Overloaded, HalfRate, DeviceLost, Hung
-// and the Play states arrive with M6, M7, M10 and M12.
+// QuitPending, ShuttingDown, Exited; DeviceLost (the M6/M7 integration).
+// Overloaded is the stepper's, HalfRate the pacer's (ADR-058); Hung and the
+// Play states arrive with M12 and M10.
 //
 // Conditions are tracked separately and the state is the dominant one:
 //   Booting, Exited, ShuttingDown   the phase
 //   QuitPending                     a quit is draining (two-phase quit)
+//   DeviceLost                      the device reported removal; the App
+//                                   recreates it on main (ADR-068)
 //   Suspended                       minimized, hidden or occluded, or a
 //                                   power suspend; never a NULL acquire
 //   Modal                           a Windows modal loop (drag, resize,
@@ -33,6 +36,10 @@
 //   - Idle ends on any event, including a wake; the frame after a wake
 //     always runs before Idle can return.
 //   - Modal removes waits and is never Overloaded (M6 reads Modal()).
+//   - DeviceLost is entered only on a device-removed status (never a NULL
+//     acquire or one failed submit). It stops rendering and gameplay and
+//     iterates at 10 Hz while recreation fails; leaving it resets the
+//     frame clock (no catch-up).
 //
 // Outputs: the callback rate (SDL_HINT_MAIN_CALLBACK_RATE "0", "waitevent"
 // when Idle, "10" when Suspended), whether to render, whether gameplay
@@ -53,6 +60,7 @@ enum class LifecycleState : std::uint8_t {
   kFocusLost,
   kIdle,
   kSuspended,
+  kDeviceLost,
   kQuitPending,
   kShuttingDown,
   kExited,
@@ -112,6 +120,10 @@ class Lifecycle {
   void OnAnyEvent();
   // A NULL swapchain texture: counted, never a state change.
   void OnNullAcquire();
+  // The device reported removal; recreated (rendering resumes, the pacer
+  // recalibrates through the frame-clock reset).
+  void OnDeviceLost();
+  void OnDeviceRecovered();
   // The 10 Hz check while Suspended: the window flags show it neither
   // minimized nor hidden and a probe acquire returned a texture.
   void OnSuspendProbe(bool window_visible, bool acquire_succeeded);
@@ -141,6 +153,7 @@ class Lifecycle {
     return power_suspended_;
   }
   [[nodiscard]] bool Focused() const noexcept { return focused_; }
+  [[nodiscard]] bool DeviceLost() const noexcept { return device_lost_; }
 
   // One-shot outputs: true once after the change that needs them.
   [[nodiscard]] bool TakeClearHeldInput() noexcept;
@@ -175,6 +188,7 @@ class Lifecycle {
   bool window_suspended_ = false;
   bool power_suspended_ = false;
   bool modal_ = false;
+  bool device_lost_ = false;
   bool idle_ = false;
   bool woke_ = false;
   std::uint64_t last_input_ns_ = 0;

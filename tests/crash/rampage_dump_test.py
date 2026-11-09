@@ -15,8 +15,9 @@ handler wrote, decoded with tools/minidump/read_dump.py --json:
 
 Each dump must show, from the real rings:
   - main's breadcrumb (ThreadRegistry slot 0, role main, live) at tick 240
-    (fault: at the last tick that ran), and the log worker's and the
-    watchdog's slots;
+    (fault: at the last tick that ran), and the log worker's, the
+    watchdog's and the vblank sampler's slots (M6b: rampage's window has a
+    vblank sampler);
   - main's log ring (stream 0x53450100) with the line logged just before
     the dump, at that tick, and nothing ticked after it;
   - the InputFrame ring holding ticks 1 up to that tick, no torn slot;
@@ -44,6 +45,7 @@ TICK = 240
 ROLE_MAIN = 1
 ROLE_LOG_WORKER = 5
 ROLE_WATCHDOG = 6
+ROLE_VBLANK_SAMPLER = 8
 LEVEL_WARN = 3
 LEVEL_ERROR = 4
 STREAM_BREADCRUMBS = 0x53450001
@@ -176,7 +178,8 @@ def check_breadcrumbs(failures, dump, tick):
         failures.equal((crumb["role"], crumb["tick"]), (ROLE_MAIN, tick),
                        "main's breadcrumb (role, tick)")
     for role, name in ((ROLE_LOG_WORKER, "log-worker"),
-                       (ROLE_WATCHDOG, "watchdog")):
+                       (ROLE_WATCHDOG, "watchdog"),
+                       (ROLE_VBLANK_SAMPLER, "vblank-sampler")):
         record = live.get(role)
         if failures.check(record is not None, f"no live {name} slot"):
             failures.equal(record["name"], name, f"slot name of role {role}")
@@ -247,7 +250,8 @@ def check_dump(failures, dump, scenario):
                        ids.get(expected["thread_role"]), "exception thread")
     names = {t["id"]: t["name"] for t in dump["threads"]}
     for role, name in ((ROLE_MAIN, "main"), (ROLE_LOG_WORKER, "log-worker"),
-                       (ROLE_WATCHDOG, "watchdog")):
+                       (ROLE_WATCHDOG, "watchdog"),
+                       (ROLE_VBLANK_SAMPLER, "vblank-sampler")):
         failures.equal(names.get(ids.get(role)), name,
                        f"OS name of the {name} thread")
     failures.equal(dump["annotations"]["process"].get("se.app"), "rampage",

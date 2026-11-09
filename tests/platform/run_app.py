@@ -3,12 +3,15 @@
 CTest's PASS_REGULAR_EXPRESSION ignores the exit status, so the desktop
 tests of the rampage executable run through this driver:
 
-  run_app.py --expect-exit 0 --expect REGEX [--expect REGEX]...
-             [--reject REGEX]... [--timeout SEC] -- COMMAND [ARGS...]
+  run_app.py (--expect-exit N | --expect-abort) --expect REGEX
+             [--expect REGEX]... [--reject REGEX]... [--timeout SEC]
+             -- COMMAND [ARGS...]
 
 Every --expect must match the combined stdout and stderr, no --reject may,
-and the process must exit with --expect-exit within --timeout seconds. The
-child runs with SE_NO_MESSAGE_BOX=1. Python 3, stdlib only.
+and the process must exit with --expect-exit within --timeout seconds, or,
+with --expect-abort, end through abort() (exit status 3 on Windows,
+SIGABRT elsewhere). The child runs with SE_NO_MESSAGE_BOX=1. Python 3,
+stdlib only.
 """
 
 import argparse
@@ -20,7 +23,9 @@ import sys
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--expect-exit", type=int, required=True)
+    status = parser.add_mutually_exclusive_group(required=True)
+    status.add_argument("--expect-exit", type=int)
+    status.add_argument("--expect-abort", action="store_true")
     parser.add_argument("--expect", action="append", default=[])
     parser.add_argument("--reject", action="append", default=[])
     parser.add_argument("--timeout", type=float, default=60.0)
@@ -46,7 +51,13 @@ def main():
     output = (result.stdout or "") + (result.stderr or "")
     print(output)
     failures = []
-    if result.returncode != args.expect_exit:
+    if args.expect_abort:
+        # abort(): status 3 from the MSVC runtime, SIGABRT (-6 here, 134
+        # through a shell) on POSIX.
+        if result.returncode not in (3, -6, 134):
+            failures.append(f"exit status {result.returncode}, expected "
+                            f"abort()")
+    elif result.returncode != args.expect_exit:
         failures.append(f"exit status {result.returncode}, expected "
                         f"{args.expect_exit}")
     for pattern in args.expect:

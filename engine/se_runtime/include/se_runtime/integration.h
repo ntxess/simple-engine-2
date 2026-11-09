@@ -13,10 +13,13 @@
 //                      any other engine thread
 //   3 sdl .. 7 gpu-device                        (se_platform, se_render)
 //   8 cpu-topology    ReadCpuTopology
-//   9 helper-threads  StartHelperThreads: the watchdog (boot budget only)
+//   9 helper-threads  StartHelperThreads: the vblank sampler (Windows, a
+//                      window), then the watchdog (boot budget only)
 //  10 game            the InputFrame ring attached to the SimDriver
 // Shutdown (App::Teardown; mt-design.md "Shutdown Order"):
 //   3 HelperThreads::StartShutdownDeadline when the quit drain ends; ...;
+//   9 HelperThreads::StopSamplers: the vblank sampler (joined within a
+//     refresh plus 50 ms, or detached while stuck in its wait); ...;
 //  16 Logging::Stop (SDL's log to stderr, drain, spdlog::shutdown) after
 //     SDL_QuitSubSystem; 17 HelperThreads::Stop joins the watchdog, the
 //     last engine thread. Crash capture lasts until the process exits.
@@ -35,6 +38,8 @@
 #include "se_core/thread_role.h"
 #include "se_core/thread_safety.h"
 #include "se_crash/watchdog.h"
+#include "se_platform/display_output.h"
+#include "se_platform/vblank_sampler.h"
 #include "se_runtime/app_config.h"
 
 namespace se {
@@ -134,10 +139,19 @@ struct CpuInfo {
 };
 [[nodiscard]] std::expected<CpuInfo, Error> ReadCpuTopology();
 
+// The vblank sampler at boot step 9: on Windows, for a window, following
+// |monitor| (the window's; ADR-056).
+struct VblankStart {
+  bool enabled = false;
+  MonitorHandle monitor = nullptr;
+};
+
 // Boot step 9: the helper threads. M4: the watchdog (role kWatchdog, 1 s
 // period on the unbiased clock, the 30 s boot budget from
-// |boot_start_ns|, armed after the first iterate). M9, M8 and M6 add the
-// lane, the input sampler and the vblank sampler here.
+// |boot_start_ns|, armed after the first iterate). M6b: the vblank sampler
+// (role kVblankSampler, HighQoS) before it; a sampler that cannot start is
+// logged and the pacer runs without it. M9 and M8 add the lane and the
+// input sampler here.
 class HelperThreads {
  public:
   HelperThreads() noexcept;
@@ -147,9 +161,14 @@ class HelperThreads {
   HelperThreads& operator=(const HelperThreads&) = delete;
   ~HelperThreads();
 
-  // Shutdown step 17: joins the watchdog, the last engine thread.
-  // Idempotent.
+  // Shutdown step 17: stops the samplers if step 9 did not, then joins the
+  // watchdog, the last engine thread. Idempotent.
   void Stop() noexcept;
+  // Shutdown step 9: the vblank sampler. Idempotent. Returns how the
+  // sampler ended (kDetached: still in its wait, left to end on its own).
+  VblankStop StopSamplers() noexcept;
+  // The vblank sampler, or nullptr (none started, or stopped).
+  [[nodiscard]] VblankSampler* Vblank() const noexcept { return vblank_.get(); }
   // The first iterate ran: the watchdog leaves its boot budget.
   void ArmWatchdog() noexcept;
   // Shutdown step 3: the quit drain is over; the watchdog's 5 s deadline
@@ -164,18 +183,19 @@ class HelperThreads {
  private:
   friend std::expected<HelperThreads, Error> StartHelperThreads(
       const AppConfig& config, const WatchdogInputs& inputs,
-      std::uint64_t boot_start_ns);
+      std::uint64_t boot_start_ns, const VblankStart& vblank);
+  std::unique_ptr<VblankSampler> vblank_;
   std::unique_ptr<crash::Watchdog> watchdog_;
 };
 [[nodiscard]] std::expected<HelperThreads, Error> StartHelperThreads(
     const AppConfig& config, const WatchdogInputs& inputs,
-    std::uint64_t boot_start_ns);
+    std::uint64_t boot_start_ns, const VblankStart& vblank = {});
 
 // The unbiased clock (se::UnbiasedNowNs) for the watchdog's boot budget.
 [[nodiscard]] std::uint64_t BootClockNs() noexcept;
 
 // Engine threads still running: the ThreadRegistry's live slots other than
-// main's (the init-failure tests require 0).
+// main's (the init-failure tests require 0). The vblank sampler counts.
 [[nodiscard]] std::uint32_t EngineThreadsRunning() noexcept;
 
 // SDL_AppQuit after a failed init: only logging shuts down. The App's

@@ -17,6 +17,8 @@
 
 #include "se_core/error.h"
 #include "se_core/log.h"
+#include "se_render/frame_faults.h"
+#include "se_runtime/pacer_policy.h"
 
 namespace se {
 namespace {
@@ -145,6 +147,35 @@ std::expected<void, Error> ParseNullAcquire(std::string_view text,
   return {};
 }
 
+// "FRAME:MS", FRAME >= 1 and 0 < MS <= 1000 (--inject-late-frame).
+std::expected<void, Error> ParseLateFrame(std::string_view text,
+                                          AppConfig& config) {
+  const std::size_t colon = text.find(':');
+  if (colon != std::string_view::npos) {
+    const auto frame = ParseNumber<std::int64_t>(text.substr(0, colon));
+    const auto ms = ParseNumber<double>(text.substr(colon + 1));
+    if (frame && ms && *frame >= 1 && *ms > 0.0 && *ms <= 1000.0) {
+      config.late_frame_at = *frame;
+      config.late_frame_ms = *ms;
+      return {};
+    }
+  }
+  return Bad(std::format(
+      "--inject-late-frame: bad value '{}' (expected FRAME:MS)", text));
+}
+
+// "FRAME", FRAME >= 1 (--inject-device-lost).
+std::expected<void, Error> ParseDeviceLost(std::string_view text,
+                                           AppConfig& config) {
+  const auto frame = ParseNumber<std::int64_t>(text);
+  if (!frame || *frame < 1) {
+    return Bad(std::format(
+        "--inject-device-lost: bad value '{}' (expected FRAME >= 1)", text));
+  }
+  config.device_lost_at = *frame;
+  return {};
+}
+
 // "after-ticks:N", N >= 1 (the M4 exit hooks).
 std::expected<std::int64_t, Error> ParseAfterTicks(std::string_view option,
                                                    std::string_view text) {
@@ -155,6 +186,48 @@ std::expected<std::int64_t, Error> ParseAfterTicks(std::string_view option,
   }
   return Bad(
       std::format("{}: bad value '{}' (expected after-ticks:N)", option, text));
+}
+
+// NAME@FRAME[=FILE].
+std::expected<TextureReloadHook, Error> ParseReload(std::string_view text) {
+  const std::size_t at = text.find('@');
+  if (at == std::string_view::npos || at == 0) {
+    return Bad(
+        std::format("--reload-texture: bad value '{}' (expected "
+                    "NAME@FRAME[=FILE])",
+                    text));
+  }
+  TextureReloadHook hook;
+  hook.name = std::string(text.substr(0, at));
+  std::string_view rest = text.substr(at + 1);
+  const std::size_t eq = rest.find('=');
+  if (eq != std::string_view::npos) {
+    hook.file = std::string(rest.substr(eq + 1));
+    rest = rest.substr(0, eq);
+    if (hook.file.empty()) {
+      return Bad(std::format("--reload-texture: empty FILE in '{}'", text));
+    }
+  }
+  const auto frame = ParseNumber<std::int64_t>(rest);
+  if (!frame || *frame < 1) {
+    return Bad(std::format("--reload-texture: bad FRAME in '{}'", text));
+  }
+  hook.frame = *frame;
+  return hook;
+}
+
+// FRAME:FILE (FILE may hold a drive letter's colon).
+std::expected<ReadbackHook, Error> ParseReadback(std::string_view text) {
+  const std::size_t colon = text.find(':');
+  if (colon == std::string_view::npos || colon + 1 >= text.size()) {
+    return Bad(
+        std::format("--readback: bad value '{}' (expected FRAME:FILE)", text));
+  }
+  const auto frame = ParseNumber<std::int64_t>(text.substr(0, colon));
+  if (!frame || *frame < 1) {
+    return Bad(std::format("--readback: bad FRAME in '{}'", text));
+  }
+  return ReadbackHook{*frame, std::string(text.substr(colon + 1))};
 }
 
 std::expected<void, Error> NeedTestHooks(std::string_view option) {
@@ -249,6 +322,15 @@ std::expected<AppConfig, Error> ParseAppConfig(
       auto value = reader.Value(option);
       if (!value) return std::unexpected(value.error());
       config.pref_dir = std::string(*value);
+    } else if (option == "--pacing") {
+      auto value = reader.Value(option);
+      if (!value) return std::unexpected(value.error());
+      const auto request = ParsePacingRequest(*value);
+      if (!request) {
+        return Bad(std::format(
+            "--pacing: bad value '{}' (paced, standard, vrr or auto)", *value));
+      }
+      config.pacing = *request;
     } else if (option == "--log-level") {
       auto value = reader.Value(option);
       if (!value) return std::unexpected(value.error());
@@ -284,6 +366,24 @@ std::expected<AppConfig, Error> ParseAppConfig(
       if (auto ok = ParseNullAcquire(*value, config); !ok) {
         return std::unexpected(ok.error());
       }
+    } else if (option == "--inject-late-frame") {
+      if (auto ok = NeedTestHooks(option); !ok) {
+        return std::unexpected(ok.error());
+      }
+      auto value = reader.Value(option);
+      if (!value) return std::unexpected(value.error());
+      if (auto ok = ParseLateFrame(*value, config); !ok) {
+        return std::unexpected(ok.error());
+      }
+    } else if (option == "--inject-device-lost") {
+      if (auto ok = NeedTestHooks(option); !ok) {
+        return std::unexpected(ok.error());
+      }
+      auto value = reader.Value(option);
+      if (!value) return std::unexpected(value.error());
+      if (auto ok = ParseDeviceLost(*value, config); !ok) {
+        return std::unexpected(ok.error());
+      }
     } else if (option == "--crash-test" || option == "--dump-test") {
       if (auto ok = NeedTestHooks(option); !ok) {
         return std::unexpected(ok.error());
@@ -297,6 +397,33 @@ std::expected<AppConfig, Error> ParseAppConfig(
       } else {
         config.dump_test_after_ticks = *ticks;
       }
+    } else if (option == "--inject-frame-fault") {
+      if (auto ok = NeedTestHooks(option); !ok) {
+        return std::unexpected(ok.error());
+      }
+      auto value = reader.Value(option);
+      if (!value) return std::unexpected(value.error());
+      auto fault = ParseFrameFault(*value);
+      if (!fault) return std::unexpected(fault.error());
+      config.frame_fault = *fault;
+    } else if (option == "--reload-texture") {
+      if (auto ok = NeedTestHooks(option); !ok) {
+        return std::unexpected(ok.error());
+      }
+      auto value = reader.Value(option);
+      if (!value) return std::unexpected(value.error());
+      auto reload = ParseReload(*value);
+      if (!reload) return std::unexpected(reload.error());
+      config.texture_reloads.push_back(std::move(*reload));
+    } else if (option == "--readback") {
+      if (auto ok = NeedTestHooks(option); !ok) {
+        return std::unexpected(ok.error());
+      }
+      auto value = reader.Value(option);
+      if (!value) return std::unexpected(value.error());
+      auto readback = ParseReadback(*value);
+      if (!readback) return std::unexpected(readback.error());
+      config.readbacks.push_back(std::move(*readback));
     } else {
       return Bad(std::format("unknown option '{}'", option));
     }

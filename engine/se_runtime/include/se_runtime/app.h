@@ -14,9 +14,13 @@
 //    4 event-filter    the event filter and Inbox; the wake event
 //    5 content-paths   the content root
 //    6 window          the window and its Win32 subclass
-//    7 gpu-device      the SDL_GPU device, claiming the window with VSYNC
+//    7 gpu-device      the SDL_GPU device, claiming the window with VSYNC;
+//                      Renderer2D and the textures of the game's texture
+//                      table (decoded with stb_image, uploaded before the
+//                      first frame)
 //    8 cpu-topology    the CPU topology and the pool sizes it gives
-//    9 helper-threads  the watchdog (boot budget until the first iterate)
+//    9 helper-threads  the vblank sampler (Windows, a window), then the
+//                      watchdog (boot budget until the first iterate)
 //   10 game            the GameModule's registry and storages, the
 //                      GameStateStack with the start state pushed, the
 //                      SimDriver writing the process's InputFrame ring
@@ -27,14 +31,34 @@
 //
 // Each iterate: count the iterate (the watchdog's progress), take the
 // inbox, poll the two-phase quit, update the lifecycle (callback rate, held
-// input, frame-clock reset), plan the frame's ticks with the FixedStepper
-// from SDL's clock and display mode, tick the running Worlds through
-// SimDriver::TickInline with BasicInputService's frames, record the
-// clear-only frame and present it with VSYNC.
+// input, frame-clock reset), FramePacer::BeginFrame (the N-L fence, present
+// statistics, the FrameClock), plan the frame's ticks with the FixedStepper,
+// tick the running Worlds through SimDriver::TickInline with
+// BasicInputService's frames, then render: the GameStateStack's render
+// sources (every state's Worlds, the top one at the plan's alpha) through
+// GameSetup::camera, drawn by Renderer2D into the composite and blitted to
+// the swapchain (M7); then FramePacer::EndFrame (Paced, Standard or VRR;
+// M6b). The pacer presents through RenderPresentPort, the adapter over
+// se::present and Renderer2D, and Renderer2D's GPU timings are FrameCosts'
+// g (the M6/M7 integration). Iterates that do not render still pump the
+// texture uploads. A fault in the render build phase is a fault of the
+// game build: it takes the callbacks' fault path (a dump, the message box,
+// the quit path).
+//
+// Device loss (ADR-068): the device status is read at each iterate's start
+// and after a failed submit. On kRemoved the lifecycle enters DeviceLost:
+// the pacer lets go of the port, Renderer2D releases every GPU object
+// through the retire queue, the window is released; then a new device is
+// created on main, claims the window, Renderer2D recreates its objects and
+// re-uploads every texture from the kept payloads (handles stay valid), a
+// new port is attached and the lifecycle returns to Running with a
+// frame-clock reset. Worlds are untouched. A recreation that fails is
+// retried every second, and the fifth failure takes the fault path.
 //
 // Shutdown follows the design's order for the parts that exist: the
 // watchdog's deadline starts when the quit drain ends; remove the event
-// filter, SDL_WaitForGPUIdle, destroy the Worlds, release the device,
+// filter, SDL_WaitForGPUIdle, destroy the Worlds, stop the vblank sampler
+// (step 9), release the present port and the device,
 // remove the subclass and destroy the window, SDL_QuitSubSystem, stop the
 // log worker (step 16), join the watchdog (step 17), stop the profiler.
 // Game code that runs during shutdown (GameSetup::on_shutdown and every
@@ -44,6 +68,8 @@
 // Test builds add the M4 exit hooks: --crash-test after-ticks:N faults on
 // main right after tick N; --dump-test after-ticks:N has the watchdog write
 // a dump after tick N, holds the ticks until it is written, then quits.
+// M7 adds --inject-frame-fault, --reload-texture and --readback
+// (app_config.h).
 
 #ifndef SE_RUNTIME_APP_H_
 #define SE_RUNTIME_APP_H_
@@ -72,11 +98,15 @@
 #include "se_platform/window.h"
 #include "se_render/frame_recorder.h"
 #include "se_render/gpu_device.h"
+#include "se_render/renderer_2d.h"
+#include "se_render/texture_table.h"
+#include "se_render_core/render_components.h"
 #include "se_runtime/app_config.h"
-#include "se_runtime/frame_clock.h"
+#include "se_runtime/frame_pacer.h"
 #include "se_runtime/integration.h"
 #include "se_runtime/lifecycle.h"
 #include "se_runtime/quit.h"
+#include "se_runtime/render_present_port.h"
 #include "se_sim/game_module.h"
 
 namespace se {
@@ -106,8 +136,13 @@ struct FrameReport {
   bool gameplay_ran = false;
   bool rendered = false;
   bool presented = false;
+  // Renderer2D's numbers for this frame (when rendered).
+  Renderer2DStats render;
   bool modal = false;
   bool suspended = false;
+  // The pacer's FrameClock and what it did this frame (M6b).
+  FrameClock clock;
+  PacerFrame pacer;
 };
 
 // A game, as the runtime runs it. Made by the game's GameFactory.
@@ -126,6 +161,12 @@ struct GameSetup {
   int window_width = 1280;
   int window_height = 720;
   LifecycleConfig lifecycle;
+  // The texture table (config/texture.json, ADR-026) relative to the
+  // content root; empty: no textures (every sprite draws magenta).
+  std::string texture_table;
+  // The camera a World is drawn with; empty: its primary Camera2D, else a
+  // default one.
+  std::function<Camera2D(const World& world)> camera;
   // Boot step 10, before the start state is pushed: point the game at its
   // content (a scene, settings).
   std::function<std::expected<void, Error>(const ContentPaths& paths)>
@@ -183,9 +224,29 @@ class App final : public WindowListener {
   [[nodiscard]] QuitController& Quit() noexcept { return quit_; }
   [[nodiscard]] Window* GetWindow() const noexcept { return window_.get(); }
   [[nodiscard]] GpuDevice* Gpu() const noexcept { return gpu_.get(); }
+  [[nodiscard]] Renderer2D* Renderer() const noexcept {
+    return renderer_.get();
+  }
+  // The texture table's entries, with paths joined to the content root.
+  [[nodiscard]] const std::vector<TextureTableEntry>& Textures()
+      const noexcept {
+    return textures_;
+  }
   [[nodiscard]] const FixedStepper& Stepper() const noexcept {
     return stepper_;
   }
+  [[nodiscard]] const FramePacer& Pacer() const noexcept { return pacer_; }
+  // Device losses recovered so far (ADR-068).
+  [[nodiscard]] std::uint64_t DeviceRecoveries() const noexcept {
+    return device_recoveries_;
+  }
+  // The window's display: SDL's refresh, the OS's mode (0: unknown) and
+  // the monitor.
+  [[nodiscard]] double SdlRefreshHz() const noexcept { return refresh_hz_; }
+  [[nodiscard]] const MonitorMode& DisplayMode() const noexcept {
+    return display_mode_;
+  }
+  [[nodiscard]] MonitorHandle Monitor() const noexcept { return monitor_; }
   [[nodiscard]] Tick NextTick() const noexcept;
   [[nodiscard]] std::uint64_t Iterates() const noexcept { return iterates_; }
   [[nodiscard]] std::uint64_t PresentedFrames() const noexcept {
@@ -217,10 +278,32 @@ class App final : public WindowListener {
   void TakeInbox() SE_REQUIRES(g_main);
   void SyncQuitState();
   void ApplyCallbackRate();
-  // Records and submits the clear-only frame; false when nothing could be
-  // recorded. |presented| tells whether a swapchain texture was acquired.
-  bool RenderClear(bool& presented, double& render_sec) SE_REQUIRES(g_main);
+  std::expected<void, Error> StartRenderer() SE_REQUIRES(g_main);
+  // Renders the frame of |report|'s plan and fills its rendered, presented
+  // and render fields; |wait_sec| is the time spent in the swapchain wait.
+  // An Error is a fault of the render build phase.
+  std::expected<void, Error> RenderFrame(FrameReport& report, double& wait_sec)
+      SE_REQUIRES(g_main);
+  [[nodiscard]] Camera2D CameraFor(const World& world) const;
+  // The M7 test hooks due at this iterate.
+  void RunTextureReloads() SE_REQUIRES(g_main);
+  void RunReadbacks(const FrameReport& report) SE_REQUIRES(g_main);
   void UpdateTitle(std::uint64_t now_ns) SE_REQUIRES(g_main);
+  // Device loss (ADR-068): the status at frame start (and the flag a
+  // failed submit set); DeviceLost's release; the recreation. An Error is
+  // a recreation that failed for the last time.
+  [[nodiscard]] std::expected<void, Error> CheckDevice() SE_REQUIRES(g_main);
+  void EnterDeviceLost() SE_REQUIRES(g_main);
+  [[nodiscard]] std::expected<void, Error> RecreateDevice() SE_REQUIRES(g_main);
+  // The pacer's view of the vblank sampler (empty: none).
+  [[nodiscard]] VblankReader MakeVblankReader() const;
+  // Re-reads the window's monitor and display mode after a display change
+  // or a move (always with |force|); a new monitor goes to the vblank
+  // sampler and the pacer.
+  void UpdateDisplay(bool force) SE_REQUIRES(g_main);
+  // The refresh the pacer compares the sampler with: the OS's current mode
+  // of the window's monitor, else SDL's (ADR-055).
+  [[nodiscard]] double PacingRefreshHz() const noexcept;
   void LogProgress(std::uint64_t now_ns);
   // The M4 exit hooks (test builds): the tick they act after (0: none),
   // the frame's plan cut so that it ends at that tick, and the action.
@@ -241,16 +324,35 @@ class App final : public WindowListener {
   ContentPaths paths_;
   std::unique_ptr<Window> window_;
   std::unique_ptr<GpuDevice> gpu_;
+  std::unique_ptr<RenderPresentPort> present_;
+  std::unique_ptr<Renderer2D> renderer_;
+  std::vector<TextureTableEntry> textures_;
+  std::vector<RenderLayer> layers_;
+  std::vector<bool> readbacks_done_;
   integration::CpuInfo cpu_;
   std::optional<integration::HelperThreads> helpers_;
   std::unique_ptr<GameRuntime> game_;
 
   Lifecycle lifecycle_;
   QuitController quit_;
-  FrameClockSource clock_;
+  FramePacer pacer_;
   FixedStepper stepper_;
   CostTracker costs_;
+  // SDL's refresh for the window's display, the OS's mode, the monitor.
   double refresh_hz_ = 0.0;
+  MonitorMode display_mode_;
+  MonitorHandle monitor_ = nullptr;
+  bool late_frame_injected_ = false;
+  // Device loss (ADR-068).
+  bool device_lost_injected_ = false;
+  bool device_removed_ = false;
+  std::uint64_t device_recoveries_ = 0;
+  std::uint32_t recreate_failures_ = 0;
+  std::uint64_t next_recreate_ns_ = 0;
+  std::uint64_t device_lost_ns_ = 0;
+  // Shutdown step 9 left the vblank sampler in its wait (logged after the
+  // teardown).
+  bool vblank_detached_ = false;
 
   // Read by the watchdog (integration). The heartbeat flag is for long
   // work on main that still makes progress (M9's loads, M12); nothing in
@@ -277,7 +379,7 @@ class App final : public WindowListener {
   std::uint64_t inbox_events_ = 0;
   std::uint64_t low_memory_events_ = 0;
   std::uint64_t presented_frames_ = 0;
-  std::uint64_t render_failures_ = 0;
+  std::uint64_t frames_skipped_ = 0;
   std::uint64_t ticks_run_ = 0;
   std::uint64_t last_title_ns_ = 0;
   std::uint64_t last_log_ns_ = 0;
