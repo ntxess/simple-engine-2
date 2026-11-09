@@ -172,6 +172,9 @@ function(se_register_checks)
   add_test(NAME checks.planted.catch
     COMMAND Python3::Interpreter "${_tools}/check_banned_api.py"
             --planted "${_planted}/catch")
+  add_test(NAME checks.planted.static
+    COMMAND Python3::Interpreter "${_tools}/check_banned_api.py"
+            --planted "${_planted}/static")
   add_test(NAME checks.planted.link_graph
     COMMAND "${CMAKE_COMMAND}"
             -S "${CMAKE_SOURCE_DIR}/tests/checks/link_violation"
@@ -181,7 +184,8 @@ function(se_register_checks)
   # --planted inverts a checker: it succeeds only if it finds a violation, so a
   # checker that crashes or finds nothing fails the test.
   set_tests_properties(checks.planted.include checks.planted.banned_api
-    checks.planted.throw checks.planted.catch PROPERTIES LABELS checks)
+    checks.planted.throw checks.planted.catch checks.planted.static
+    PROPERTIES LABELS checks)
   set_tests_properties(checks.planted.link_graph PROPERTIES LABELS checks
     PASS_REGULAR_EXPRESSION "Link-graph violations")
   # A module that links a target outside its ALLOW_ONLY list.

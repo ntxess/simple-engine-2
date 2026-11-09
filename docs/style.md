@@ -44,9 +44,13 @@ third-party throws at the documented boundaries. Test code is exempt.
 
 Modules declared `DETERMINISTIC` (se_core, se_sim, game modules) may not read
 wall clocks, use unseeded randomness or call CRT transcendentals; use
-`se::dm::Sin` and friends. A single line can opt out with
+`se::dm::Sin` and friends. Nor may they declare mutable `static` variables
+(function-local, member or file scope): such state is shared by every World
+and thread, and a non-trivial one is destroyed at exit. Constants are
+`static const`, `constexpr` or `constinit`; a never-destroyed singleton is
+`static T* const kName = new T`. A single line can opt out with
 `// se-allow(<rule>): <reason>` (rules: throw, rtti, header, clock, random,
-math, catch).
+math, static, catch).
 
 ## Tools
 

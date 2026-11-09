@@ -173,7 +173,7 @@ class Reader {
       if (!e.IsObject()) return Fail(at, "expected an object");
       LegacyEffect effect;
       for (const json::Member& m : e.Members()) {
-        static std::expected<void, Error> r;
+        std::expected<void, Error> r;
         if (m.key == "type") {
           std::string type;
           r = String(m.value, at + ".type", type);
@@ -214,7 +214,7 @@ class Reader {
     if (!v.IsObject()) return Fail(where, "expected an object");
     for (const json::Member& m : v.Members()) {
       const std::string at = where + "." + m.key;
-      static std::expected<void, Error> r;
+      std::expected<void, Error> r;
       if (m.key == "position") {
         Vec2 p;
         r = Point(m.value, at, p);
@@ -243,7 +243,7 @@ class Reader {
     if (!v.IsObject()) return Fail(where, "expected an object");
     for (const json::Member& m : v.Members()) {
       const std::string at = where + "." + m.key;
-      static std::expected<void, Error> r;
+      std::expected<void, Error> r;
       if (m.key == "team") {
         std::string team;
         r = String(m.value, at, team);
