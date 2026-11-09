@@ -2,11 +2,15 @@
 
 Reads se_checks.json (written by se_check_link_graph at configure time) and
 scans every source file of each module for #include paths matching the
-module's banned patterns.
+module's banned patterns, and for the project-wide bans:
+  - spdlog only in se_log, which owns the sinks (test modules too);
+  - <windows.h> only in se_os, se_crash, se_platform and se_render (engine
+    modules; test code is exempt, as from the API rules).
 
 usage:
   check_includes.py <build>/se_checks.json
-  check_includes.py --planted <dir>   succeeds only if a violation is found
+  check_includes.py --planted <dir> [--expect spdlog|windows]
+      succeeds only if a violation (of that project-wide ban) is found
 """
 
 import argparse
@@ -23,6 +27,21 @@ PLATFORM_BANS = [
     r"^Windows\.h$", r"^miniaudio", r"^sentry", r"^crashpad", r"^lz4",
     r"^SFML/", r"^boost/",
 ]
+
+
+# Project-wide bans: (name, pattern, the modules that may include it,
+# whether test modules are checked too).
+GLOBAL_BANS = [
+    ("spdlog", r"^spdlog/", {"se_log"}, True),
+    ("windows", r"^[Ww]indows\.h$",
+     {"se_os", "se_crash", "se_platform", "se_render"}, False),
+]
+
+
+def global_bans(name, kind):
+    """The project-wide patterns that apply to module |name| of |kind|."""
+    return [pattern for _, pattern, allowed, tests in GLOBAL_BANS
+            if name not in allowed and (tests or kind != "test")]
 
 
 def source_files(root):
@@ -53,10 +72,15 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("config", nargs="?")
     parser.add_argument("--planted")
+    parser.add_argument("--expect", choices=[ban[0] for ban in GLOBAL_BANS],
+                        help="with --planted: the project-wide ban to test")
     args = parser.parse_args()
 
     if args.planted:
-        found = scan(args.planted, PLATFORM_BANS, include_planted=True)
+        bans = PLATFORM_BANS
+        if args.expect:
+            bans = [ban[1] for ban in GLOBAL_BANS if ban[0] == args.expect]
+        found = scan(args.planted, bans, include_planted=True)
         for line in found:
             print("planted (expected):", line)
         if not found:
@@ -67,8 +91,10 @@ def main():
     config = json.loads(pathlib.Path(args.config).read_text(encoding="utf-8"))
     violations = []
     for module in config["modules"]:
-        if module["banned_includes"]:
-            violations += scan(module["dir"], module["banned_includes"])
+        bans = list(module["banned_includes"])
+        bans += global_bans(module["name"], module.get("kind", "engine"))
+        if bans:
+            violations += scan(module["dir"], bans)
     for line in violations:
         print(line)
     print(f"check_includes: {len(violations)} violation(s)")

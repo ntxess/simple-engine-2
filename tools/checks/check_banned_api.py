@@ -1,11 +1,21 @@
 """Scans engine sources for banned APIs and the exception policy.
 
 Rules (docs/style.md and docs/decisions.md):
+  every module, tests included
+    - no timeBeginPeriod/timeEndPeriod: the timer resolution is never
+      toggled (docs/design/mt-design.md "Platform")
   every engine module
     - no `throw`: engine code returns errors as std::expected
     - `catch` only in files marked `// se-fault-boundary`
     - no RTTI: dynamic_cast, typeid
     - no <filesystem>, <ratio>, <cfenv>, <fenv.h> (Google C++ style)
+    - no DebugBreak, __debugbreak or __builtin_trap: a fault aborts and the
+      crash handler writes the dump
+    - no in-process dump writing: MiniDumpWriteDump, <dbghelp.h> (crashpad
+      writes dumps out of process)
+    - no raw thread creation (std::thread, std::jthread, CreateThread,
+      _beginthreadex, pthread_create) outside se_os: engine threads come
+      from se::StartThread
   deterministic (simulation) modules, additionally
     - no wall clocks: steady_clock, system_clock, high_resolution_clock,
       SDL_GetTicks
@@ -21,7 +31,8 @@ Test modules (kind "test") are exempt.
 
 usage:
   check_banned_api.py <build>/se_checks.json
-  check_banned_api.py --planted <dir>   succeeds only if a violation is found
+  check_banned_api.py --planted <dir> [--expect RULE]
+      succeeds only if a violation (of RULE, when given) is found
 """
 
 import argparse
@@ -38,7 +49,22 @@ ENGINE_RULES = [
     ("throw", re.compile(r"\bthrow\b")),
     ("rtti", re.compile(r"\b(dynamic_cast|typeid)\b")),
     ("header", re.compile(r"#\s*include\s*<(filesystem|ratio|cfenv|fenv\.h)>")),
+    ("debugbreak", re.compile(r"\b(DebugBreak|__debugbreak|__builtin_trap)\b")),
+    ("dump", re.compile(r"\bMiniDumpWriteDump\b")),
+    ("dump_header", re.compile(r"#\s*include\s*[<\"](?i:dbghelp\.h)[>\"]")),
 ]
+# Rules for every module, test code included.
+ALL_RULES = [
+    ("timer", re.compile(r"\btime(Begin|End)Period\b")),
+]
+# Raw thread creation; std::thread::id and std::this_thread are fine.
+THREAD_RULE = ("thread", re.compile(
+    r"\bstd::j?thread\b(?!\s*::)"
+    r"|\b(CreateThread|_beginthreadex|_beginthread|pthread_create)\s*\("))
+# The only module that may create threads (ADR-029).
+THREAD_MODULES = {"se_os"}
+# Rules matched on the raw line: stripping would drop the <...> of an include.
+RAW_RULES = {"header", "dump_header"}
 DETERMINISM_RULES = [
     ("clock", re.compile(
         r"\b(steady_clock|system_clock|high_resolution_clock|SDL_GetTicks\w*)\b")),
@@ -88,35 +114,46 @@ def strip_code(line, in_block):
     return "".join(out), in_block
 
 
-def scan_file(path, deterministic):
+def rules_for(kind, deterministic, name):
+    """The rules for a module of |kind| ("engine" or "test") named |name|."""
+    if kind == "test":
+        return list(ALL_RULES)
+    rules = ALL_RULES + ENGINE_RULES
+    if name not in THREAD_MODULES:
+        rules.append(THREAD_RULE)
+    if deterministic:
+        rules += DETERMINISM_RULES
+    return rules
+
+
+def scan_file(path, rules, check_catch=True):
     found = []
     text = path.read_text(encoding="utf-8", errors="replace")
     fault_boundary = FAULT_BOUNDARY in text
-    rules = ENGINE_RULES + (DETERMINISM_RULES if deterministic else [])
     in_block = False
     for number, raw in enumerate(text.splitlines(), start=1):
         allowed = set(ALLOW_RE.findall(raw))
         # Includes are matched on the raw line: stripping would drop <...>.
         code, in_block = strip_code(raw, in_block)
         for name, pattern in rules:
-            subject = raw if name == "header" else code
+            subject = raw if name in RAW_RULES else code
             if name not in allowed and pattern.search(subject):
                 found.append(f"{path}:{number}: banned ({name}): {raw.strip()}")
-        if (CATCH_RE.search(code) and not fault_boundary
+        if (check_catch and CATCH_RE.search(code) and not fault_boundary
                 and "catch" not in allowed):
             found.append(f"{path}:{number}: catch outside a file marked "
                          f"// {FAULT_BOUNDARY}: {raw.strip()}")
     return found
 
 
-def scan(root, deterministic, include_planted=False):
+def scan(root, rules, check_catch=True, include_planted=False):
     found = []
     for path in sorted(pathlib.Path(root).rglob("*")):
         if path.suffix not in SOURCE_SUFFIXES:
             continue
         if "planted" in path.parts and not include_planted:
             continue
-        found += scan_file(path, deterministic)
+        found += scan_file(path, rules, check_catch)
     return found
 
 
@@ -124,10 +161,18 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("config", nargs="?")
     parser.add_argument("--planted")
+    parser.add_argument("--expect",
+                        help="with --planted: the rule that must fire")
     args = parser.parse_args()
 
     if args.planted:
-        found = scan(args.planted, deterministic=True, include_planted=True)
+        # A planted fixture is an engine module other than se_os, with the
+        # determinism rules on, so every rule applies to it.
+        found = scan(args.planted, rules_for("engine", True, "planted"),
+                     include_planted=True)
+        if args.expect:
+            found = [line for line in found
+                     if f"banned ({args.expect})" in line]
         for line in found:
             print("planted (expected):", line)
         if not found:
@@ -138,9 +183,9 @@ def main():
     config = json.loads(pathlib.Path(args.config).read_text(encoding="utf-8"))
     violations = []
     for module in config["modules"]:
-        if module.get("kind") == "test":
-            continue
-        violations += scan(module["dir"], module["deterministic"])
+        kind = module.get("kind", "engine")
+        rules = rules_for(kind, module["deterministic"], module["name"])
+        violations += scan(module["dir"], rules, check_catch=kind != "test")
     for line in violations:
         print(line)
     print(f"check_banned_api: {len(violations)} violation(s)")

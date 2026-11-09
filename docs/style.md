@@ -52,6 +52,19 @@ and thread, and a non-trivial one is destroyed at exit. Constants are
 `// se-allow(<rule>): <reason>` (rules: throw, rtti, header, clock, random,
 math, static, catch).
 
+## Threads, debugging and platform headers (M4)
+
+Engine threads are named roles started with `se::StartThread` (se_os); no
+other engine module creates a thread (`std::thread`, `std::jthread`,
+`CreateThread`, `_beginthreadex`, `pthread_create`). Engine code never calls
+`DebugBreak`, `__debugbreak` or `__builtin_trap`, and never writes a dump in
+process (`MiniDumpWriteDump`, `<dbghelp.h>`): a fault aborts and crashpad
+writes the dump out of process. Nothing, tests included, calls
+`timeBeginPeriod`/`timeEndPeriod`. Only se_log includes spdlog, and only
+se_os, se_crash, se_platform and se_render include `<windows.h>`.
+tools/checks/check_banned_api.py and check_includes.py enforce these, each
+with a planted fixture (`checks.planted.*`).
+
 ## Tools
 
 | Tool | Config | Run |

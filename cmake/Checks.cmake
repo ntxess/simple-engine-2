@@ -188,6 +188,27 @@ function(se_register_checks)
     PROPERTIES LABELS checks)
   set_tests_properties(checks.planted.link_graph PROPERTIES LABELS checks
     PASS_REGULAR_EXPRESSION "Link-graph violations")
+  # M4a: one planted violation per thread, debugging and include rule; each
+  # test passes only if its own rule fires (--expect).
+  foreach(_pair raw_thread:thread debug_break:debugbreak dump_write:dump
+          time_period:timer)
+    string(REPLACE ":" ";" _pair "${_pair}")
+    list(GET _pair 0 _fixture)
+    list(GET _pair 1 _rule)
+    add_test(NAME checks.planted.${_fixture}
+      COMMAND Python3::Interpreter "${_tools}/check_banned_api.py"
+              --planted "${_planted}/${_fixture}" --expect ${_rule})
+    set_tests_properties(checks.planted.${_fixture} PROPERTIES LABELS checks)
+  endforeach()
+  foreach(_pair spdlog_include:spdlog windows_include:windows)
+    string(REPLACE ":" ";" _pair "${_pair}")
+    list(GET _pair 0 _fixture)
+    list(GET _pair 1 _rule)
+    add_test(NAME checks.planted.${_fixture}
+      COMMAND Python3::Interpreter "${_tools}/check_includes.py"
+              --planted "${_planted}/${_fixture}" --expect ${_rule})
+    set_tests_properties(checks.planted.${_fixture} PROPERTIES LABELS checks)
+  endforeach()
   # A module that links a target outside its ALLOW_ONLY list.
   add_test(NAME checks.planted.link_allow_only
     COMMAND "${CMAKE_COMMAND}"
