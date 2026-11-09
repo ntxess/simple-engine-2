@@ -60,3 +60,9 @@ catch_discover_tests(se_pacing_tests
     LABELS desktop
     ENVIRONMENT SE_NO_MESSAGE_BOX=1
     TIMEOUT 120)
+
+# tools/presentmon/analyze.py on a synthetic PresentMon CSV (any platform).
+add_test(NAME presentmon.analyze
+  COMMAND Python3::Interpreter
+          "${CMAKE_SOURCE_DIR}/tools/presentmon/analyze_test.py")
+set_tests_properties(presentmon.analyze PROPERTIES LABELS tools)

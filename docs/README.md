@@ -33,13 +33,15 @@ behaviour reference until every rule and editor operation is ported.
 | se_render_core | engine/se_render_core | Headless renderer half: SpriteRenderer, Camera2D, BuildRenderList; depends on se_core only (M3) |
 | se_crash | engine/se_crash | Out-of-process crash capture on crashpad: Start/CrashGuard, RegisterStream, DumpWithoutCrash, the terminate annotation; nothing uploaded; a stub on Linux and in msvc-asan (M4, ADR-033, ADR-034). The watchdog skeleton: role kWatchdog, the HangDetector (boot budget; hangs declared from M12), RequestDump, the shutdown deadline (M4 integration, ADR-043) |
 | game_rampage | games/rampage | The legacy Sandbox's gameplay on the kernel: components, systems, scenes and prefabs (assets/), legacy scenarios, projections (M3) |
-| se_platform | engine/se_platform | SDL3 on the main thread: SDL's initialisation, the event filter and Inbox, WakeMain, the window and its Win32 subclass (Modal, session end, power), se::fs on SDL's filesystem API (M5) |
+| se_platform | engine/se_platform | SDL3 on the main thread: SDL's initialisation, the event filter and Inbox, WakeMain, the window and its Win32 subclass (Modal, session end, power), se::fs on SDL's filesystem API (M5); the display outputs (QueryDisplayConfig's current mode of the window's monitor, ADR-055) and the vblank sampler (role kVblankSampler: WaitForVBlank on the window's DXGI output, stamps in the SDL_GetTicksNS domain, a median period; a stub elsewhere) (M6b, ADR-056) |
 | se_render | engine/se_render | The SDL_GPU device (D3D12 on Windows, Vulkan on Linux) and the frame transaction, clear-only until M7 (M5) |
-| se_runtime | engine/se_runtime | The App on SDL's main callbacks: boot steps, the frame, the lifecycle and two-phase quit state machines, BasicInputService, the noexcept callbacks (`SE_DEFINE_SDL_APP`) (M5); the main thread's RoleScope, crash capture and its dump streams, the log worker and the watchdog in boot order (integration.h; ADR-042) |
+| se_runtime | engine/se_runtime | The App on SDL's main callbacks: boot steps, the frame, the lifecycle and two-phase quit state machines, BasicInputService, the noexcept callbacks (`SE_DEFINE_SDL_APP`) (M5); the main thread's RoleScope, crash capture and its dump streams, the log worker and the watchdog in boot order (integration.h; ADR-042); the FramePacer over the pure PacerPolicy (Paced, Standard, VRR, HalfRate, adaptive latency, misses from present statistics; `--pacing`) and the PresentPort it presents through, ClearOnlyPresentPort until the integration (M6b, ADR-054, ADR-057, ADR-058) |
 | rampage | games/rampage/app | The rampage executable: the sandbox scene at 120 Hz in a window, clear-only until M7 (M5); crashpad_handler is copied next to it |
 | se_replay | tools/se_replay | Headless runs of a game module: per-tick hashes, replays, projections |
 | refcmp | tools/refcmp/refcmp.py | Compares two `.seproj` projections within the M3 tolerances (Python 3, stdlib only) |
 | read_dump | tools/minidump/read_dump.py | Decodes a crash dump: threads, exception, annotations and the first-party streams (breadcrumbs, log rings, InputFrame ring), and lists every record that does not fit its index (a stale or torn InputFrame slot, log sequence numbers out of order) under "problems", apart from the one a running writer was overwriting (ADR-046); the crash tests' oracle (Python 3, stdlib only) |
+| presentmon | tools/presentmon/analyze.py, run.ps1 | Summarises a PresentMon CSV for one process: displayed latency p50/p99, dropped and repeated frames, present intervals, with optional limits (Python 3, stdlib only; `presentmon.analyze` tests it); run.ps1 captures rampage with PresentMon (not installed; docs/gates.md) (M6b) |
+| se_pacing_tests | tests/pacing | PacerPolicy, the FramePacer on a fake clock and present port, the vblank sampler on a fake source (label unit, TSan included); desktop: the sampler on this machine's outputs, SDL's refresh against the OS's, Standard without the patch, the VRR deadline, and the Paced exit tests that need M6a (`pacing.*`) |
 | se_crash_probe | tests/crash | Registers dump streams with known contents, then crashes or requests dumps; the `crash.*` tests (label crash) check its dumps with read_dump. `crash.rampage_*` (labels desktop and crash) check the M4 exit dumps of the rampage executable |
 | se_bench | bench/se_bench | Benchmark suites and their Release gates (`bench.*`) |
 | legacy tree | core/, app/ | The SFML reference (`SE_BUILD_LEGACY`, legacy presets) |
@@ -93,6 +95,15 @@ engine/se_runtime/include/se_runtime/app_config.h:
 ```bat
 out\build\msvc-dev\bin\rampage --frames 600
 ```
+
+`--pacing paced|standard|vrr|auto` chooses the FramePacer's mode (auto:
+Paced on Windows when the SDL presentation patch, present statistics and
+the vblank sampler allow it, else Standard; VRR presents IMMEDIATE at a
+self-paced 120 Hz). Test builds add the pacer's mode, rate, present
+interval, frame latency and missed presents to the title, and
+`--log-level debug` logs its statistics once a second. A PresentMon
+capture is summarised with `python tools\presentmon\analyze.py
+capture.csv` (docs/gates.md has the capture command).
 
 Every run of an engine executable writes its log through the log worker to
 `<pref>/logs/<app>.log` (rotated at 5 MB, 3 kept) and to stderr, and keeps
