@@ -24,6 +24,8 @@
 //   --no-crash-capture     do not start the crash handler (tests that boot
 //                          many apps in one process; the dump streams are
 //                          still registered)
+//   --pacing MODE          paced, standard, vrr or auto (the default): the
+//                          FramePacer's mode (frame_pacer.h)
 //
 // Test hooks, in builds with SE_RUNTIME_TEST_HOOKS (every build but
 // Release):
@@ -37,6 +39,8 @@
 //   --dump-test after-ticks:N  after tick N the watchdog writes a dump; the
 //                          ticks stop until it is written, then the app
 //                          quits through the two-phase quit
+//   --inject-late-frame FRAME:MS  iterate FRAME sleeps MS milliseconds after
+//                          its ticks, before it renders (a late frame)
 
 #ifndef SE_RUNTIME_APP_CONFIG_H_
 #define SE_RUNTIME_APP_CONFIG_H_
@@ -51,6 +55,7 @@
 #include "se_core/assert.h"
 #include "se_core/error.h"
 #include "se_core/log.h"
+#include "se_runtime/pacer_policy.h"
 
 #ifndef SE_RUNTIME_TEST_HOOKS
 #define SE_RUNTIME_TEST_HOOKS 0
@@ -77,6 +82,7 @@ struct AppConfig {
   bool terminate_on_quit = kReleaseBuild;
   LogLevel log_level = LogLevel::kInfo;
   bool crash_capture = true;
+  PacingRequest pacing = PacingRequest::kAuto;
 
   // Test hooks.
   int fail_init_step = 0;
@@ -86,6 +92,8 @@ struct AppConfig {
   std::int64_t null_acquire_count = 0;
   std::int64_t crash_test_after_ticks = 0;
   std::int64_t dump_test_after_ticks = 0;
+  std::int64_t late_frame_at = 0;
+  double late_frame_ms = 0.0;
 
   // The arguments after "--".
   std::vector<std::string> game_args;

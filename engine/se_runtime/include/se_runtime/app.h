@@ -16,7 +16,8 @@
 //    6 window          the window and its Win32 subclass
 //    7 gpu-device      the SDL_GPU device, claiming the window with VSYNC
 //    8 cpu-topology    the CPU topology and the pool sizes it gives
-//    9 helper-threads  the watchdog (boot budget until the first iterate)
+//    9 helper-threads  the vblank sampler (Windows, a window), then the
+//                      watchdog (boot budget until the first iterate)
 //   10 game            the GameModule's registry and storages, the
 //                      GameStateStack with the start state pushed, the
 //                      SimDriver writing the process's InputFrame ring
@@ -27,14 +28,18 @@
 //
 // Each iterate: count the iterate (the watchdog's progress), take the
 // inbox, poll the two-phase quit, update the lifecycle (callback rate, held
-// input, frame-clock reset), plan the frame's ticks with the FixedStepper
-// from SDL's clock and display mode, tick the running Worlds through
-// SimDriver::TickInline with BasicInputService's frames, record the
-// clear-only frame and present it with VSYNC.
+// input, frame-clock reset), FramePacer::BeginFrame (the N-L fence, present
+// statistics, the FrameClock), plan the frame's ticks with the FixedStepper,
+// tick the running Worlds through SimDriver::TickInline with
+// BasicInputService's frames, record the clear-only frame, and
+// FramePacer::EndFrame (Paced, Standard or VRR; M6b). The pacer presents
+// through ClearOnlyPresentPort until the integration's adapter over
+// se::present and M7's FrameRecorder.
 //
 // Shutdown follows the design's order for the parts that exist: the
 // watchdog's deadline starts when the quit drain ends; remove the event
-// filter, SDL_WaitForGPUIdle, destroy the Worlds, release the device,
+// filter, SDL_WaitForGPUIdle, destroy the Worlds, stop the vblank sampler
+// (step 9), release the present port and the device,
 // remove the subclass and destroy the window, SDL_QuitSubSystem, stop the
 // log worker (step 16), join the watchdog (step 17), stop the profiler.
 // Game code that runs during shutdown (GameSetup::on_shutdown and every
@@ -73,7 +78,8 @@
 #include "se_render/frame_recorder.h"
 #include "se_render/gpu_device.h"
 #include "se_runtime/app_config.h"
-#include "se_runtime/frame_clock.h"
+#include "se_runtime/clear_present_port.h"
+#include "se_runtime/frame_pacer.h"
 #include "se_runtime/integration.h"
 #include "se_runtime/lifecycle.h"
 #include "se_runtime/quit.h"
@@ -108,6 +114,9 @@ struct FrameReport {
   bool presented = false;
   bool modal = false;
   bool suspended = false;
+  // The pacer's FrameClock and what it did this frame (M6b).
+  FrameClock clock;
+  PacerFrame pacer;
 };
 
 // A game, as the runtime runs it. Made by the game's GameFactory.
@@ -186,6 +195,14 @@ class App final : public WindowListener {
   [[nodiscard]] const FixedStepper& Stepper() const noexcept {
     return stepper_;
   }
+  [[nodiscard]] const FramePacer& Pacer() const noexcept { return pacer_; }
+  // The window's display: SDL's refresh, the OS's mode (0: unknown) and
+  // the monitor.
+  [[nodiscard]] double SdlRefreshHz() const noexcept { return refresh_hz_; }
+  [[nodiscard]] const MonitorMode& DisplayMode() const noexcept {
+    return display_mode_;
+  }
+  [[nodiscard]] MonitorHandle Monitor() const noexcept { return monitor_; }
   [[nodiscard]] Tick NextTick() const noexcept;
   [[nodiscard]] std::uint64_t Iterates() const noexcept { return iterates_; }
   [[nodiscard]] std::uint64_t PresentedFrames() const noexcept {
@@ -221,6 +238,13 @@ class App final : public WindowListener {
   // recorded. |presented| tells whether a swapchain texture was acquired.
   bool RenderClear(bool& presented, double& render_sec) SE_REQUIRES(g_main);
   void UpdateTitle(std::uint64_t now_ns) SE_REQUIRES(g_main);
+  // Re-reads the window's monitor and display mode after a display change
+  // or a move (always with |force|); a new monitor goes to the vblank
+  // sampler and the pacer.
+  void UpdateDisplay(bool force) SE_REQUIRES(g_main);
+  // The refresh the pacer compares the sampler with: the OS's current mode
+  // of the window's monitor, else SDL's (ADR-055).
+  [[nodiscard]] double PacingRefreshHz() const noexcept;
   void LogProgress(std::uint64_t now_ns);
   // The M4 exit hooks (test builds): the tick they act after (0: none),
   // the frame's plan cut so that it ends at that tick, and the action.
@@ -241,16 +265,24 @@ class App final : public WindowListener {
   ContentPaths paths_;
   std::unique_ptr<Window> window_;
   std::unique_ptr<GpuDevice> gpu_;
+  std::unique_ptr<ClearOnlyPresentPort> present_;
   integration::CpuInfo cpu_;
   std::optional<integration::HelperThreads> helpers_;
   std::unique_ptr<GameRuntime> game_;
 
   Lifecycle lifecycle_;
   QuitController quit_;
-  FrameClockSource clock_;
+  FramePacer pacer_;
   FixedStepper stepper_;
   CostTracker costs_;
+  // SDL's refresh for the window's display, the OS's mode, the monitor.
   double refresh_hz_ = 0.0;
+  MonitorMode display_mode_;
+  MonitorHandle monitor_ = nullptr;
+  bool late_frame_injected_ = false;
+  // Shutdown step 9 left the vblank sampler in its wait (logged after the
+  // teardown).
+  bool vblank_detached_ = false;
 
   // Read by the watchdog (integration). The heartbeat flag is for long
   // work on main that still makes progress (M9's loads, M12); nothing in

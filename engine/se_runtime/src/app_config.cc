@@ -17,6 +17,7 @@
 
 #include "se_core/error.h"
 #include "se_core/log.h"
+#include "se_runtime/pacer_policy.h"
 
 namespace se {
 namespace {
@@ -145,6 +146,23 @@ std::expected<void, Error> ParseNullAcquire(std::string_view text,
   return {};
 }
 
+// "FRAME:MS", FRAME >= 1 and 0 < MS <= 1000 (--inject-late-frame).
+std::expected<void, Error> ParseLateFrame(std::string_view text,
+                                          AppConfig& config) {
+  const std::size_t colon = text.find(':');
+  if (colon != std::string_view::npos) {
+    const auto frame = ParseNumber<std::int64_t>(text.substr(0, colon));
+    const auto ms = ParseNumber<double>(text.substr(colon + 1));
+    if (frame && ms && *frame >= 1 && *ms > 0.0 && *ms <= 1000.0) {
+      config.late_frame_at = *frame;
+      config.late_frame_ms = *ms;
+      return {};
+    }
+  }
+  return Bad(std::format(
+      "--inject-late-frame: bad value '{}' (expected FRAME:MS)", text));
+}
+
 // "after-ticks:N", N >= 1 (the M4 exit hooks).
 std::expected<std::int64_t, Error> ParseAfterTicks(std::string_view option,
                                                    std::string_view text) {
@@ -249,6 +267,15 @@ std::expected<AppConfig, Error> ParseAppConfig(
       auto value = reader.Value(option);
       if (!value) return std::unexpected(value.error());
       config.pref_dir = std::string(*value);
+    } else if (option == "--pacing") {
+      auto value = reader.Value(option);
+      if (!value) return std::unexpected(value.error());
+      const auto request = ParsePacingRequest(*value);
+      if (!request) {
+        return Bad(std::format(
+            "--pacing: bad value '{}' (paced, standard, vrr or auto)", *value));
+      }
+      config.pacing = *request;
     } else if (option == "--log-level") {
       auto value = reader.Value(option);
       if (!value) return std::unexpected(value.error());
@@ -282,6 +309,15 @@ std::expected<AppConfig, Error> ParseAppConfig(
       auto value = reader.Value(option);
       if (!value) return std::unexpected(value.error());
       if (auto ok = ParseNullAcquire(*value, config); !ok) {
+        return std::unexpected(ok.error());
+      }
+    } else if (option == "--inject-late-frame") {
+      if (auto ok = NeedTestHooks(option); !ok) {
+        return std::unexpected(ok.error());
+      }
+      auto value = reader.Value(option);
+      if (!value) return std::unexpected(value.error());
+      if (auto ok = ParseLateFrame(*value, config); !ok) {
         return std::unexpected(ok.error());
       }
     } else if (option == "--crash-test" || option == "--dump-test") {

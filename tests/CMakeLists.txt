@@ -180,6 +180,7 @@ add_subdirectory(crash)
 if(SE_BUILD_PLATFORM)
   add_subdirectory(platform)
   add_subdirectory(present)
+  add_subdirectory(pacing)
 endif()
 
 # tools/se_replay links the kernel test module from tests/support, so it is

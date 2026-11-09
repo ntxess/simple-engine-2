@@ -68,6 +68,10 @@ both compile. Upstreaming needs the owner: SDL's AGENTS.md and CLAUDE.md
 (in the tarball) refuse contributions made with generative AI, which this
 patch is (docs/gates.md).
 
+Windows system libraries (from the SDK, no pin): comctl32 (the window
+subclass, M5) and dxgi (the vblank sampler and the display outputs, M6b),
+both linked by se_platform only.
+
 ## Measurements (2026-11-08, Ryzen 7 7700X, MSVC 14.51 Dev, Ninja)
 
 - deps-smoke: every pinned dependency builds (665 steps in 29 s), including

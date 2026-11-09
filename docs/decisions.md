@@ -1158,3 +1158,208 @@ frames in flight, which the pacer's latency changes; the fence reference
 is what makes "Read after its fence signalled" safe against SDL's fence
 pool. SDL already reports device loss from nearly every Vulkan call
 through that macro, so one line covers them.
+
+## ADR-054 The pacer presents through a PresentPort; the clear-only port until the integration (2026-11-09)
+
+**Decision.** The FramePacer talks to `se::PresentPort`
+(`se_runtime/present_port.h`) and never to `se::present`. Its data types
+mirror the present API under their own names, so that the header needs no
+SDL include and the pure PacerPolicy can use them: `PresentCaps`,
+`PresentWait`, `PresentStatistics` (DXGI_FRAME_STATISTICS semantics, plus
+`last_present_count`), `GpuTiming`, `GpuDeviceStatus`,
+`PresentNativeHandles`, and `SwapchainMode` (VSYNC, IMMEDIATE, MAILBOX) for
+SDL_GPUPresentMode; the SDL handles in the GPU-timing calls are forward
+declared. Beyond the present API the port has:
+- `OnFrameSubmitted(SDL_GPUFence*)`: each frame's fence, owned by the port
+  from then on (nullptr when the recorder has none);
+- `WaitFrameFence(frames_back, timeout_ns)`: the N-L wait; a zero timeout
+  polls, which is how the pacer learns `gpu_fence_pending_at_start`;
+- `RepresentLast()`: HalfRate's Standard re-present;
+- `WaitSwapchain()`: Standard's SDL_WaitForGPUSwapchain, so a fake can stand
+  in for it.
+The pacer reads `GetPresentStats` right after each present to learn that
+present's id (`last_present_count`); the integration's adapter must report
+it then, before the present is displayed (DXGI's GetLastPresentCount does).
+
+Until the integration, `ClearOnlyPresentPort` (clear_present_port.h) runs
+over M5's GpuDevice and FrameRecorder, both unchanged. It reports what the
+unpatched SDL 3.4.20 has: `tearing` from SDL_WindowSupportsGPUPresentMode
+(IMMEDIATE), every other cap false. Its fences come from an empty command
+buffer submitted with SDL_SubmitGPUCommandBufferAndAcquireFence after each
+frame (it signals once the frame's work before it on the queue is done);
+SDL has no timed fence wait, so WaitFrameFence polls or blocks in
+SDL_WaitForGPUFences. RepresentLast records another clear frame, the whole
+composite in M5.
+
+**Why.** The spec makes the port the contract between M6a and M6b. Mirrored
+types under distinct names keep PacerPolicy free of SDL and make the
+adapter a field-by-field copy; a fence behind the frame gives the N-L wait
+real data now without rewriting M5's FrameRecorder, which M7 replaces.
+
+## ADR-055 SDL's 60.001 Hz is the wrong number; the pacer uses the OS's current mode (2026-11-09)
+
+**Decision.** M5 saw SDL report 60.001 Hz for the window's display while
+VSYNC presents ran at about 165 Hz. Measured on 2026-11-09 (the
+`pacing.display_rates` desktop test and probes; one active output,
+`\\.\DISPLAY2`, an ASUS VG27AQL1A on the RTX 3080 at 2560x1440):
+- QueryDisplayConfig's target refresh for the path: 165003/1000 Hz;
+  EnumDisplaySettings(ENUM_CURRENT_SETTINGS): 165 Hz; DWM's
+  DwmGetCompositionTimingInfo: 10000000/60606 (165.0 Hz) and DwmFlush
+  every 6.05 ms (median); VSYNC presents of a clear frame: 164.987 Hz.
+- SDL 3.4.20's WIN_GetRefreshRate (src/video/windows/SDL_windowsmodes.c)
+  starts from dmDisplayFrequency (165), then replaces it with the refresh
+  of IDXGIOutput::FindClosestMatchingMode for 2560x1440 R8G8B8A8. DXGI's
+  mode list for this output has one mode at that size, 60.001 Hz (24 modes
+  in all, every one near 60 Hz; GDI's mode list likewise has only 60 Hz at
+  2560x1440), so SDL reports 60.001 Hz. The test reproduces SDL's
+  computation from the OS queries and checks it equals SDL's number.
+So SDL's display query is wrong and the present rate is right. The vblank
+sampler could not add its own measurement: the display had been idle for
+2.8 hours and was asleep (WaitForVBlank returned at once, and
+D3DKMTWaitForVerticalBlankEvent failed with
+STATUS_GRAPHICS_PRESENT_OCCLUDED); whether DXGI's mode list also lacks
+165 Hz while the monitor is awake is a gates.md entry. A list of only
+near-60 Hz modes looks like the driver's list without the monitor's own
+modes, so SDL may be right while the monitor is awake and wrong whenever
+it sleeps (as during unattended test runs, M5's included); the pacer does
+not depend on which, because it reads the current mode.
+
+The "display mode" the pacer compares the sampler with, and the period it
+falls back to, is therefore the OS's current mode of the window's monitor:
+`se_platform/display_output.h` QueryMonitorMode reads QueryDisplayConfig's
+target refresh of the monitor's active path (MonitorOfWindow, then the
+path whose source GDI name is the monitor's). SDL's refresh is used only
+when that query has no answer (Linux, no active path). Both are logged at
+boot and after every display change ("display: SDL reports 60.001 Hz; the
+OS reports `\\.\DISPLAY2` ... at 165.003 Hz ..."). ADR-039's measured-period
+fallback stays for a mode that is unknown or wrong anyway.
+
+**Why.** With SDL's number every comparison with a correct sampler would
+fail and Paced could never run on this machine. This deviates from the
+spec's "SDL's mode" in M6b's period and mode rules.
+
+## ADR-056 The vblank sampler: when it runs, what it ignores, how it stops (2026-11-09)
+
+**Decision.**
+- It runs whenever the App has a window on Windows, started at boot step 9
+  before the watchdog and stopped at shutdown step 9 (HelperThreads::
+  StopSamplers; HelperThreads::Stop stops it too). Not only in Paced: the
+  pacer needs it to choose Paced, and Standard's frame clock uses its grid
+  (ADR-057). A sampler that cannot start is logged and the App runs
+  without it. EngineThreadsRunning counts it; its registry slot is in the
+  dumps (crash.rampage_* check it).
+- Stamps are QueryPerformanceCounter values after WaitForVBlank returns,
+  mapped to SDL_GetTicksNS by one calibration pair taken on main at Start
+  (SDL's ticks are QPC scaled from SDL's start). The period is the median
+  of the last 64 intervals, published after 16; the spread is p90 - p10.
+  An interval over 1.5 periods counts as that many vblanks and stays out of
+  the ring.
+- A wait that returns less than 1 ms after the previous one is not a
+  vblank: WaitForVBlank returns at once while the display is off (measured,
+  ADR-055). Such returns publish nothing; three in a row mark the output
+  off and back off for 50 ms.
+- The 100 ms watchdog is the stamp's age, judged by every reader against
+  its own clock (Read(now)): a WaitForVBlank that never returns cannot mark
+  itself, so a reading is fresh only while the newest vblank is younger
+  than 100 ms. A reading is valid when the thread runs, the output of the
+  latest SetMonitor is resolved, the reading is fresh, the output is not
+  off and the period is known.
+- Stop waits min(period, 100 ms) + 50 ms for the thread to leave its wait,
+  then joins; otherwise it marks the sampler stale and detaches the thread
+  (new `se::Thread::Detach`), which owns its state through a shared_ptr and
+  ends when the wait returns (design "Shutdown Order" step 9). Stop does
+  not log (it is noexcept); the App logs a detach after its teardown.
+- SetMonitor is two atomic stores (the monitor, then a generation with
+  release); main never takes the sampler's lock or wakes it, and the
+  sampler checks the generation every vblank and every 20 ms of a backoff.
+  Each resolve creates a new DXGI factory (an old one does not see outputs
+  a display change added). `MonitorHandle` is an opaque pointer (the
+  HMONITOR). se_platform now links se_os (StartThread) and dxgi, the only
+  module that does.
+
+**Why.** The spec bounds Stop and asks for staleness when WaitForVBlank
+does not return, which only a reader or a timed join can see; the early
+returns were found on this machine and would otherwise publish a
+2.5 MHz "display".
+
+## ADR-057 Frame starts on the vblank grid; misses against each present's target (2026-11-09)
+
+**Decision.**
+- FrameClock. With a valid sampler whose period agrees with the display
+  mode, frames start on its grid: Paced one presentation interval before
+  the frame's target vblank (ADR-016), Standard at the grid vblank at or
+  before now (Standard waits for the swapchain at the end of the previous
+  iterate, so now is just after a flip), VRR at its deadline; elapsed
+  intervals are the rounded grid difference, so `vblanks_known` is true.
+  Otherwise the frame starts on the wall clock with the period from
+  ChoosePeriod (the mode, or ADR-039's measured period), as in M5.
+  `--fixed-frame-dt` keeps M5's synthetic clock.
+- Targets. Paced: the vblank PlanPacedWake chose. Standard: the frame
+  start plus one presentation interval. RepresentLast's present targets
+  one vblank later. Each present is registered with the id
+  GetPresentStats reports right after it.
+- Misses (PresentTracker): the statistics name the newest displayed
+  present and its refresh; it missed when that refresh is after its
+  target's refresh (the target time converted through the statistics' sync
+  pair). A present the statistics skipped over missed only when its target
+  is before the earliest refresh it could have shown on. Counters that go
+  backwards or a present id that restarts reset the tracking. BeginFrame
+  reports one result per frame to FixedStepper::OnPresentResult: missed
+  when any present it resolved missed.
+- The N-L fence: BeginFrame polls the fence of frame N-L; pending sets
+  `gpu_fence_pending_at_start` (so k_max holds at k_rt while g is
+  unknown), then it waits, except while Modal.
+- EndFrame waits only after a frame that presented, and never while Modal.
+  Paced sleeps to target - StepPlan::budget_b of PlanNext (B capped at the
+  period plus the stepper's miss offset) with SDL_DelayNS; the timer p99
+  in m is the measured lateness of these sleeps once 16 exist (0.5 ms
+  before).
+- The mode is chosen at Attach and re-evaluated every 0.5 s and after an
+  output change. Paced is taken only after the sampler has been valid and
+  agreeing for 0.5 s; leaving Paced is immediate (at the next frame when
+  the sampler goes invalid). So a boot usually starts in Standard and turns
+  Paced within a second, and every change is logged with its reason. A
+  display is fixed-refresh when the sampler's spread is at most 10% of its
+  period.
+
+**Why.** Frame starts on the grid let Locked cadence count vblanks rather
+than round wall deltas, in Standard too. Per-present targets catch the
+"one refresh late" equilibrium (red team P1), which refresh deltas alone
+cannot see. A delayed promotion keeps a sampler that has just re-resolved
+from flapping the mode.
+
+## ADR-058 HalfRate, adaptive latency and VRR in the pacer; the M6b options (2026-11-09)
+
+**Decision.**
+- HalfRate is PacerPolicy's HalfRatePolicy with the M6b rule: above 100 Hz,
+  entered when more than 1% of the presents resolved over the last 2 s
+  missed or a full-rate frame's planned cost ((T/dt) S_hi + R_hi + g_hi +
+  m) exceeded the vblank period for 2 s; left after 4 s in which the
+  full-rate p95 cost stayed below 0.75 T. Modal frames do not count. It is
+  a pacer state (FramePacer::HalfRate, PresentInterval 2, the title, the
+  log), not a Lifecycle state. se_core's HalfRateController (M2, a 5 s
+  exit) stays for the stepper's virtual-display scenarios.
+- Frame latency 2 when k_rt S_95 + R_95 and g_95 each fit in the
+  presentation period but their sum does not, for 2 s; back to 1 after 4 s
+  without that; an unknown g never asks for 2; a base latency of 2 (the
+  editor, M10) is fixed. Each change calls SetFrameLatency.
+- VRR: IMMEDIATE, a deadline every 1/120 s, or 1/60 s when the display mode
+  is below 119.5 Hz (Windows does not report a panel's VRR range; its mode
+  is the range's top). A deadline already past re-anchors at now, so a
+  late frame causes no burst. The sleep aims early by the median measured
+  lateness (at most 1 ms): over 10 s here frame starts were within
+  0.287 ms p99 of their deadlines (`pacing.vrr_deadline`). No miss or
+  HalfRate logic runs in VRR.
+- `--pacing paced|standard|vrr|auto` (AppConfig). Auto is Paced when
+  possible on Windows and Standard elsewhere; `paced` asks for Paced on any
+  platform, with the same requirements. Without the SDL patch the App runs
+  Standard, or VRR when asked.
+- `--inject-late-frame FRAME:MS` (test builds): iterate FRAME sleeps MS
+  milliseconds after its ticks, before it renders.
+- Test builds show FramePacer::Summary() ("Paced 165.00 Hz x1 L1 miss 0")
+  in the window title; the pacer logs its per-second statistics at debug
+  level and its totals at shutdown.
+
+**Why.** These are the spec's rules with the choices it leaves open made
+explicit; the VRR lead keeps frame starts centred on the deadline instead of
+always late by the timer's lateness.
