@@ -22,6 +22,7 @@
 #include "platform/support/test_app.h"
 #include "se_core/log.h"
 #include "se_core/thread_role.h"
+#include "se_platform/wake.h"
 #include "se_runtime/app.h"
 #include "se_runtime/app_config.h"
 #include "se_runtime/integration.h"
@@ -327,6 +328,50 @@ TEST_CASE("Immediate events from an engine thread reach the app via the inbox",
   // TERMINATING ran the recovery hook and ended the app.
   REQUIRE(recovered == std::vector<QuitReason>{QuitReason::kTerminating});
   REQUIRE(observed.frames.size() < 2000);
+}
+
+// A thread that calls WakeMain all the time, from inside SDL_AppInit
+// (before SDL adds its own event watcher) until after the app is gone
+// (through the filter removal at shutdown step 4): only the wakes between
+// the first iterate and step 4 reach SDL (ADR-047). Under TSan a push
+// outside that window races SDL's changes to its event-watch list.
+TEST_CASE("Wakes from another thread reach SDL only while the app runs",
+          "[callbacks]") {
+  std::atomic<bool> stop{false};
+  std::atomic<std::uint64_t> calls{0};
+  std::thread waker;
+  std::uint64_t pushed_at_boot = 0;
+  std::uint64_t pushed_during_boot = 1;
+  std::uint64_t pushed_while_running = 0;
+  GameSetup setup = TestGameSetup();
+  setup.on_boot = [&](App& /*app*/) {
+    pushed_at_boot = WakeEventsPushed();
+    waker = std::thread([&stop, &calls] {
+      while (!stop.load()) {
+        WakeMain();
+        calls.fetch_add(1);
+      }
+    });
+    while (calls.load() < 1000) std::this_thread::yield();
+    pushed_during_boot = WakeEventsPushed() - pushed_at_boot;
+  };
+  setup.on_frame = [&](App& /*app*/, const FrameReport& report) {
+    if (report.iterate == 20) {
+      pushed_while_running = WakeEventsPushed() - pushed_at_boot;
+    }
+  };
+  const int result =
+      RunTestApp(std::move(setup), {"--headless", "--frames", "30"});
+  const std::uint64_t pushed_after_quit = WakeEventsPushed();
+  const std::uint64_t calls_after_quit = calls.load();
+  while (calls.load() < calls_after_quit + 1000) std::this_thread::yield();
+  const std::uint64_t pushed_later = WakeEventsPushed();
+  stop.store(true);
+  if (waker.joinable()) waker.join();
+  REQUIRE(result == 0);
+  REQUIRE(pushed_during_boot == 0);
+  REQUIRE(pushed_while_running > 0);
+  CHECK(pushed_later == pushed_after_quit);
 }
 
 }  // namespace

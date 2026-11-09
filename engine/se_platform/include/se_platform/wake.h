@@ -9,8 +9,17 @@
 // event (ConsumeWakeEvent), before it drains what the wake announced, so a
 // producer that publishes its data and then calls WakeMain is never missed.
 //
-// Before WakeEventScope registers the event type, and after it ends,
-// WakeMain does nothing.
+// WakeMain pushes only while the scope is open (ADR-047): from the first
+// iterate, which runs once SDL_AppInit has returned, to the start of
+// shutdown step 4. SDL changes its event-watch list on main at both ends
+// (SDL_InitMainCallbacks adds SDL's own watcher after SDL_AppInit returns;
+// step 4 removes the engine's event filter) and SDL_PushEvent reads that
+// list without its lock, a race TSan reports in SDL_DispatchEventWatchList.
+// Outside the open window, and before the event type is registered or
+// after the scope ends, WakeMain does nothing: main is not waiting then,
+// and the first iterate looks at everything a producer published earlier.
+// Any other code that pushes SDL events from a thread other than main
+// keeps to the same window.
 
 #ifndef SE_PLATFORM_WAKE_H_
 #define SE_PLATFORM_WAKE_H_
@@ -39,11 +48,19 @@ class WakeEventScope {
   WakeEventScope& operator=(const WakeEventScope&) = delete;
   ~WakeEventScope();
 
+  // From the first iterate (SDL_AppInit has returned): WakeMain pushes.
+  void Open() noexcept SE_REQUIRES(g_main);
+  // Before the event filter is removed: WakeMain stops pushing. Returns
+  // once no push that saw the scope open is still inside SDL_PushEvent.
+  // The destructor closes too.
+  void Close() noexcept SE_REQUIRES(g_main);
+
  private:
   WakeEventScope() noexcept = default;
   void Release() noexcept;
 
   bool active_ = false;
+  bool open_ = false;
 };
 
 // The registered wake event type; 0 while none is registered.

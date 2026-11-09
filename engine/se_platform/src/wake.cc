@@ -7,6 +7,7 @@
 #include <atomic>
 #include <cstdint>
 #include <expected>
+#include <thread>
 #include <utility>
 
 #include "se_core/assert.h"
@@ -19,14 +20,11 @@ namespace {
 std::atomic<std::uint32_t> g_wake_type{0};
 std::atomic<bool> g_wake_pending{false};
 std::atomic<std::uint64_t> g_wakes_pushed{0};
+// The open window (wake.h) and the WakeMain calls inside it right now.
+std::atomic<bool> g_wake_open{false};
+std::atomic<std::uint32_t> g_wakes_in_flight{0};
 
-}  // namespace
-
-// The definition se_core declares. Any thread. The flag uses sequentially
-// consistent operations on both sides: a producer that finds a wake pending
-// published its data before main clears the flag, and main drains after
-// clearing it.
-void WakeMain() noexcept {
+void PushWake() noexcept {
   const std::uint32_t type = g_wake_type.load(std::memory_order_acquire);
   if (type == 0) return;
   if (g_wake_pending.exchange(true)) return;
@@ -39,6 +37,27 @@ void WakeMain() noexcept {
     // call try again.
     g_wake_pending.store(false);
   }
+}
+
+void CloseWakeWindow() noexcept {
+  g_wake_open.store(false);
+  // A push takes microseconds; producers never wait for main.
+  while (g_wakes_in_flight.load() != 0) std::this_thread::yield();
+}
+
+}  // namespace
+
+// The definition se_core declares. Any thread. The flag uses sequentially
+// consistent operations on both sides: a producer that finds a wake pending
+// published its data before main clears the flag, and main drains after
+// clearing it. A call that finds the window open is counted and checks
+// it again, all sequentially consistent, so Close either sees the count or
+// the call sees the window closed; a closed window costs one load.
+void WakeMain() noexcept {
+  if (!g_wake_open.load()) return;
+  g_wakes_in_flight.fetch_add(1);
+  if (g_wake_open.load()) PushWake();
+  g_wakes_in_flight.fetch_sub(1);
 }
 
 std::expected<WakeEventScope, Error> WakeEventScope::Register() {
@@ -55,20 +74,40 @@ std::expected<WakeEventScope, Error> WakeEventScope::Register() {
 }
 
 WakeEventScope::WakeEventScope(WakeEventScope&& other) noexcept
-    : active_(std::exchange(other.active_, false)) {}
+    : active_(std::exchange(other.active_, false)),
+      open_(std::exchange(other.open_, false)) {}
 
 WakeEventScope& WakeEventScope::operator=(WakeEventScope&& other) noexcept {
   if (this != &other) {
     Release();
     active_ = std::exchange(other.active_, false);
+    open_ = std::exchange(other.open_, false);
   }
   return *this;
 }
 
 WakeEventScope::~WakeEventScope() { Release(); }
 
+void WakeEventScope::Open() noexcept {
+  SE_ASSERT_MAIN_THREAD();
+  if (!active_ || open_) return;
+  open_ = true;
+  g_wake_open.store(true);
+}
+
+void WakeEventScope::Close() noexcept {
+  SE_ASSERT_MAIN_THREAD();
+  if (!open_) return;
+  open_ = false;
+  CloseWakeWindow();
+}
+
 void WakeEventScope::Release() noexcept {
   if (!active_) return;
+  if (open_) {
+    open_ = false;
+    CloseWakeWindow();
+  }
   g_wake_type.store(0, std::memory_order_release);
   g_wake_pending.store(false);
   active_ = false;

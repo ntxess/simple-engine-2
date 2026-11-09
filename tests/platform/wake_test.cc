@@ -1,8 +1,8 @@
 // Copyright 2026 The simple-engine-2 Authors.
 //
 // WakeMain: wakes a main thread blocked in SDL_WaitEvent (the waitevent
-// callback rate of the idle editor), and coalesces to one pending event.
-// Run under TSan in WSL.
+// callback rate of the idle editor), coalesces to one pending event, and
+// pushes only while its scope is open (ADR-047). Run under TSan in WSL.
 
 #include "se_platform/wake.h"
 
@@ -69,8 +69,10 @@ TEST_CASE("WakeMain wakes a main thread blocked in waitevent", "[wake]") {
     ++iterations;
     if (iterations == 1) {
       // The first iterate runs once SDL has installed its own watcher (the
-      // waker must not push while SDL adds it). From here on, iterate only
-      // after an event.
+      // waker must not push while SDL adds it), so the scope opens here, as
+      // the App's does. From here on, iterate only after an event.
+      AssertMainThread();
+      wake->Open();
       SDL_SetHint(SDL_HINT_MAIN_CALLBACK_RATE, "waitevent");
       // Drop anything SDL queued while initialising, so main really blocks.
       SDL_FlushEvents(SDL_EVENT_FIRST, SDL_EVENT_LAST);
@@ -128,6 +130,8 @@ TEST_CASE("Wakes coalesce: at most one wake event is pending", "[wake]") {
     REQUIRE(wake);
     const std::uint32_t type = WakeEventType();
     REQUIRE(type != 0);
+    // No SDL main callbacks here, so no watcher is added: open at once.
+    wake->Open();
     SDL_FlushEvents(SDL_EVENT_FIRST, SDL_EVENT_LAST);
     const std::uint64_t before = WakeEventsPushed();
 
@@ -160,6 +164,41 @@ TEST_CASE("Wakes coalesce: at most one wake event is pending", "[wake]") {
     REQUIRE(WakeEventsPushed() - before == 2);
   }
   REQUIRE(WakeEventType() == 0);
+  SDL_QuitSubSystem(SDL_INIT_EVENTS);
+  SDL_Quit();
+}
+
+TEST_CASE("WakeMain pushes only while the scope is open", "[wake]") {
+  const testing::MainThreadScope main;
+  REQUIRE(SDL_InitSubSystem(SDL_INIT_EVENTS));
+  {
+    auto wake = WakeEventScope::Register();
+    REQUIRE(wake);
+    const std::uint32_t type = WakeEventType();
+    SDL_FlushEvents(SDL_EVENT_FIRST, SDL_EVENT_LAST);
+    const std::uint64_t before = WakeEventsPushed();
+    // Registered, not yet open (boot, before the first iterate).
+    WakeMain();
+    REQUIRE(CountQueued(type) == 0);
+    CHECK_FALSE(WakePending());
+    wake->Open();
+    WakeMain();
+    REQUIRE(CountQueued(type) == 1);
+    SDL_Event event{};
+    REQUIRE(SDL_PollEvent(&event));
+    REQUIRE(ConsumeWakeEvent(event));
+    // Closed again (shutdown step 4): nothing more reaches SDL, from any
+    // thread.
+    wake->Close();
+    std::thread late([] {
+      for (int i = 0; i < 100; ++i) WakeMain();
+    });
+    late.join();
+    WakeMain();
+    REQUIRE(CountQueued(type) == 0);
+    CHECK_FALSE(WakePending());
+    REQUIRE(WakeEventsPushed() - before == 1);
+  }
   SDL_QuitSubSystem(SDL_INIT_EVENTS);
   SDL_Quit();
 }

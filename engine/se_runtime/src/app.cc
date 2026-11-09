@@ -555,7 +555,12 @@ SDL_AppResult App::Iterate() {
   const std::uint64_t iterate_start = SDL_GetTicksNS();
   iterate_counter_.fetch_add(1, std::memory_order_relaxed);
   ++iterates_;
-  if (iterates_ == 1 && helpers_) helpers_->ArmWatchdog();
+  if (iterates_ == 1) {
+    if (helpers_) helpers_->ArmWatchdog();
+    // SDL_AppInit has returned and SDL has added its own event watcher:
+    // other threads may push the wake event from now on (ADR-047).
+    if (wake_) wake_->Open();
+  }
   if (kRuntimeTestHooks && config_.throw_site == ThrowSite::kIterate &&
       static_cast<std::int64_t>(iterates_) == config_.throw_on_call) {
     InjectedThrow("SDL_AppIterate");
@@ -744,7 +749,10 @@ void App::Teardown() {
   if (booted_ && !quit_.DeadlineStarted() && helpers_) {
     helpers_->StartShutdownDeadline();
   }
-  // Step 4: no more diverted events; the GPU finishes its work.
+  // Step 4: no more wake pushes from other threads (they read the watch
+  // list the filter removal changes), no more diverted events; the GPU
+  // finishes its work.
+  if (wake_) wake_->Close();
   if (filter_) filter_->Remove();
   if (gpu_) gpu_->WaitForIdle();
   // Steps 5-6: every World, on main. A throwing OnExit leaves its state

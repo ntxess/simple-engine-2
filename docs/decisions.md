@@ -908,6 +908,27 @@ new header over old text, as valid records of their index. Treating the
 oldest slot of a live ring as a problem would make every dump of a busy
 thread fail `--strict` (the probe's torn slot is that case on purpose).
 
+## ADR-047 Other threads push SDL events only between the first iterate and shutdown step 4 (2026-11-09)
+
+**Decision.** `WakeEventScope` gains `Open()` and `Close()`. The App opens
+it at its first iterate and closes it at the start of shutdown step 4,
+before the event filter is removed; outside that window WakeMain does
+nothing, and Close returns only when no WakeMain that saw the window open
+is still inside SDL_PushEvent. Any other engine code that pushes SDL events
+from a thread other than main (M8's samplers, M9's lane) keeps to the same
+window; WakeMain is the only push engine code makes today.
+
+**Why.** SDL_PushEvent reads its event-watch list without SDL's lock
+(SDL_DispatchEventWatchList checks the filter, and with no filter the
+watcher count), while main changes that list: SDL_InitMainCallbacks adds
+SDL's own watcher right after SDL_AppInit returns, SDL_QuitMainCallbacks
+removes it before SDL_AppQuit, and the App sets the event filter at boot
+step 4 and clears it at shutdown step 4. TSan reported the first race in
+M5's wake test. The App's window lies inside the time its filter is set
+and after SDL's watcher exists, so a push there never overlaps a change.
+The design starts helper threads at boot step 9, inside SDL_AppInit, so the
+rule has to live in the push itself rather than in the start order.
+
 ## ADR-048 The M4 bans have no opt-out and cover more forms (2026-11-09)
 
 **Decision.** check_banned_api.py's rules thread, debugbreak, dump,
