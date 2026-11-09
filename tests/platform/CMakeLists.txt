@@ -29,6 +29,7 @@ target_include_directories(se_platform_test_support PUBLIC
 se_add_module(se_platform_tests KIND EXECUTABLE
   SOURCES
     fs_test.cc
+    gpu_test.cc
     inbox_test.cc
     sdl_context_test.cc
     wake_test.cc
@@ -37,6 +38,7 @@ se_add_module(se_platform_tests KIND EXECUTABLE
     se_core
     se_platform
     se_platform_test_support
+    se_render
     Catch2::Catch2WithMain
   TEST)
 target_compile_definitions(se_platform_tests PRIVATE

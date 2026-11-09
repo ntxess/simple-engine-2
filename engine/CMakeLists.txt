@@ -9,4 +9,5 @@ add_subdirectory(se_render_core)
 # tests carry the desktop and gpu labels.
 if(SE_BUILD_PLATFORM)
   add_subdirectory(se_platform)
+  add_subdirectory(se_render)
 endif()
