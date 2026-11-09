@@ -1,4 +1,4 @@
-# Milestone specs: M1 to M5
+# Milestone specs: M1 to M7
 
 Detailed specs for the first milestones after M0. The milestone table and the
 exit criteria are in docs/implementation-plan.md; the design is in
@@ -851,3 +851,416 @@ gates.md entry.
 - The rampage executable runs the sandbox in a window and quits cleanly
   through the two-phase quit.
 - Full matrix green, including `-Desktop` and the WSL presets.
+
+## M6 SDL presentation patch and FramePacer (design build step 4)
+
+Design sources: docs/design/mt-design.md "Threads" (vblank sampler),
+"Input And Latency" (Pacing modes, Computed), "Rendering" (Present, GPU
+timing, Device loss), "Platform" (the waitable, DwmGetCompositionTimingInfo,
+windowed VRR, Vulkan FIFO), the API sketch (frame_pacer.hpp, time.hpp), the
+"Frame Timeline Text", build step 4, red team P1 and P2, and the risks
+"Carrying a vendored SDL patch for years" and "Present statistics or the
+vblank sampler misbehave". M6 runs as two tracks, M6a (the patch and its
+engine wrapper) and M6b (the pacer and the vblank sampler), which meet in
+the present API below. M7 runs beside them.
+
+M5 found that on this machine SDL reports 60.001 Hz for the window's
+display while VSYNC presents run at about 165 Hz (ADR-039's measured-period
+fallback). M6b's vblank sampler is the ground truth for the window's
+output; find out which of SDL's display query and the present rate is
+wrong, and record it in an ADR.
+
+### The present API (the contract between M6a and M6b)
+
+`engine/se_render/include/se_render/present.h`, namespace `se::present`.
+Every function asserts the main thread except where marked. In an
+unpatched build (SE_SDL_PATCH=OFF, preset msvc-unpatched-dev) every query
+reports "unsupported" and every action is a no-op that returns false; the
+engine then runs Standard pacing.
+
+```cpp
+struct Caps {
+  bool patched = false;                 // built with the patch
+  bool frame_latency_waitable = false;  // D3D12 waitable, Vulkan present_wait
+  bool present_stats = false;           // displayed-refresh statistics
+  bool gpu_timestamps = false;          // per-command-buffer begin/end
+  bool native_handles = false;
+  bool device_status = false;           // device-removed query
+  bool tearing = false;                 // IMMEDIATE with ALLOW_TEARING (VRR)
+};
+Caps QueryCaps(GpuDevice&);
+
+// 1 or 2; creates the waitable on first use (D3D12: the swapchain is
+// recreated with FRAME_LATENCY_WAITABLE_OBJECT, then
+// SetMaximumFrameLatency). False when unsupported.
+bool SetFrameLatency(GpuDevice&, int frames);
+enum class WaitResult : std::uint8_t { kReady, kTimeout, kUnsupported };
+// D3D12: WaitForSingleObjectEx on the waitable. Vulkan: vkWaitForPresentKHR
+// for the present |frames| back. Never longer than |timeout_ns|.
+WaitResult WaitFrameLatency(GpuDevice&, std::uint64_t timeout_ns);
+
+struct PresentStats {             // DXGI_FRAME_STATISTICS semantics
+  std::uint64_t present_count = 0;          // presents the swapchain issued
+  std::uint64_t present_refresh_count = 0;  // refresh that showed the last
+                                            // displayed present
+  std::uint64_t sync_refresh_count = 0;
+  std::uint64_t sync_time_ns = 0;           // that vblank, SDL_GetTicksNS
+                                            // domain
+  std::uint64_t last_present_count = 0;     // GetLastPresentCount
+};
+// False before the first displayed present, while minimized, or when
+// unsupported (Vulkan without VK_GOOGLE_display_timing or present_id).
+bool GetPresentStats(GpuDevice&, PresentStats&);
+
+// GPU duration of one command buffer. Begin after the command buffer is
+// acquired, End right before submit; Read after its fence signalled.
+void BeginGpuTiming(GpuDevice&, SDL_GPUCommandBuffer*) noexcept;
+void EndGpuTiming(GpuDevice&, SDL_GPUCommandBuffer*) noexcept;
+struct GpuTime { std::uint64_t duration_ns = 0; };
+std::optional<GpuTime> ReadGpuTime(GpuDevice&, SDL_GPUFence*);
+
+enum class DeviceStatus : std::uint8_t { kOk, kRemoved, kUnknown };
+DeviceStatus QueryDeviceStatus(GpuDevice&);   // kUnknown when unsupported
+
+struct NativeHandles {   // borrowed; valid while the device lives
+  void* d3d12_device = nullptr;  void* d3d12_queue = nullptr;
+  void* dxgi_swapchain = nullptr;
+  void* vk_instance = nullptr;   void* vk_physical_device = nullptr;
+  void* vk_device = nullptr;     void* vk_queue = nullptr;
+  std::uint32_t vk_queue_family = 0;  void* vk_swapchain = nullptr;
+};
+bool GetNativeHandles(GpuDevice&, NativeHandles&);
+
+// IMMEDIATE (tearing) or VSYNC for the claimed window; VRR uses IMMEDIATE.
+bool SetPresentMode(GpuDevice&, SDL_GPUPresentMode);
+```
+
+M6a owns present.h and present.cc. M6b never includes them: the pacer
+talks to a `PresentPort` interface that M6b owns
+(`se_runtime/present_port.h`: the same operations as virtual functions,
+plus `WaitFrameFence(frames_back, timeout_ns)` for the N-L wait and
+`RepresentLast()` for HalfRate), with a fake in `tests/support` for unit
+tests and a clear-only implementation over M5's GpuDevice and
+FrameRecorder meanwhile. The integration step writes the real adapter
+over se::present and M7's FrameRecorder.
+
+### M6a: the SDL presentation patch (cmake/patches, se_render)
+
+- `cmake/patches/sdl3-3.4.20-se-presentation.patch`, a `git diff` against
+  the extracted SDL3-3.4.20 tarball, applied by cmake/ApplyPatch.cmake (the
+  hook in cmake/Dependencies.cmake already exists and the patch's SHA256 is
+  checked). All new SDL API lives in one new public header
+  `include/SDL3/SDL_gpu_se.h` with `SDL_SE`-prefixed functions, plus the
+  smallest backend edits, so rebasing onto a later SDL is mechanical.
+  Keep a rebase note in docs/deps.md (files touched, line counts).
+  - D3D12: the frame-latency waitable (swapchain flag
+    DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT, then
+    IDXGISwapChain2::SetMaximumFrameLatency and GetFrameLatencyWaitableObject),
+    present statistics (GetFrameStatistics, GetLastPresentCount), timestamp
+    queries (a query heap and a readback buffer per frame in flight,
+    resolved at submit; GetTimestampFrequency), native handles, the
+    device-removed status (GetDeviceRemovedReason), and ALLOW_TEARING with
+    sync interval 0 for IMMEDIATE (SDL already does this; verify).
+  - Vulkan: VK_KHR_present_id and VK_KHR_present_wait when the device has
+    them (the waitable analogue and present ids), VK_GOOGLE_display_timing
+    for statistics when present, vkCmdWriteTimestamp queries, native
+    handles, VK_ERROR_DEVICE_LOST status. Missing extensions report
+    unsupported, never fail device creation.
+  - SDL's own behaviour without the new calls is unchanged.
+- `se_render/present.h` and `src/present.cc` as specified above, behind
+  `SE_SDL_PATCH` (compile definition SE_SDL_PATCHED=0/1).
+- Linux: the patch compiles in the WSL presets (SDL's Vulkan backend builds
+  with the dummy/offscreen video drivers); GPU tests stay excluded there
+  (gates.md).
+- Tests (label gpu, the commit gate runs them on Windows; each runs on
+  D3D12 and on Vulkan through --gpu-driver / SE_GPU_DRIVER, and is skipped
+  with a printed reason when the driver is not available):
+  - caps on both backends; a planted check that msvc-unpatched-dev reports
+    every cap false and the engine still presents;
+  - a hidden or unfocused window (desktop label where a window is needed):
+    SetFrameLatency(1) then 120 frames, each WaitFrameLatency returns kReady
+    within 2 refreshes; latency 2 likewise;
+  - present statistics advance: present_count increases by one per
+    present and present_refresh_count tracks sync_refresh_count;
+  - GPU timing: a command buffer that clears a 4096x4096 target reports a
+    duration > 0 and below 100 ms; Read before the fence returns nullopt;
+  - native handles are non-null for the active backend;
+  - QueryDeviceStatus is kOk.
+- ADRs 050-053.
+
+### M6b: FramePacer and the vblank sampler (se_runtime, se_platform)
+
+- `se_platform/vblank_sampler.h`: `VblankSampler` (Windows; a stub that
+  reports unsupported elsewhere). One thread, role kVblankSampler, HighQoS,
+  started with se_os StartThread. It finds the DXGI output that shows the
+  window (MonitorFromWindow, then EnumAdapters1/EnumOutputs on every adapter,
+  matching DXGI_OUTPUT_DESC::Monitor), blocks in IDXGIOutput::WaitForVBlank,
+  and publishes each vblank's QPC stamp converted to the SDL_GetTicksNS
+  domain in one 64-bit atomic, plus a count and a period estimate (median of
+  the last 64 intervals). Main publishes a new monitor after
+  DISPLAY_CHANGED, a window move to another display or a mode change
+  (`SetMonitor`, release store; the sampler re-resolves the output on its
+  next wake). It never touches World state, SDL, ImGui, the swapchain or
+  engine GPU objects. Stop joins within one refresh plus 50 ms (the wait is
+  bounded by a 100 ms watchdog of its own: if WaitForVBlank does not return,
+  the sampler marks itself stale). Link dxgi.lib only in se_platform.
+- `se_runtime/frame_pacer.h`: `FramePacer` with `Mode { kPaced, kStandard,
+  kVrr }`, split into a pure `PacerPolicy` (decisions from numbers; no
+  clock, no SDL; fully unit-tested) and the shell that calls SDL, the
+  present API and the sampler.
+  - `BeginFrame()`: waits for the fence of frame N-L (L = frame latency;
+    the fence comes from the frame recorder, see Integration), reads present
+    statistics and turns them into hits and misses (a present displayed
+    later than its target refresh is a miss; count misses from
+    present_refresh_count against present_count, never from frame starts),
+    reports each result to FixedStepper::OnPresentResult(missed, modal), and
+    returns the FrameClock (period from the sampler when it agrees with the
+    display mode within 0.5%, else SDL's mode, else ADR-039's measured
+    period).
+  - `EndFrame(const StepPlan& next)`: the waitable (WaitFrameLatency), then
+    in Paced a sleep with SDL_DelayNS to the window output's predicted vblank
+    minus B(next), B = steps*S_hi + R_hi + g_hi + m with m =
+    max(1.5 ms, timer p99 + 0.5 ms) (FrameCosts already carries these; g_hi
+    is unknown without timestamps, and then k_max holds at k_rt whenever the
+    previous fence had not signalled). No sleep while Modal. Never spins.
+  - Mode choice: Paced is the Windows runtime default on fixed-refresh
+    displays when the waitable and present statistics exist and the sampler
+    is valid and agrees with the display mode; otherwise Standard (the
+    waitable when present, then SDL_WaitForGPUSwapchain; no late latch).
+    VRR (opt-in `--pacing vrr`, when tearing is supported): IMMEDIATE, a
+    self-paced 120 Hz deadline (60 Hz when the panel range is lower), one
+    tick per frame, no miss or halving logic. `--pacing paced|standard|vrr|
+    auto` (default auto); the editor default (M10) is Standard with latency
+    2. Linux: Standard; Paced from present_wait where supported (not
+    claimed until measured; gates.md).
+  - HalfRate above 100 Hz with hysteresis (enter after the miss rate or the
+    planned cost exceeds the budget for 2 s; leave after 4 s of margin):
+    Paced skips every second vblank by phase; Standard re-presents the last
+    composite (a FrameRecorder call M7 provides; M6b uses the clear-only
+    recorder until integration). `PresentInterval()` is 1 or 2.
+  - Adaptive latency: `FrameLatency()` is 1, or 2 when CPU and GPU each fit
+    in the period but their sum does not (hysteresis as above); a change
+    calls present::SetFrameLatency.
+  - Per-frame stats: waitable waits, fence waits, missed vblanks, NULL
+    acquires, mode, interval, latency; logged once a second at debug level
+    and shown in the window title in test builds.
+- `tools/presentmon/`: `analyze.py` (stdlib only) reads a PresentMon CSV
+  (MsBetweenPresents, MsUntilDisplayed, MsBetweenDisplayChange,
+  MsInPresentAPI, Dropped) for the rampage process and reports displayed
+  latency p50/p99, dropped and repeated frames; a unit test with a synthetic
+  CSV. Running PresentMon itself is a gates.md entry (not installed, not
+  approved for download).
+- Tests:
+  - unit (everywhere, TSan included): PacerPolicy mode choice per caps,
+    sampler validity and the 0.5% rule; B and the sleep target from costs;
+    miss counting from statistics sequences (on time, one late, a run of
+    late presents, statistics resets after a mode change); HalfRate entry
+    and exit with hysteresis; adaptive latency; VRR deadline; the sampler
+    loop with a fake vblank source publishing and re-resolving across a
+    monitor change, and Stop while blocked;
+  - desktop (Windows; unfocused windows, no real input), after integration
+    where they need M6a: see Exit.
+- ADRs 054-058.
+
+### Exit (M6)
+
+- Paced misses fewer than 1% of vblanks by present statistics over 20 s of
+  rampage at the 120 Hz Locked load on this machine's primary display
+  (desktop test `pacing.paced_misses`; prints the mode, period, misses and
+  the frames counted). A busy desktop can fail it: the test reports the
+  foreign input it saw (GetLastInputInfo) and fails only when none arrived.
+- An injected late frame (`--inject-late-frame FRAME:MS`, test builds)
+  drains within 2 frames: the statistics show at most 2 consecutive misses
+  after it and on-time presents after that.
+- Two monitors pace to the window's monitor: the test moves its own window
+  to each display (SDL_SetWindowPosition; never the cursor), and the
+  sampler's output and period match that display within 0.5%; Paced mode
+  stays on, or drops to Standard with the logged reason when SDL's mode
+  disagrees.
+- The unpatched preset (msvc-unpatched-dev) builds, passes its tests, and
+  rampage runs in Standard.
+- VRR runs `--pacing vrr` at a self-paced 120 Hz deadline (frame starts
+  within 0.5 ms p99 of the deadline over 10 s); visible VRR behaviour,
+  displayed-time latency (PresentMon) and the photodiode check are pending
+  gates in docs/gates.md, with exact commands.
+
+## M7 Renderer2D on main (design build step 5, CF b)
+
+Design sources: docs/design/mt-design.md "Rendering" (all of it), the API
+sketch (se_render: GpuResources, FrameRecorder), the "Frame Timeline Text"
+handoff 2 (uploads), "Platform" (D3D12 release frees the client container,
+cancel after acquire, ImGui backend hazards for later), build step 5;
+docs/design/costfree-end-state.md "Rendering". M7 replaces M5's clear with
+the Sandbox drawn on screen. Viewport targets exist for M10's editor; ImGui
+is not linked in M7.
+
+**Dependency:** stb (nothings/stb commit
+`4e9b368bfc071e97206ea5c6adba68dd0cbf8897`, archive
+https://github.com/nothings/stb/archive/4e9b368bfc071e97206ea5c6adba68dd0cbf8897.tar.gz,
+SHA256 `e60706ab084e0cae35ee7282deb4a7f283e4a28be1896d097437205da01a0683`,
+1.5 MB; already in `.deps/stb/`). Declare it in cmake/Dependencies.cmake and
+docs/deps.md as an INTERFACE target `se::stb` (stb_image.h, and
+stb_image_write.h for tests and tools only), with the implementation macro
+defined in exactly one translation unit of se_render. stb is a third-party
+header: exempt from lint, included with angle brackets.
+
+**Shaders.** HLSL sources in `engine/se_render/shaders/` (sprite.vert.hlsl,
+sprite.frag.hlsl, blit.vert.hlsl, blit.frag.hlsl, and any others).
+- DXIL is compiled at build time on Windows with the Windows SDK's dxc.exe
+  (10.0.26100.0 x64; find it through the MSVC environment or the SDK root,
+  fail configure with a clear message when absent), into generated headers
+  of byte arrays.
+- SPIR-V comes from glslang in WSL (`glslangValidator -D -V -S <stage> -e
+  main`; the Windows SDK's dxc has no SPIR-V codegen, checked). It is
+  committed as generated headers under `engine/se_render/shaders/generated/`
+  by `tools/shaders/build_shaders.py` (runs glslang through wsl.exe on
+  Windows, directly on Linux). A test in the WSL presets (label checks)
+  regenerates them and fails on any difference, so a stale SPIR-V header
+  cannot pass CI. glslang output was checked to be deterministic.
+- SDL_CreateGPUShader with the format the device reports; resource counts
+  declared to SDL match the shader (a test reflects each blob's counts).
+
+**se_render (M7 part)** (STATIC; deps se_core, se_platform, se_render_core,
+SDL3, se::stb). Every SDL_GPU wrapper asserts SDL_IsMainThread() (SDL does
+not check).
+- `gpu_resources.h`: `GpuResources`.
+  - `Handle<Texture>{index, generation}`; `Resolve(Handle) ->
+    SDL_GPUTexture*`, valid this frame only, never stored by callers
+    (a planted check, label checks, bans storing an `SDL_GPUTexture*` member
+    outside se_render); a stale or unknown handle resolves to a
+    built-in 1x1 magenta texture and counts.
+  - The retire queue: `Retire(SDL_GPUTexture*)` (and buffers, samplers,
+    pipelines) releases after this frame's submit, never before; SDL's D3D12
+    backend frees the client container at release (red team C2).
+  - The upload queue: `QueueUpload(Handle, Payload)` (decoded RGBA8 pixels,
+    width, height); `CollectUploads()` at frame start moves uploads whose
+    fence has signalled to resident (generation flip, the old texture
+    retired after the next submit); `RecordUploads(cmd)` copies at most
+    8 MB per frame through a transfer buffer in the upload command buffer,
+    which is submitted with its own fence whether or not the frame presents
+    (uploads are independent of presenting, so a minimized window still
+    uploads). A skipped frame never shows a half-uploaded texture.
+  - Load from config/texture.json names (ADR-026) with stb_image on main at
+    boot in M7 (M9 moves decoding to the background lane); a missing file
+    is an Error naming the path, and the sprite draws magenta.
+  - Device loss support: `ReleaseAll()` through the retire queue and
+    `RecreateAll(GpuDevice&)` re-uploading from the kept decoded payloads
+    and re-resolving handles; Worlds are untouched (wired at integration).
+- `renderer_2d.h`: `Renderer2D`.
+  - `Frame(const RenderList&, ...)`, split into the build phase (may throw:
+    vertices from the RenderList's quads into a pre-sized CPU buffer,
+    camera transform, batches) and the recording phase (noexcept).
+  - Sprite pipeline: one vertex/index buffer pair, grown only in the build
+    phase (growth is logged, never during recording), filled through a
+    transfer buffer mapped with cycle=true; one draw per batch (texture
+    change); nearest sampling (the legacy SFML textures are not smooth);
+    premultiplied or straight alpha to match legacy (record which in an
+    ADR); the camera from Camera2D (M3's SandboxCamera/ArenaCamera).
+  - The game view renders into an offscreen composite target the size of
+    the window's pixels, then a blit pass draws it to the swapchain. The
+    composite serves readback (goldens, tests) and HalfRate's re-present
+    (`RepresentLast`: the blit again, no new RenderList).
+  - `ViewportTarget`: an offscreen colour target with its own size and
+    camera, resized only at frame start (old texture retired), for M10's
+    editor viewports; a test renders two viewports and the composite in
+    one frame.
+  - Stats per frame: draws, batches, quads, upload bytes, NULL acquires,
+    the build and record times; the FrameCosts R input.
+- `frame_recorder.h`: the full transaction, replacing M5's clear-only one.
+  1. Build phase (may throw): RenderList, vertices. Nothing GPU-side is
+     acquired yet.
+  2. Prepare: acquire the upload command buffer when uploads are pending,
+     and the frame command buffer (failure is an Error; the frame is skipped
+     and logged).
+  3. Copy pass for vertices, then offscreen viewport passes and the
+     composite, then the non-blocking swapchain acquire (NULL skips the
+     swapchain pass, never a state change; the command buffer is still
+     submitted).
+  4. The swapchain pass (the blit).
+  5. The guard (the destructor) ends any open pass, submits with
+     SDL_SubmitGPUCommandBufferAndAcquireFence, never cancels after an
+     acquire, keeps the fence for the pacer's N-L wait (`TakeFence`), and
+     runs the retire queue.
+  Recording is noexcept: buffers are pre-sized and only engine-provided
+  draw callbacks run. The hook points the integration fills for M6 are
+  marked `INTEGRATION(M6)`: BeginGpuTiming after the command buffer is
+  acquired, EndGpuTiming before submit, ReadGpuTime when the fence
+  signalled.
+- Test hooks (test builds, AppConfig, like M5's): `--inject-frame-fault
+  STEP[:EVERY]` with STEP one of build, vertices, upload, prepare,
+  copy_pass, viewport_pass, acquire, swapchain_pass, submit. Build-phase
+  steps throw a standard-library exception (engine code never throws);
+  recording steps simulate the SDL call failing (a NULL pass, a NULL
+  texture, a failed submit). `--reload-texture NAME@FRAME` re-decodes and
+  queues an upload of a texture (optionally a test-only replacement file);
+  `--readback FRAME:FILE` writes the composite as PNG (stb_image_write).
+
+**rampage.** The App renders the Sandbox's RenderList (M3's builder over the
+current World at alpha) instead of the clear; the window shows the textured
+sandbox.
+
+**Legacy image comparison.** legacy_replay (legacy tree, legacy style)
+gains `--image-out TICK:FILE`: it renders the Sandbox scene at that tick
+into an sf::RenderTexture of the legacy viewport's size and writes a PNG.
+A new tool `tools/render_shot` (se_render, a GPU device without a window)
+renders the same scenario and tick from the same scene and seed into a PNG.
+A test (labels gpu and legacy, legacy presets plus the Windows gate where
+the legacy build is present) compares them: identical size, and at least
+98% of pixels within 8/255 per channel with mean absolute error at most
+2/255; differences are written as a diff PNG next to the output. If SFML
+cannot create a context without a visible window, record that in
+gates.md and keep the comparison as a desktop test.
+
+**Golden images.** `tests/golden/render/<driver>/` (d3d12, vulkan): PNGs of
+fixed scenes (a sprite grid, rotated sprites, overlapping layers and
+alpha, the sandbox at tick 600), compared with the same tolerance;
+SE_UPDATE_GOLDENS=1 rewrites them. Label gpu (no window), so the Windows
+commit gate runs them on both backends.
+
+**Bench.** bench.render_frame_10k (Release only, like M3's): RenderList plus
+vertex generation for 10k visible sprites, CPU side; p95 at most 1 ms. M3's
+bench.renderlist_10k stays.
+
+**Linux.** se_render and its shader headers build in the WSL presets; GPU,
+golden-image and desktop tests stay excluded (gates.md, M18).
+
+ADRs 059-065.
+
+### Exit (M7)
+
+- The Sandbox is on screen in rampage, textured, matching the legacy image
+  within the stated tolerance (or the gates.md fallback above), and I check
+  a screenshot.
+- 10k-sprite RenderList plus vertices at most 1 ms p95 in Release.
+- Fault injection at every step for 100 frames on D3D12 and on Vulkan
+  under msvc-asan (desktop): the app keeps running or quits cleanly as the
+  step's policy says, never cancels after an acquire (an assertion in the
+  guard), leaks nothing (ASan), and draws correctly again after the fault
+  stops.
+- A texture reloaded while minimized is correct after restore: the test
+  minimizes its own window (SDL_MinimizeWindow), reloads a texture to a
+  test replacement, restores (SDL_RestoreWindow), reads back the composite,
+  and the sprite's pixels match the replacement.
+- Golden images pass on both backends; the SPIR-V freshness check passes
+  in WSL; every new rule has a planted violation.
+
+## Integration (M6a + M6b + M7)
+
+- The PresentPort adapter over M6a's se::present and M7's frame
+  transaction: the N-L fence from FrameRecorder::TakeFence, HalfRate's
+  Standard re-present through Renderer2D::RepresentLast; the
+  `INTEGRATION(M6)` timing hooks filled, so g_hi is measured and FrameCosts
+  carries it.
+- Device loss: when QueryDeviceStatus is kRemoved (checked at frame start
+  and after a failed submit), the lifecycle enters DeviceLost: release
+  through the retire queue, recreate the device and claim the window on
+  main, GpuResources::RecreateAll, re-resolve handles; Worlds are
+  untouched. A test hook `--inject-device-lost FRAME` makes the status
+  report kRemoved once (desktop test: the app recovers and the readback
+  after recovery matches the golden).
+- The vblank sampler starts at boot step 9 with the other helpers and stops
+  with them; EngineThreadsRunning counts it; its breadcrumb slot appears in
+  dumps.
+- The M6 desktop exit tests, then the full matrix (-Milestone -Legacy, which
+  includes -Desktop, plus wsl:linux-clang-debug and msvc-unpatched-dev).
+- ADRs 066 and on.

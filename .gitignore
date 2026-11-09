@@ -29,3 +29,6 @@
 
 # Editor backup files, anywhere
 *~
+
+# Python bytecode from running the tools and their tests
+__pycache__/
