@@ -29,16 +29,20 @@
 #include "se_core/thread_role.h"
 #include "se_core/time.h"
 #include "se_core/world.h"
+#include "se_platform/display_output.h"
 #include "se_platform/fatal.h"
 #include "se_platform/fs.h"
 #include "se_platform/inbox.h"
 #include "se_platform/sdl_context.h"
+#include "se_platform/vblank_sampler.h"
 #include "se_platform/wake.h"
 #include "se_platform/window.h"
 #include "se_render/frame_recorder.h"
 #include "se_render/gpu_device.h"
 #include "se_runtime/app_config.h"
 #include "se_runtime/basic_input.h"
+#include "se_runtime/clear_present_port.h"
+#include "se_runtime/frame_pacer.h"
 #include "se_runtime/integration.h"
 #include "se_runtime/lifecycle.h"
 #include "se_runtime/quit.h"
@@ -110,6 +114,18 @@ std::string GpuDriverFromEnvironment() {
   return value != nullptr ? std::string(value) : std::string();
 }
 
+FramePacerConfig PacerConfigFrom(const AppConfig& config) {
+  FramePacerConfig pacer;
+  pacer.request = config.pacing;
+#if defined(_WIN32)
+  // Paced is the Windows runtime default; elsewhere it is not claimed
+  // until measured.
+  pacer.paced_by_default = true;
+#endif
+  pacer.fixed_frame_dt_sec = config.fixed_frame_dt_ms * 1e-3;
+  return pacer;
+}
+
 }  // namespace
 
 std::expected<std::unique_ptr<App>, Error> App::Create(const AppConfig& config,
@@ -135,7 +151,7 @@ App::App(const AppConfig& config, GameSetup setup)
     : config_(config),
       setup_(std::move(setup)),
       lifecycle_(setup_.lifecycle),
-      clock_(config.fixed_frame_dt_ms * 1e-3),
+      pacer_(PacerConfigFrom(config)),
       stepper_(setup_.tick_rate) {}
 
 App::~App() {
@@ -228,7 +244,7 @@ std::expected<void, Error> App::Boot() {
     if (!window) return std::unexpected(std::move(window.error()));
     window_ = std::move(*window);
     window_->SetListener(this);
-    refresh_hz_ = window_->Refresh().hz;
+    UpdateDisplay(/*force=*/true);
   }
 
   // 7. The GPU device, claiming the window with VSYNC.
@@ -245,6 +261,8 @@ std::expected<void, Error> App::Boot() {
     if (auto claimed = gpu_->ClaimWindow(window_->Native()); !claimed) {
       return claimed;
     }
+    present_ =
+        std::make_unique<ClearOnlyPresentPort>(*gpu_, setup_.clear_color);
     SE_LOG_INFO("GPU device '{}' (debug mode {}), display {:.3f} Hz",
                 gpu_->Driver(), gpu_->DebugMode(), refresh_hz_);
   }
@@ -276,8 +294,11 @@ std::expected<void, Error> App::Boot() {
   inputs.modal = &modal_flag_;
   inputs.suspended = &suspended_flag_;
   inputs.heartbeat = &heartbeat_flag_;
+  integration::VblankStart vblank;
+  vblank.enabled = window_ != nullptr;
+  vblank.monitor = monitor_;
   auto helpers =
-      integration::StartHelperThreads(config_, inputs, boot_start_ns_);
+      integration::StartHelperThreads(config_, inputs, boot_start_ns_, vblank);
   if (!helpers) return std::unexpected(std::move(helpers.error()));
   helpers_.emplace(std::move(*helpers));
 
@@ -296,6 +317,15 @@ std::expected<void, Error> App::Boot() {
   for (QuitProvider* provider : setup_.quit_providers) {
     quit_.AddProvider(provider);
   }
+  // The pacer: the present port and the vblank sampler; it chooses the
+  // mode (Standard until the sampler has measured, when Paced is possible).
+  pacer_.SetDisplayRefresh(PacingRefreshHz());
+  VblankReader reader;
+  if (helpers_ && helpers_->Vblank() != nullptr) {
+    const VblankSampler* sampler = helpers_->Vblank();
+    reader = [sampler](std::uint64_t now_ns) { return sampler->Read(now_ns); };
+  }
+  pacer_.Attach(present_.get(), std::move(reader));
   const bool focused = window_ == nullptr || window_->Focused();
   const bool visible = window_ == nullptr || window_->Visible();
   lifecycle_.BootComplete(SDL_GetTicksNS(), focused, visible);
@@ -489,7 +519,10 @@ SDL_AppResult App::HandleEvent(const SDL_Event& event) {
       break;
     case SDL_EVENT_WINDOW_DISPLAY_CHANGED:
     case SDL_EVENT_DISPLAY_CURRENT_MODE_CHANGED:
-      if (window_ != nullptr) refresh_hz_ = window_->Refresh().hz;
+      UpdateDisplay(/*force=*/true);
+      break;
+    case SDL_EVENT_WINDOW_MOVED:
+      if (ours) UpdateDisplay(/*force=*/false);
       break;
     case SDL_EVENT_KEY_DOWN:
     case SDL_EVENT_KEY_UP:
@@ -514,6 +547,32 @@ SDL_AppResult App::HandleEvent(const SDL_Event& event) {
   }
   SyncQuitState();
   return SDL_APP_CONTINUE;
+}
+
+double App::PacingRefreshHz() const noexcept {
+  return display_mode_.known && display_mode_.hz > 0.0 ? display_mode_.hz
+                                                       : refresh_hz_;
+}
+
+void App::UpdateDisplay(bool force) {
+  if (window_ == nullptr) return;
+  const MonitorHandle monitor = MonitorOfWindow(window_->NativeHandle());
+  const double sdl_hz = window_->Refresh().hz;
+  const bool moved = monitor != monitor_;
+  if (!force && !moved && sdl_hz == refresh_hz_) return;
+  refresh_hz_ = sdl_hz;
+  monitor_ = monitor;
+  display_mode_ = QueryMonitorMode(monitor);
+  SE_LOG_INFO("display: SDL reports {:.3f} Hz; the OS reports {}", refresh_hz_,
+              DescribeMonitorMode(display_mode_));
+  // The sampler re-resolves the output on its next wake (a release store).
+  if (helpers_ && helpers_->Vblank() != nullptr) {
+    helpers_->Vblank()->SetMonitor(monitor);
+  }
+  if (booted_) {
+    pacer_.SetDisplayRefresh(PacingRefreshHz());
+    pacer_.OnOutputChanged();
+  }
 }
 
 bool App::RenderClear(bool& presented, double& render_sec) {
@@ -583,7 +642,7 @@ SDL_AppResult App::Iterate() {
   ApplyCallbackRate();
   if (lifecycle_.TakeClearHeldInput()) game_->input.ClearHeld();
   if (lifecycle_.TakeFrameClockReset()) {
-    clock_.Reset();
+    pacer_.ResetClock();
     stepper_.ResetAccumulator();
   }
   suspended_flag_.store(lifecycle_.Suspended(), std::memory_order_release);
@@ -600,13 +659,16 @@ SDL_AppResult App::Iterate() {
     report.rendered = RenderClear(report.presented, render_sec);
     lifecycle_.OnSuspendProbe(true, report.presented);
     if (lifecycle_.TakeFrameClockReset()) {
-      clock_.Reset();
+      pacer_.ResetClock();
       stepper_.ResetAccumulator();
     }
   }
 
+  // The N-L fence, present statistics into hits and misses (reported to
+  // the stepper), and the FrameClock.
   const FrameClock frame_clock =
-      clock_.Next(now, refresh_hz_, lifecycle_.Modal());
+      pacer_.BeginFrame(lifecycle_.Modal(), stepper_);
+  report.clock = frame_clock;
   report.gameplay_ran = lifecycle_.GameplayRuns() &&
                         game_->states.SimRunning() && !exit_test_hold_;
   report.plan =
@@ -625,15 +687,27 @@ SDL_AppResult App::Iterate() {
   }
   report.next_tick = game_->driver.NextTick();
   if (kRuntimeTestHooks) RunExitTests(report.next_tick);
+  if (kRuntimeTestHooks && config_.late_frame_ms > 0.0 &&
+      !late_frame_injected_ &&
+      static_cast<std::int64_t>(iterates_) >= config_.late_frame_at) {
+    // The --inject-late-frame hook: this frame finishes late.
+    late_frame_injected_ = true;
+    SE_LOG_WARN("injecting a late frame: {:.1f} ms at iterate {}",
+                config_.late_frame_ms, iterates_);
+    SDL_DelayNS(static_cast<std::uint64_t>(config_.late_frame_ms * 1e6));
+  }
 
   if (!report.rendered && lifecycle_.ShouldRender()) {
     report.rendered = RenderClear(report.presented, render_sec);
+    if (report.rendered) {
+      pacer_.OnFrameSubmitted(report.presented,
+                              /*null_acquire=*/!report.presented);
+    }
   }
   if (report.presented) {
     ++presented_frames_;
     SE_PROFILE_FRAME();
   }
-  stepper_.OnPresentResult(/*missed=*/false, lifecycle_.Modal());
 
   // The non-tick CPU cost, without the swapchain wait and submit (M6's
   // pacer and M7's renderer measure those separately).
@@ -657,6 +731,12 @@ SDL_AppResult App::Iterate() {
     quit_.Request(QuitReason::kFrames);
     SyncQuitState();
   }
+  // The pacer's wait, the last thing an iterate does: the waitable, then
+  // Paced's sleep to the vblank minus B(next), Standard's swapchain wait or
+  // VRR's deadline; nothing while Modal.
+  pacer_.EndFrame(stepper_.PlanNext(frame_clock, costs_.Current()),
+                  costs_.Current(), lifecycle_.Modal());
+  report.pacer = pacer_.LastFrame();
   if (setup_.on_frame) setup_.on_frame(*this, report);
   return SDL_APP_CONTINUE;
 }
@@ -709,19 +789,22 @@ void App::RunExitTests(Tick next_tick) {
 void App::UpdateTitle(std::uint64_t now_ns) {
   if (window_ == nullptr || now_ns - last_title_ns_ < kTitleIntervalNs) return;
   last_title_ns_ = now_ns;
-  window_->SetTitle(std::format("{} | tick {} | {}", setup_.title,
-                                game_->driver.NextTick() - 1,
-                                LifecycleStateName(lifecycle_.State())));
+  std::string title = std::format("{} | tick {} | {}", setup_.title,
+                                  game_->driver.NextTick() - 1,
+                                  LifecycleStateName(lifecycle_.State()));
+  // Test builds show the pacer's mode, rate, interval, latency and misses.
+  if (kRuntimeTestHooks) title += " | " + pacer_.Summary();
+  window_->SetTitle(title);
 }
 
 void App::LogProgress(std::uint64_t now_ns) {
   if (last_log_ns_ == 0) last_log_ns_ = now_ns;
   if (now_ns - last_log_ns_ < kLogIntervalNs) return;
   last_log_ns_ = now_ns;
-  SE_LOG_INFO("tick {} | {} | {} iterates, {} presented, {} NULL acquires",
+  SE_LOG_INFO("tick {} | {} | {} iterates, {} presented, {} NULL acquires | {}",
               game_->driver.NextTick() - 1,
               LifecycleStateName(lifecycle_.State()), iterates_,
-              presented_frames_, lifecycle_.NullAcquires());
+              presented_frames_, lifecycle_.NullAcquires(), pacer_.Summary());
 }
 
 SDL_AppResult App::Shutdown(SDL_AppResult result) {
@@ -738,7 +821,20 @@ SDL_AppResult App::Shutdown(SDL_AppResult result) {
       result == SDL_APP_FAILURE ? "failure" : "success", iterates_,
       presented_frames_, ticks_run_, NextTick(), lifecycle_.NullAcquires(),
       inbox_events_);
+  const PacerTotals& pacing = pacer_.Totals();
+  SE_LOG_INFO(
+      "pacing at shutdown: {} ({}); {} mode changes, {} missed presents "
+      "({} vblanks) of {} resolved, {} HalfRate entries, {} sleeps, {} fence "
+      "waits",
+      PacingModeName(pacer_.Mode()), pacer_.ModeReason(), pacing.mode_changes,
+      pacing.missed_presents, pacing.missed_vblanks, pacing.resolved_presents,
+      pacing.half_rate_entries, pacing.sleeps, pacing.fence_waits);
   Teardown();
+  if (vblank_detached_) {
+    SE_LOG_WARN(
+        "the vblank sampler was still in WaitForVBlank at shutdown: detached "
+        "(it ends when the wait returns)");
+  }
   return shutdown_faulted_ ? SDL_APP_FAILURE : result;
 }
 
@@ -767,7 +863,14 @@ void App::Teardown() {
     if (!RunGameHook("GameState::OnExit", clear)) shutdown_faulted_ = true;
     game_.reset();
   }
-  // Step 12: release the window from the device, destroy the device.
+  // Step 9: the vblank sampler (the pacer lets go of it first).
+  pacer_.Detach();
+  if (helpers_ && helpers_->StopSamplers() == VblankStop::kDetached) {
+    vblank_detached_ = true;
+  }
+  // Step 12: the present port's fences, then release the window from the
+  // device and destroy the device.
+  present_.reset();
   gpu_.reset();
   // Step 14: remove the subclass, destroy the window.
   if (window_) window_->SetListener(nullptr);

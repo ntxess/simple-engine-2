@@ -338,6 +338,16 @@
           "label": "lint|desktop|gpu|bench"
         }
       }
+    },
+    {
+      "name": "msvc-unpatched-dev",
+      "inherits": "test-base",
+      "configurePreset": "msvc-unpatched-dev",
+      "filter": {
+        "exclude": {
+          "label": "lint|bench|desktop"
+        }
+      }
     }
   ],
   "workflowPresets": [
@@ -508,6 +518,23 @@
         {
           "type": "test",
           "name": "linux-clang-debug"
+        }
+      ]
+    },
+    {
+      "name": "msvc-unpatched-dev",
+      "steps": [
+        {
+          "type": "configure",
+          "name": "msvc-unpatched-dev"
+        },
+        {
+          "type": "build",
+          "name": "msvc-unpatched-dev"
+        },
+        {
+          "type": "test",
+          "name": "msvc-unpatched-dev"
         }
       ]
     }
