@@ -533,3 +533,20 @@ disagreement; until then the measured rate keeps 120 ticks per second.
 
 **Why.** The spec states the rules but not these interactions; each choice
 keeps a condition from being cleared by an unrelated event.
+
+## ADR-041 Linux builds the platform with SDL's dummy and offscreen video (2026-11-08)
+
+**Decision.** The Linux presets build se_platform, se_render, se_runtime,
+the rampage executable and the platform tests. SDL3 is configured without
+window-system and system-library detection (X11, Wayland, KMSDRM, OpenGL,
+IBus, D-Bus, libudev, liburing, libusb, ALSA, JACK, PipeWire, PulseAudio,
+sndio, OSS off; dummy and offscreen video on; `SDL_UNIX_CONSOLE_BUILD=ON`,
+without which SDL refuses to configure). `SE_SDL_WINDOW_SYSTEMS=ON` restores
+SDL's own detection for M18. The Vulkan GPU backend still compiles (SDL
+bundles its headers) but no WSL test creates a device: window, GPU and
+desktop tests carry the desktop or gpu labels, which the Linux test presets
+exclude.
+
+**Why.** The inbox, wake, lifecycle, quit and callback tests must run under
+TSan and ASan, and WSL has no window-system development packages (installing
+them is out of scope for M5; docs/gates.md).
