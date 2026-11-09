@@ -2,5 +2,7 @@
 # include scans (docs/decisions.md, ADR-004).
 
 add_subdirectory(se_core)
+add_subdirectory(se_os)
+add_subdirectory(se_log)
 add_subdirectory(se_sim)
 add_subdirectory(se_render_core)

@@ -22,6 +22,7 @@ se_add_module(se_render_tests KIND EXECUTABLE
     render_components_test.cc
     render_fixture.cc
     sort_batch_test.cc
+    ../support/tracy_inert_listener.cc
   PRIVATE_DEPS
     se_core
     se_render_core

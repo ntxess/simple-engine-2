@@ -39,6 +39,7 @@
 
 #include "se_core/assert.h"
 #include "se_core/breadcrumb.h"
+#include "se_core/profile.h"
 #include "se_core/thread_role.h"
 #include "se_core/thread_safety.h"
 
@@ -179,6 +180,7 @@ void ForkJoinPool::ParallelFor(ForkSite& site, std::uint32_t count, F&& body) {
   SE_ASSERT_MSG(site.grain > 0, "a fork site needs a grain");
   SE_ASSERT_MSG(!t_in_fork,
                 "ParallelFor inside a fork chunk: use jobs::NestedParallelFor");
+  SE_PROFILE_ZONE_DYNAMIC(site.name);
   auto&& run_chunk = std::forward<F>(body);
   const std::uint32_t chunks = ChunkCount(count, site.grain);
   ++site.stats.forks;
@@ -202,6 +204,7 @@ void NestedParallelFor(const ForkSite& site, std::uint32_t count, F&& body)
   SE_ASSERT_MSG(t_in_fork,
                 "NestedParallelFor outside a fork chunk: use "
                 "ForkJoinPool::ParallelFor");
+  SE_PROFILE_ZONE_DYNAMIC(site.name);
   auto&& run_chunk = std::forward<F>(body);
   const std::uint32_t chunks = ChunkCount(count, site.grain);
   const ChunkCrumbScope crumb;

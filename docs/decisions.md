@@ -424,3 +424,126 @@ across a save and reload, and here it also dropped the tick-1 contacts of
 event-driven sources. Leaving Moved out of the hash would only hide that
 difference, and a scene-level `moving` flag would say through a new key
 what the component registry already expresses.
+
+## ADR-029 se_os is the headless OS layer; Tracy is linked by se_core (2026-11-08)
+
+**Decision.** A new STATIC module, se_os (engine/se_os; ALLOW_ONLY se_core;
+not DETERMINISTIC), holds everything threads need from the OS on every
+platform: StartThread, Thread and RoleScope (OS thread names, QoS, CPU
+sets), the CPU topology and its pool-size and CPU-set rules, the unbiased
+clock, debugger detection and ExecutableDir. It may include `<windows.h>`
+and POSIX headers but never SDL, so the SDL-free WSL sanitizer builds have
+it, and it is the only module that may create a thread. Its rules:
+- The PerformanceOnly count is the P-cores on main's last-level cache minus
+  one, capped at ForkPoolSize: the spec's formula alone gives 3 on the
+  4-core laptop, where the design's table (and the pool) has 2.
+- Main's last-level cache is the one with the most P-cores (the lowest id
+  on a tie); "P-cores" are the cores of the highest efficiency class, so
+  every core on a homogeneous CPU.
+- Linux kEco raises the thread's nice value by 5, which lowers its
+  priority, as EcoQoS does on Windows; the spec's "lowers the nice value"
+  would have raised the priority of background work. Restoring the old
+  value needs CAP_SYS_NICE, so the destructor tries and stays silent.
+- CPU sets name the OS's ids (CPU set ids on Windows, CPU numbers on Linux)
+  as CpuTopology reports them, so a request needs no lookup at apply time.
+- QueryUnbiasedInterruptTimePrecise is looked up in KernelBase at run time:
+  kernel32.lib does not export it and linking mincore.lib would break the
+  ALLOW_ONLY list.
+- Tracy is a private dependency of se_core (TracyClient, SE_TRACY builds
+  only), so the profiling macros sit beside the code they measure; only
+  se_core/src/profile.cc includes Tracy. TracyClient is built with
+  TRACY_DELAYED_INIT and TRACY_MANUAL_LIFETIME (nothing starts until
+  `profile::Start()`, and every macro checks the started flag), keeps
+  TRACY_ON_DEMAND, TRACY_ONLY_LOCALHOST and TRACY_NO_BROADCAST, sets
+  TRACY_DBGHELP_LOCK=SeDbgHelp (se_core defines the lock) and
+  TRACY_NO_CRASH_HANDLER (crashpad owns crashes). Zones with run-time names
+  (schedule systems, fork sites) use `SE_PROFILE_ZONE_DYNAMIC`, an addition
+  to the spec's macro list. Thread names given before the start are applied
+  by each thread's first profiled event.
+
+**Why.** Threads must have the same names, roles and placement in the
+SDL-free test builds as in the runtime, and se_core may not include
+platform headers. Linking Tracy from se_core keeps the zone macros free of
+a dependency on a higher module; the manual lifetime is the only Tracy mode
+that guarantees no socket and no thread in tests, tools and benches.
+
+## ADR-030 Two more fault boundaries: thread creation and the log sinks (2026-11-08)
+
+**Decision.** ADR-006's list of `// se-fault-boundary` files gains:
+- se_os/src/thread.cc: `std::jthread` reports a thread the OS cannot
+  create with std::system_error, which `StartThread` returns as an Error.
+  An exception that escapes a thread's body is not caught: the entry is
+  noexcept, so std::terminate runs at the throw and the crash handler
+  records it there.
+- se_log/src/log_worker.cc: spdlog reports file errors (opening, writing,
+  rotating, flushing) with spdlog_ex. The sinks are created and called only
+  there; `LogWorker::Start` turns a failure into an Error with the path, and
+  a failure while running is counted (LogWorkerStats::sink_errors),
+  reported once on stderr, and survived.
+
+**Why.** Both are third-party throws at the edge of engine code: the
+standard library's thread constructor and spdlog's sinks. Returning
+std::expected from StartThread is the spec's contract, and a full disk must
+not take the log worker down.
+
+## ADR-031 Breadcrumbs and rings live in dump-stream memory (2026-11-08)
+
+**Decision.** The ThreadRegistry's table, every log ring and the InputFrame
+ring are the plain-data layouts of docs/milestone-specs.md "Dump stream
+layout" (se_core/dump_stream.h, pinned by static_assert), and the live
+counters are those fields: `head`, `dropped`, a slot's `packed` breadcrumb
+and `state`. Fields other threads read while they change are accessed
+through `std::atomic_ref` (`AtomicLoad`, `AtomicStore`, and byte-wise
+relaxed stores for names), never through a second copy. A thread's
+`Breadcrumb` (se_core/breadcrumb.h) keeps its API but becomes a handle: it
+writes its own word until a `ThreadSlotScope` binds it to the slot's
+`packed` word, and it carries the value over on bind and unbind. The
+registry hands every region to an optional `DumpStreamHook` (the
+breadcrumb table, the library ring, and each slot's ring when it is
+allocated), which the integration points at se_crash's RegisterStream.
+Rings and the table are allocated once and never freed; the InputFrame ring
+a process registers must likewise never be destroyed. Registry names keep 16
+characters.
+
+**Why.** A crash dump must show the real state, so the memory the threads
+write is the memory the handler reads; a copy refreshed by the producer
+would lag exactly when it matters. `std::atomic_ref` over plain structs
+keeps the layout checkable with `offsetof` and the accesses race-free under
+TSan. Binding the existing Breadcrumb rather than replacing it leaves every
+M2 call site (the Schedule, ForkScope, the tests) unchanged.
+
+## ADR-032 The log backend: rings, a consumer, and ordered output (2026-11-08)
+
+**Decision.** The SE_LOG_* front end (se_core/log.h; call sites unchanged)
+writes a LogRecord into the calling thread's LogRing while a `LogConsumer`
+is attached (`AttachLogConsumer`; se_log's LogWorker is the only one), and
+writes synchronously in the M2 format, `[I t=12 main] message (file:line)`,
+otherwise. Details the spec leaves open:
+- Ordering. A producer marks its ring before it stamps a record
+  (`LogRing::BeginWrite`) and clears the mark after the push. Each wake the
+  worker writes only the records older than every mark in progress and
+  holds the rest for the next wake, so lines from different threads come
+  out in (timestamp, sequence) order across wakes, not only within one.
+  Stop and the fatal flush write everything.
+- Detach. `DetachLogConsumer` clears the consumer and then waits (at most
+  1 s) for marks in progress; a producer checks the consumer after setting
+  its mark, so every record is either in a ring the worker drains a last
+  time or written synchronously, never lost.
+- The main thread without a slot (it normally has slot 0) uses the library
+  ring only through try_lock, and counts a drop when the lock is busy.
+- SE_LOG_FATAL pushes the record and asks the consumer to flush while the
+  mark is held (so the worker cannot be detached meanwhile); the worker
+  writes everything and flushes its sinks; the caller waits up to 2 s. If
+  the record was dropped, the flush timed out, or the fatal call is on the
+  worker itself, the synchronous line goes to stderr before the abort.
+- `LogConfig` adds `wake_on_push` (default on) so tests can let a ring fill
+  up, and `rate_limit_per_second = 0` turns the rate limit off. The time
+  column counts from `LogEpochNs()`, the first time it was read (LogWorker
+  Start reads it).
+- `kLogMaxMessage` is 448, the record's message field, as the dump layout
+  requires; longer messages are still truncated, not dropped.
+
+**Why.** The design requires that nothing blocks a producer and that the
+rings double as the crash tail; the watermark keeps the file's order
+meaningful without making producers wait for the worker, and the mark is
+the same mechanism Stop needs to drain without losing records.

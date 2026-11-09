@@ -9,13 +9,14 @@
 //   bits 28-43  chunk   (fork chunk index, 16 bits)
 //   bits  0-27  tick    (sim tick modulo 2^28, about 25 days at 120 Hz)
 //
-// Each thread writes only its own breadcrumb (relaxed stores); M4 registers
-// them as crash-dump streams.
+// Each thread writes only its own breadcrumb (relaxed stores). A thread with
+// a ThreadRegistry slot (se_core/thread_registry.h) writes the slot's word,
+// so the breadcrumb is part of the registry's crash-dump stream and the
+// watchdog reads it there; other threads write the breadcrumb's own word.
 
 #ifndef SE_CORE_BREADCRUMB_H_
 #define SE_CORE_BREADCRUMB_H_
 
-#include <atomic>
 #include <cstdint>
 
 namespace se {
@@ -74,7 +75,8 @@ inline constexpr std::uint64_t kBreadcrumbTickMask = 0xFFFFFFF;
 #pragma warning(disable : 4324)  // padded to the cache line on purpose
 #endif
 
-// One thread's breadcrumb, on its own cache line.
+// One thread's breadcrumb, on its own cache line. Its word is its own, or
+// the ThreadRegistry slot word it is bound to.
 class alignas(64) Breadcrumb {
  public:
   Breadcrumb() = default;
@@ -87,19 +89,34 @@ class alignas(64) Breadcrumb {
   void SetChunk(std::uint32_t chunk) noexcept;
   void SetTick(std::uint64_t tick) noexcept;
 
-  [[nodiscard]] std::uint64_t Packed() const noexcept {
-    return packed_.load(std::memory_order_relaxed);
-  }
+  [[nodiscard]] std::uint64_t Packed() const noexcept;
   [[nodiscard]] BreadcrumbFields Fields() const noexcept {
     return UnpackBreadcrumb(Packed());
   }
+
+  // Makes the breadcrumb write |word| (a ThreadRegistry slot's packed
+  // word), carrying the current value over; nullptr returns to the
+  // breadcrumb's own word, carrying the value back. Only the owning thread
+  // binds and writes.
+  void Bind(std::uint64_t* word) noexcept;
+  // The bound word, or nullptr when the breadcrumb uses its own.
+  [[nodiscard]] std::uint64_t* BoundWord() const noexcept { return word_; }
 
  private:
   // Replaces the bits selected by |mask| << |shift| with |value|. Only the
   // owning thread writes, so a load and a store suffice.
   void SetField(std::uint64_t value, std::uint64_t mask, int shift) noexcept;
 
-  std::atomic<std::uint64_t> packed_{0};
+  [[nodiscard]] std::uint64_t& Word() noexcept {
+    return word_ != nullptr ? *word_ : own_;
+  }
+  [[nodiscard]] const std::uint64_t& Word() const noexcept {
+    return word_ != nullptr ? *word_ : own_;
+  }
+
+  // Read by other threads through std::atomic_ref.
+  std::uint64_t own_ = 0;
+  std::uint64_t* word_ = nullptr;
 };
 
 #if defined(_MSC_VER) && !defined(__clang__)

@@ -43,7 +43,8 @@
       "inherits": "windows-base",
       "displayName": "MSVC Dev (optimised, asserts on; default for editor work)",
       "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Dev"
+        "CMAKE_BUILD_TYPE": "Dev",
+        "SE_TRACY": "ON"
       }
     },
     {
@@ -51,7 +52,8 @@
       "inherits": "windows-base",
       "displayName": "MSVC Release",
       "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Release"
+        "CMAKE_BUILD_TYPE": "Release",
+        "SE_TRACY": "ON"
       }
     },
     {
@@ -81,7 +83,8 @@
         "CMAKE_BUILD_TYPE": "Dev",
         "CMAKE_C_COMPILER": "clang-cl",
         "CMAKE_CXX_COMPILER": "clang-cl",
-        "SE_THREAD_SAFETY_ERRORS": "ON"
+        "SE_THREAD_SAFETY_ERRORS": "ON",
+        "SE_TRACY": "ON"
       }
     },
     {

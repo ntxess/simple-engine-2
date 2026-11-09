@@ -54,6 +54,7 @@ se_add_module(se_rampage_tests KIND EXECUTABLE
     scene_test.cc
     serialization_test.cc
     view_test.cc
+    ../support/tracy_inert_listener.cc
   PRIVATE_DEPS
     game_rampage
     rampage_test_support

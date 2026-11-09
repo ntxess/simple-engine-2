@@ -136,6 +136,7 @@ KernelSessionResult RunKernelSession(const KernelSessionOptions& options) {
 
   jobs::ForkJoinPool pool;
   SimDriver driver(module.MutableSchedule(), pool);
+  driver.AttachInputRing(options.input_ring);
   NullAudioSink audio;
   ScriptedInput scripted(options.seed);
   InputSource* source = &scripted;
