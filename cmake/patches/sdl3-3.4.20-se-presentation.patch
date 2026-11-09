@@ -274,10 +274,10 @@ index 0000000..3dec053
 +#endif /* SDL_gpu_se_h_ */
 diff --git a/src/gpu/SDL_gpu_se.c b/src/gpu/SDL_gpu_se.c
 new file mode 100644
-index 0000000..e4020b3
+index 0000000..f8fbce1
 --- /dev/null
 +++ b/src/gpu/SDL_gpu_se.c
-@@ -0,0 +1,214 @@
+@@ -0,0 +1,219 @@
 +/*
 +  Simple DirectMedia Layer
 +  Copyright (C) 1997-2026 Sam Lantinga <slouken@libsdl.org>
@@ -328,6 +328,11 @@ index 0000000..e4020b3
 +static bool SDL_SE_CommandBufferIsRecording(SDL_GPUCommandBuffer *command_buffer)
 +{
 +    CommandBufferCommonHeader *header = (CommandBufferCommonHeader *)command_buffer;
++    /* SDL_AcquireGPUCommandBuffer resets these fields only in debug mode;
++       without it a pooled command buffer keeps the state of its last use. */
++    if (!header->device->debug_mode) {
++        return true;
++    }
 +    if (header->submitted) {
 +        SDL_assert_release(!"Command buffer already submitted!");
 +        return false;

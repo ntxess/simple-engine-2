@@ -1159,6 +1159,16 @@ desktop-wide timing would bring back red team P2.
   SetPresentMode calls SDL_SetGPUSwapchainParameters with SDR composition,
   which recreates the swapchain (keeping the waitable, ADR-051).
 
+- Amended at the integration: SDL_SE_BeginGPUTiming and EndGPUTiming
+  check the command buffer's submitted and pass flags only when the device
+  is in SDL's debug mode. SDL_AcquireGPUCommandBuffer resets those fields
+  only in debug mode, so on a Release device (debug mode off) a pooled
+  command buffer still said "submitted" from its last use, and
+  SDL_assert_release stopped every timed frame with an assertion dialog
+  (msvc-release: `present.vulkan.GPU timing of a 4096x4096 clear` and the
+  `render_gpu.d3d12.*` tests timed out waiting on it). The patch grows by
+  five lines in src/gpu/SDL_gpu_se.c (docs/deps.md).
+
 **Why.** A fixed ring needs no allocation per frame and no bookkeeping of
 frames in flight, which the pacer's latency changes; the fence reference
 is what makes "Read after its fence signalled" safe against SDL's fence

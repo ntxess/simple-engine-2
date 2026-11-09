@@ -23,7 +23,7 @@ Full hashes are in cmake/Dependencies.cmake.
 
 ## SDL presentation patch (M6a)
 
-`cmake/patches/sdl3-3.4.20-se-presentation.patch` (96,195 bytes, 2,372
+`cmake/patches/sdl3-3.4.20-se-presentation.patch` (96,419 bytes, 2,377
 lines; the build checks its SHA256) is a `git diff` against the extracted
 SDL3-3.4.20.tar.gz, applied by cmake/ApplyPatch.cmake when `SE_SDL_PATCH`
 is on; `.gitattributes` keeps it byte-exact. It adds the `SDL_SE_*` API of
@@ -33,7 +33,7 @@ engine/se_render/include/se_render/present.h).
 | File | Added | Removed | What |
 |---|---|---|---|
 | include/SDL3/SDL_gpu_se.h | 260 | 0 | new: the public API |
-| src/gpu/SDL_gpu_se.c | 214 | 0 | new: entry points, dispatch by backend name, QPC to SDL ticks |
+| src/gpu/SDL_gpu_se.c | 219 | 0 | new: entry points, dispatch by backend name, QPC to SDL ticks |
 | src/gpu/SDL_gpu_se_c.h | 66 | 0 | new: the backend table |
 | src/gpu/d3d12/SDL_gpu_d3d12_se.h | 96 | 0 | new: D3D12 state and hook prototypes |
 | src/gpu/d3d12/SDL_gpu_d3d12_se_impl.h | 574 | 0 | new: D3D12 hooks and backend |
