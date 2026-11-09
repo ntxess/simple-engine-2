@@ -72,6 +72,19 @@ void LogWrite(LogLevel level, const char* file, int line,
 // Flushes, then aborts the process (SE_LOG_FATAL).
 [[noreturn]] void LogFatalAbort() noexcept;
 
+// Writes one formatted line (without its newline) where synchronous lines
+// go: the sink a test installed, or stderr. The log worker's console sink
+// writes through it, so a test's sink receives the lines with or without
+// a worker.
+void WriteConsoleLine(LogLevel level, std::string_view line);
+
+// Has the attached consumer write and flush every record pushed so far,
+// waiting at most |timeout_ns| (the watchdog's shutdown deadline, before it
+// ends the process); without one, flushes stderr. Returns false when the
+// flush did not finish in time, or cannot be done from the calling thread
+// (a thread without a ring of its own, or the consumer's own thread).
+bool FlushLog(std::uint64_t timeout_ns) noexcept;
+
 // The origin of the log's time column: ProfileNowNs() when it was first
 // read.
 [[nodiscard]] std::uint64_t LogEpochNs() noexcept;

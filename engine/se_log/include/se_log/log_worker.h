@@ -52,7 +52,8 @@ struct LogConfig {
   std::string file_path{};
   std::size_t file_max_bytes = std::size_t{5} * 1024 * 1024;
   std::size_t file_max_files = 3;
-  // stderr, from stderr_level up.
+  // stderr (or the sink a test installed, se::WriteConsoleLine), from
+  // stderr_level up.
   bool stderr_enabled = true;
   LogLevel stderr_level = LogLevel::kInfo;
   // Lines the panel ring keeps; 0: no panel.

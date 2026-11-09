@@ -6,7 +6,8 @@
 # crashpad's build needs libcurl development files that the WSL machine does
 # not have (docs/gates.md, "Linux crash capture").
 #
-# se_crash depends on se_core and crashpad only; the integration adds se_os.
+# The watchdog skeleton (watchdog.h, hang_detector.h; the integration step)
+# runs on every backend: its dumps fail softly where crash capture is off.
 
 set(SE_CRASH_BACKEND stub)
 if(SE_CRASH AND WIN32)
@@ -29,14 +30,17 @@ endif()
 
 se_add_module(se_crash KIND STATIC
   SOURCES
+    src/hang_detector.cc
     src/stream_table.cc
+    src/watchdog.cc
     ${_se_crash_sources}
   PUBLIC_DEPS
     se_core
   PRIVATE_DEPS
+    se_os
     ${_se_crash_deps}
   ALLOW_ONLY
-    se_core crashpad_client
+    se_core se_os crashpad_client
   FORBID
     SDL3::SDL3-static se_imgui miniaudio sentry lz4_static
   BANNED_INCLUDES

@@ -50,11 +50,12 @@
 #include <thread>
 #include <utility>
 
-#include "crash/probe_dump_stream.h"
 #include "se_core/breadcrumb.h"
+#include "se_core/dump_stream.h"
 #include "se_core/input_frame.h"
 #include "se_core/thread_role.h"
 #include "se_crash/crash.h"
+#include "se_os/process.h"
 
 namespace se::crash_probe {
 namespace {
@@ -116,30 +117,6 @@ void NameThisThread(const char* name) {
 #endif
 }
 
-// The directory of this executable (se_os provides ExecutableDir() after
-// the M4 integration).
-std::string ExecutableDir() {
-#if defined(_WIN32)
-  std::array<wchar_t, 4096> wide{};
-  const DWORD length =
-      GetModuleFileNameW(nullptr, wide.data(), static_cast<DWORD>(wide.size()));
-  const int bytes =
-      WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(length),
-                          nullptr, 0, nullptr, nullptr);
-  std::string path(static_cast<std::size_t>(bytes), '\0');
-  WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(length),
-                      path.data(), bytes, nullptr, nullptr);
-#else
-  std::array<char, 4096> buffer{};
-  const ssize_t length =
-      readlink("/proc/self/exe", buffer.data(), buffer.size() - 1);
-  std::string path(buffer.data(),
-                   length > 0 ? static_cast<std::size_t>(length) : 0);
-#endif
-  const std::size_t slash = path.find_last_of("/\\");
-  return slash == std::string::npos ? std::string(".") : path.substr(0, slash);
-}
-
 void Report(std::string_view line) {
   std::fwrite(line.data(), 1, line.size(), stdout);
   std::fputc('\n', stdout);
@@ -169,7 +146,7 @@ void InitHeader(DumpStreamHeader& header, DumpStreamKind kind,
 }
 
 void SetBreadcrumb(std::uint32_t slot, std::string_view name, ThreadRole role,
-                   SlotState state, std::uint64_t os_thread_id,
+                   ThreadSlotState state, std::uint64_t os_thread_id,
                    const BreadcrumbFields& fields) {
   BreadcrumbRecord& record = g_breadcrumbs.records[slot];
   record.packed = PackBreadcrumb(fields);
@@ -181,7 +158,7 @@ void SetBreadcrumb(std::uint32_t slot, std::string_view name, ThreadRole role,
 
 // Main's slot 0 at tick |tick|, inside system 5 of the Movement phase.
 void SetMainBreadcrumb(std::uint64_t main_tid, std::uint32_t tick) {
-  SetBreadcrumb(0, "main", ThreadRole::kMain, SlotState::kLive, main_tid,
+  SetBreadcrumb(0, "main", ThreadRole::kMain, ThreadSlotState::kLive, main_tid,
                 {.role = static_cast<std::uint8_t>(ThreadRole::kMain),
                  .phase = 2,
                  .system = 5,
@@ -201,8 +178,8 @@ void AppendLog(LogStream<Capacity>& ring, std::uint64_t sequence,
   record.level = level;
   record.role = static_cast<std::uint8_t>(role);
   CopyName(record.file, "crash_probe.cc");
-  const std::size_t length = std::min(message.size(), kLogMessageChars);
-  std::fill_n(record.message, kLogMessageChars, '\0');
+  const std::size_t length = std::min(message.size(), kLogRecordMessageSize);
+  std::fill_n(record.message, kLogRecordMessageSize, '\0');
   std::copy_n(message.begin(), length, record.message);
   record.length = static_cast<std::uint16_t>(length);
   ++ring.header.head;
@@ -252,8 +229,8 @@ void FillStreams(std::uint64_t main_tid) {
              sizeof(BreadcrumbRecord), kBreadcrumbSlots, 0,
              ThreadRole::kLibrary, "threads");
   SetMainBreadcrumb(main_tid, 240);
-  SetBreadcrumb(2, "fork-worker-3", ThreadRole::kForkWorker, SlotState::kExited,
-                0x1234,
+  SetBreadcrumb(2, "fork-worker-3", ThreadRole::kForkWorker,
+                ThreadSlotState::kExited, 0x1234,
                 {.role = static_cast<std::uint8_t>(ThreadRole::kForkWorker),
                  .phase = 4,
                  .system = 7,
@@ -292,7 +269,7 @@ void FillStreams(std::uint64_t main_tid) {
 // The worker thread's slot and log ring: "worker log i", sequence 2000 + i,
 // tick 240, line 300 + i, level info.
 void FillWorker(std::uint64_t worker_tid) {
-  SetBreadcrumb(1, "worker", ThreadRole::kWatchdog, SlotState::kLive,
+  SetBreadcrumb(1, "worker", ThreadRole::kWatchdog, ThreadSlotState::kLive,
                 worker_tid,
                 {.role = static_cast<std::uint8_t>(ThreadRole::kWatchdog),
                  .phase = 0,
@@ -521,7 +498,12 @@ int Run(int argc, char** argv) {
     return 2;
   }
   if (handler.empty()) {
-    handler = crash::HandlerPathIn(ExecutableDir());
+    auto dir = ExecutableDir();
+    if (!dir) {
+      Report(std::format("probe: {}", dir.error().message));
+      return 2;
+    }
+    handler = crash::HandlerPathIn(*dir);
   }
 
   NameThisThread("se-probe-main");

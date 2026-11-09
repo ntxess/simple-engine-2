@@ -11,7 +11,6 @@
 #include <spdlog/details/log_msg.h>
 #include <spdlog/sinks/rotating_file_sink.h>
 #include <spdlog/sinks/sink.h>
-#include <spdlog/sinks/stdout_sinks.h>
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
@@ -69,6 +68,38 @@ spdlog::level::level_enum ToSpdlog(LogLevel level) {
   }
   return spdlog::level::info;
 }
+
+LogLevel FromSpdlog(spdlog::level::level_enum level) {
+  switch (level) {
+    case spdlog::level::trace:
+      return LogLevel::kTrace;
+    case spdlog::level::debug:
+      return LogLevel::kDebug;
+    case spdlog::level::info:
+      return LogLevel::kInfo;
+    case spdlog::level::warn:
+      return LogLevel::kWarn;
+    case spdlog::level::err:
+      return LogLevel::kError;
+    default:
+      return LogLevel::kFatal;
+  }
+}
+
+// stderr, through the front end's console writer: a sink a test installed
+// with SetLogSink receives the worker's lines as it receives synchronous
+// ones (the M4 integration's in-process App tests read them).
+class ConsoleSink final : public spdlog::sinks::sink {
+ public:
+  void log(const spdlog::details::log_msg& msg) override {
+    WriteConsoleLine(FromSpdlog(msg.level),
+                     std::string_view(msg.payload.data(), msg.payload.size()));
+  }
+  void flush() override { std::fflush(stderr); }
+  void set_pattern(const std::string& /*pattern*/) override {}
+  void set_formatter(
+      std::unique_ptr<spdlog::formatter> /*sink_formatter*/) override {}
+};
 
 // The last lines written, for M10's log panel. The worker appends under the
 // mutex; the main thread copies with try_lock only.
@@ -234,8 +265,7 @@ std::expected<void, Error> LogWorker::State::CreateSinks() {
       sinks.push_back(std::move(file));
     }
     if (config.stderr_enabled) {
-      auto err = std::make_shared<spdlog::sinks::stderr_sink_st>();
-      err->set_pattern("%v");
+      auto err = std::make_shared<ConsoleSink>();
       err->set_level(ToSpdlog(config.stderr_level));
       sinks.push_back(std::move(err));
     }

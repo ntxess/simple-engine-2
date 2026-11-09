@@ -14,11 +14,26 @@ se_add_module(se_crash_probe KIND EXECUTABLE
   PRIVATE_DEPS
     se_core
     se_crash
+    se_os
   TEST)
-# The local dump stream layout is included as "crash/probe_dump_stream.h".
-target_include_directories(se_crash_probe PRIVATE
-  "${CMAKE_CURRENT_SOURCE_DIR}/..")
 se_crash_copy_handler(se_crash_probe)
+
+# The watchdog skeleton and its HangDetector (label unit; every platform).
+se_add_module(se_crash_tests KIND EXECUTABLE
+  SOURCES
+    watchdog_test.cc
+    ../support/tracy_inert_listener.cc
+  PRIVATE_DEPS
+    se_core
+    se_crash
+    se_os
+    Catch2::Catch2WithMain
+  TEST)
+catch_discover_tests(se_crash_tests
+  DISCOVERY_MODE PRE_TEST
+  TEST_PREFIX "crash_unit."
+  ADD_TAGS_AS_LABELS
+  PROPERTIES LABELS unit)
 
 set(_se_crash_test "${CMAKE_CURRENT_SOURCE_DIR}/crash_test.py")
 set(_se_read_dump "${CMAKE_SOURCE_DIR}/tools/minidump/read_dump.py")

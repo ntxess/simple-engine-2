@@ -195,6 +195,35 @@ void LogFatalAbort() noexcept {
   std::abort();
 }
 
+void WriteConsoleLine(LogLevel level, std::string_view line) {
+  if (LogSink sink = g_sink.load(std::memory_order_acquire); sink != nullptr) {
+    sink(level, line);
+    return;
+  }
+  std::fwrite(line.data(), 1, line.size(), stderr);
+  std::fputc('\n', stderr);
+  if (level >= LogLevel::kError) {
+    std::fflush(stderr);
+  }
+}
+
+bool FlushLog(std::uint64_t timeout_ns) noexcept {
+  LogRing* ring = CurrentThreadLogRing();
+  if (ring == nullptr ||
+      g_consumer.load(std::memory_order_relaxed) == nullptr) {
+    std::fflush(stderr);
+    return g_consumer.load(std::memory_order_acquire) == nullptr;
+  }
+  // As for a fatal record: while this thread's write mark is held the
+  // consumer cannot be detached, and a flush drains past the mark.
+  ring->BeginWrite(ProfileNowNs());
+  LogConsumer* consumer = g_consumer.load(std::memory_order_seq_cst);
+  const bool flushed = consumer == nullptr || consumer->Flush(timeout_ns);
+  ring->EndWrite();
+  std::fflush(stderr);
+  return flushed;
+}
+
 std::uint64_t LogEpochNs() noexcept {
   static const std::uint64_t kEpochNs = ProfileNowNs();
   return kEpochNs;
