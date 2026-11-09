@@ -4,8 +4,8 @@
 // (tests/support/fake_present_port.h): the mode per caps and sampler, the
 // sleep to the vblank minus B, misses from statistics reported to the
 // stepper, a late frame draining, nothing while Modal, the N-L fence, VRR
-// deadlines, HalfRate's re-present in Standard, adaptive latency, and the
-// headless and synthetic clocks.
+// deadlines, HalfRate's re-present in Standard, adaptive latency, the
+// headless and synthetic clocks, and the M6b command-line options.
 
 #include "se_runtime/frame_pacer.h"
 
@@ -13,13 +13,18 @@
 #include <catch2/catch_test_macros.hpp>
 #include <cmath>
 #include <cstdint>
+#include <expected>
 #include <limits>
+#include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
+#include "se_core/error.h"
 #include "se_core/time.h"
 #include "se_platform/vblank_sampler.h"
+#include "se_runtime/app_config.h"
 #include "se_runtime/pacer_policy.h"
 #include "se_runtime/present_port.h"
 #include "support/fake_present_port.h"
@@ -474,6 +479,52 @@ TEST_CASE("ResetClock makes the next frame a first frame", "[pacer]") {
   loop.pacer.ResetClock();
   REQUIRE(loop.Step().clock.prev_frame_start_ns == 0);
   REQUIRE(loop.Step().clock.prev_frame_start_ns != 0);
+}
+
+std::expected<AppConfig, Error> Parse(std::vector<const char*> args) {
+  return ParseAppConfig(std::span<const char* const>(args));
+}
+
+TEST_CASE("The --pacing option chooses the request; auto by default",
+          "[pacer]") {
+  auto defaults = Parse({});
+  REQUIRE(defaults);
+  CHECK(defaults->pacing == PacingRequest::kAuto);
+  CHECK(defaults->late_frame_ms == 0.0);
+  const std::vector<std::pair<const char*, PacingRequest>> requests = {
+      {"paced", PacingRequest::kPaced},
+      {"standard", PacingRequest::kStandard},
+      {"vrr", PacingRequest::kVrr},
+      {"auto", PacingRequest::kAuto}};
+  for (const auto& [name, request] : requests) {
+    auto config = Parse({"--pacing", name});
+    REQUIRE(config);
+    CHECK(config->pacing == request);
+  }
+  auto joined = Parse({"--pacing=vrr"});
+  REQUIRE(joined);
+  CHECK(joined->pacing == PacingRequest::kVrr);
+  CHECK_FALSE(Parse({"--pacing"}));
+  CHECK_FALSE(Parse({"--pacing", "fast"}));
+}
+
+TEST_CASE("The --inject-late-frame FRAME:MS test hook", "[pacer]") {
+  auto config = Parse({"--inject-late-frame", "400:30"});
+  if (!kRuntimeTestHooks) {
+    CHECK_FALSE(config);
+    return;
+  }
+  REQUIRE(config);
+  REQUIRE(config->late_frame_at == 400);
+  CHECK(config->late_frame_ms == 30.0);
+  auto fraction = Parse({"--inject-late-frame=1:2.5"});
+  REQUIRE(fraction);
+  CHECK(fraction->late_frame_ms == 2.5);
+  CHECK_FALSE(Parse({"--inject-late-frame", "400"}));
+  CHECK_FALSE(Parse({"--inject-late-frame", "0:30"}));
+  CHECK_FALSE(Parse({"--inject-late-frame", "400:0"}));
+  CHECK_FALSE(Parse({"--inject-late-frame", "400:1001"}));
+  CHECK_FALSE(Parse({"--inject-late-frame", "x:30"}));
 }
 
 }  // namespace

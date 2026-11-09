@@ -13,7 +13,7 @@
 //   two_monitors       the sampler follows the window to each display
 //   display_rates      SDL's refresh against the OS's mode, the sampler and
 //                      the VSYNC present rate (ADR-055)
-//   unpatched_standard the App runs Standard without the patch, with the
+//   unpatched_standard rampage runs Standard without the patch, with the
 //                      sampler thread running
 //   vrr_deadline       --pacing vrr: frame starts within 0.5 ms p99 of the
 //                      120 Hz deadline over 10 s
@@ -394,13 +394,37 @@ TEST_CASE("display_rates", "[desktop][display]") {
   CloseRig(rig);
 }
 
+// The rampage game module on the repository's sandbox scene.
+GameSetup RampageSetup() {
+  GameSetup setup;
+  setup.module = &rampage::RampageModule();
+  setup.title = "se_pacing_tests rampage";
+  setup.org = "simple-engine-tests";
+  setup.app = "pacing";
+  setup.seed = 1;
+  setup.tick_rate = 120;
+  setup.configure =
+      [](const ContentPaths& paths) -> std::expected<void, Error> {
+    rampage::SceneRequest request;
+    request.format = rampage::SceneRequest::Format::kScene;
+    request.path =
+        fs::Join(paths.content_root, "assets/scenes/sandbox.scene.json");
+    request.asset_root = fs::Join(paths.content_root, "assets");
+    request.legacy_root = paths.content_root;
+    rampage::SetSandboxScene(std::move(request));
+    return {};
+  };
+  return setup;
+}
+
 TEST_CASE("unpatched_standard", "[desktop][pacing]") {
   PacingMode mode = PacingMode::kVrr;
   std::string reason;
   PresentCaps caps;
   std::uint32_t sampler_threads = 0;
   std::uint64_t presented = 0;
-  GameSetup setup = TestGameSetup();
+  // rampage on the sandbox scene (the M6 exit: rampage runs in Standard).
+  GameSetup setup = RampageSetup();
   setup.on_frame = [&](App& app, const FrameReport& /*report*/) {
     AssertMainThread();
     mode = app.Pacer().Mode();
@@ -409,7 +433,8 @@ TEST_CASE("unpatched_standard", "[desktop][pacing]") {
     presented = app.PresentedFrames();
     sampler_threads = std::max(sampler_threads, LiveSamplerThreads());
   };
-  REQUIRE(RunTestApp(std::move(setup), {"--frames", "120"}) == 0);
+  REQUIRE(RunTestApp(std::move(setup), {"--frames", "120", "--content-root",
+                                        SE_SOURCE_DIR}) == 0);
   if (caps.patched) {
     SKIP(
         "this build has the SDL presentation patch; msvc-unpatched-dev "
@@ -478,29 +503,6 @@ TEST_CASE("vrr_deadline", "[desktop][pacing]") {
     CHECK(rate_ok);
     CHECK(p99 <= 0.5);
   }
-}
-
-// The rampage game module on the repository's sandbox scene.
-GameSetup RampageSetup() {
-  GameSetup setup;
-  setup.module = &rampage::RampageModule();
-  setup.title = "se_pacing_tests rampage";
-  setup.org = "simple-engine-tests";
-  setup.app = "pacing";
-  setup.seed = 1;
-  setup.tick_rate = 120;
-  setup.configure =
-      [](const ContentPaths& paths) -> std::expected<void, Error> {
-    rampage::SceneRequest request;
-    request.format = rampage::SceneRequest::Format::kScene;
-    request.path =
-        fs::Join(paths.content_root, "assets/scenes/sandbox.scene.json");
-    request.asset_root = fs::Join(paths.content_root, "assets");
-    request.legacy_root = paths.content_root;
-    rampage::SetSandboxScene(std::move(request));
-    return {};
-  };
-  return setup;
 }
 
 struct PacedRun {

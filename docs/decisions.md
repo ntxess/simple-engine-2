@@ -1020,7 +1020,11 @@ sampler could not add its own measurement: the display had been idle for
 2.8 hours and was asleep (WaitForVBlank returned at once, and
 D3DKMTWaitForVerticalBlankEvent failed with
 STATUS_GRAPHICS_PRESENT_OCCLUDED); whether DXGI's mode list also lacks
-165 Hz while the monitor is awake is a gates.md entry.
+165 Hz while the monitor is awake is a gates.md entry. A list of only
+near-60 Hz modes looks like the driver's list without the monitor's own
+modes, so SDL may be right while the monitor is awake and wrong whenever
+it sleeps (as during unattended test runs, M5's included); the pacer does
+not depend on which, because it reads the current mode.
 
 The "display mode" the pacer compares the sampler with, and the period it
 falls back to, is therefore the OS's current mode of the window's monitor:
