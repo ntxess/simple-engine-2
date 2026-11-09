@@ -13,7 +13,8 @@
       "binaryDir": "${sourceDir}/out/build/${presetName}",
       "cacheVariables": {
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
-        "SE_BUILD_PLATFORM": "ON"
+        "SE_BUILD_PLATFORM": "ON",
+        "SE_SDL_PATCH": "ON"
       }
     },
     {
@@ -73,7 +74,8 @@
       "displayName": "MSVC Dev without the SDL presentation patch",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Dev",
-        "SE_SDL_PATCH": "OFF"
+        "SE_SDL_PATCH": "OFF",
+        "SE_TRACY": "ON"
       }
     },
     {
@@ -264,6 +266,16 @@
       }
     },
     {
+      "name": "msvc-unpatched-dev",
+      "inherits": "test-base",
+      "configurePreset": "msvc-unpatched-dev",
+      "filter": {
+        "exclude": {
+          "label": "bench|desktop"
+        }
+      }
+    },
+    {
       "name": "clangcl-dev",
       "inherits": "test-base",
       "configurePreset": "clangcl-dev",
@@ -406,6 +418,23 @@
         {
           "type": "test",
           "name": "msvc-asan"
+        }
+      ]
+    },
+    {
+      "name": "msvc-unpatched-dev",
+      "steps": [
+        {
+          "type": "configure",
+          "name": "msvc-unpatched-dev"
+        },
+        {
+          "type": "build",
+          "name": "msvc-unpatched-dev"
+        },
+        {
+          "type": "test",
+          "name": "msvc-unpatched-dev"
         }
       ]
     },

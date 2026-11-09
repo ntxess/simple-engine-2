@@ -96,7 +96,10 @@ _se_declare(imgui
 set(_se_sdl_patch
     "${CMAKE_SOURCE_DIR}/cmake/patches/sdl3-3.4.20-se-presentation.patch")
 set(_se_sdl_patch_args)
+# SE_SDL_PATCHED tells se_render whether SDL_gpu_se.h exists (M6a).
+set(SE_SDL_PATCHED OFF)
 if(SE_SDL_PATCH AND EXISTS "${_se_sdl_patch}")
+  set(SE_SDL_PATCHED ON)
   file(SHA256 "${_se_sdl_patch}" _se_sdl_patch_sha)
   set(_se_sdl_patch_args PATCH_COMMAND
       "${CMAKE_COMMAND}" -DPATCH_FILE=${_se_sdl_patch}
