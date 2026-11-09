@@ -8,6 +8,7 @@
 
 #include "se_core/assert.h"
 #include "se_core/input_frame.h"
+#include "se_core/profile.h"
 #include "se_core/thread_role.h"
 #include "se_core/time.h"
 #include "se_core/world.h"
@@ -24,6 +25,7 @@ TickResult SimDriver::RunTick(GameStateStack& states, const InputFrame& frame,
   states.ApplyPending();
   log.ApplyDue(tick, states);
   recorder.Record(frame);
+  if (input_ring_ != nullptr) input_ring_->Write(frame);
 
   TickResult result;
   result.tick = tick;
@@ -36,6 +38,7 @@ TickResult SimDriver::RunTick(GameStateStack& states, const InputFrame& frame,
   result.hash = states.Hash().Folded();
   recorder.RecordHash(tick, result.hash);
   ++next_tick_;
+  SE_PROFILE_FRAME_NAMED("tick");
   return result;
 }
 
@@ -47,6 +50,12 @@ void SimDriver::TickInline(GameStateStack& states, const StepPlan& plan,
                 "a frame runs at most kMaxStepsPerFrame ticks");
   // Inline mode: the main thread owns the Worlds while it steps them.
   const InlineOwnerScope owner(OnMainThread());
+  // The stepper's plan for this frame (TickInline is the inline driver's
+  // caller of FixedStepper::Plan's result).
+  SE_PROFILE_PLOT("ticks per frame", static_cast<std::int64_t>(plan.steps));
+  SE_PROFILE_PLOT("k_max", static_cast<std::int64_t>(plan.k_max));
+  SE_PROFILE_PLOT("debt", static_cast<std::int64_t>(plan.debt_ticks));
+  SE_PROFILE_PLOT("dilation", plan.dilation_sec);
   frame_results_.clear();
   for (int i = 0; i < plan.steps; ++i) {
     const std::uint64_t window_end =

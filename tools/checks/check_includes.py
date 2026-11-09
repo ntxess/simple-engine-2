@@ -2,11 +2,18 @@
 
 Reads se_checks.json (written by se_check_link_graph at configure time) and
 scans every source file of each module for #include paths matching the
-module's banned patterns.
+module's banned patterns, and for the project-wide bans:
+  - spdlog only in se_log, which owns the sinks (test modules too);
+  - <windows.h>, in any letter case, and the Win32 headers it gathers
+    (<winbase.h>, <processthreadsapi.h>, ...) only in se_os, se_crash,
+    se_platform and se_render (engine modules; test code is exempt, as
+    from the API rules).
 
 usage:
   check_includes.py <build>/se_checks.json
-  check_includes.py --planted <dir>   succeeds only if a violation is found
+  check_includes.py --planted <dir> [--expect spdlog|windows]
+      succeeds only if a violation is found; with a ban named, only if
+      every source file under <dir> violates it (one case per file)
 """
 
 import argparse
@@ -25,10 +32,41 @@ PLATFORM_BANS = [
 ]
 
 
+# The Windows SDK's API headers: <windows.h> and the headers it includes
+# or that declare the Win32 API by family. Windows file names have no
+# letter case, so neither does the match.
+WIN32_HEADERS = (
+    r"(?i)^(windows|windef|winbase|winuser|wingdi|winnt|winerror|winreg"
+    r"|winsock2?|ws2tcpip|winternl|minwindef|minwinbase|processthreadsapi"
+    r"|synchapi|sysinfoapi|libloaderapi|fileapi|handleapi|memoryapi"
+    r"|errhandlingapi|debugapi|profileapi|realtimeapiset|threadpoolapiset"
+    r"|timeapi|mmsystem|commctrl|shellapi|shlobj|objbase|combaseapi|dwmapi"
+    r"|tlhelp32|psapi|avrt|powrprof|versionhelpers)\.h$")
+
+# Project-wide bans: (name, pattern, the modules that may include it,
+# whether test modules are checked too).
+GLOBAL_BANS = [
+    ("spdlog", r"^spdlog/", {"se_log"}, True),
+    ("windows", WIN32_HEADERS,
+     {"se_os", "se_crash", "se_platform", "se_render"}, False),
+]
+
+
+def global_bans(name, kind):
+    """The project-wide patterns that apply to module |name| of |kind|."""
+    return [pattern for _, pattern, allowed, tests in GLOBAL_BANS
+            if name not in allowed and (tests or kind != "test")]
+
+
 def source_files(root):
     for path in sorted(pathlib.Path(root).rglob("*")):
         if path.suffix in SOURCE_SUFFIXES and "planted" not in path.parts:
             yield path
+
+
+def planted_files(root):
+    return [path for path in sorted(pathlib.Path(root).rglob("*"))
+            if path.suffix in SOURCE_SUFFIXES]
 
 
 def scan(root, bans, include_planted=False):
@@ -53,22 +91,37 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("config", nargs="?")
     parser.add_argument("--planted")
+    parser.add_argument("--expect", choices=[ban[0] for ban in GLOBAL_BANS],
+                        help="with --planted: the project-wide ban to test")
     args = parser.parse_args()
 
     if args.planted:
-        found = scan(args.planted, PLATFORM_BANS, include_planted=True)
+        bans = PLATFORM_BANS
+        if args.expect:
+            bans = [ban[1] for ban in GLOBAL_BANS if ban[0] == args.expect]
+        found = scan(args.planted, bans, include_planted=True)
+        # With a ban named, each file is one planted case: every one must
+        # fire.
+        missed = [path for path in planted_files(args.planted)
+                  if args.expect and not any(line.startswith(f"{path}:")
+                                             for line in found)]
         for line in found:
             print("planted (expected):", line)
+        for path in missed:
+            print(f"FAIL: {path}: the planted {args.expect} include was not "
+                  f"detected")
         if not found:
             print("FAIL: the planted violation was not detected")
             return 1
-        return 0
+        return 1 if missed else 0
 
     config = json.loads(pathlib.Path(args.config).read_text(encoding="utf-8"))
     violations = []
     for module in config["modules"]:
-        if module["banned_includes"]:
-            violations += scan(module["dir"], module["banned_includes"])
+        bans = list(module["banned_includes"])
+        bans += global_bans(module["name"], module.get("kind", "engine"))
+        if bans:
+            violations += scan(module["dir"], bans)
     for line in violations:
         print(line)
     print(f"check_includes: {len(violations)} violation(s)")

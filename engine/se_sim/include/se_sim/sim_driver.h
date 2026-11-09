@@ -11,7 +11,9 @@
 //
 // then records the stack's hash. TickInline runs a frame's StepPlan on the
 // main thread, latching one InputFrame per tick; the M17 threaded driver
-// calls RunTick unchanged from its own thread.
+// calls RunTick unchanged from its own thread. With an InputFrameRing
+// attached, RunTick also writes each tick's frame into it (the crash
+// dump's input history); nothing else changes.
 
 #ifndef SE_SIM_SIM_DRIVER_H_
 #define SE_SIM_SIM_DRIVER_H_
@@ -22,6 +24,7 @@
 #include <vector>
 
 #include "se_core/input_frame.h"
+#include "se_core/input_frame_ring.h"
 #include "se_core/jobs.h"
 #include "se_core/schedule.h"
 #include "se_core/thread_role.h"
@@ -76,6 +79,11 @@ class SimDriver {
       SE_EXCLUDES(g_sim_owner);
 
   [[nodiscard]] Tick NextTick() const noexcept { return next_tick_; }
+
+  // Writes every frame RunTick runs into |ring| from now on (nullptr
+  // stops). The ring must outlive its use here; one registered as a dump
+  // stream is never destroyed.
+  void AttachInputRing(InputFrameRing* ring) noexcept { input_ring_ = ring; }
   // The results of the last TickInline call, one per tick.
   [[nodiscard]] std::span<const TickResult> FrameResults() const noexcept {
     return frame_results_;
@@ -85,6 +93,7 @@ class SimDriver {
   Schedule* schedule_;
   jobs::ForkJoinPool* jobs_;
   Tick next_tick_;
+  InputFrameRing* input_ring_ = nullptr;
   std::vector<TickResult> frame_results_;
 };
 

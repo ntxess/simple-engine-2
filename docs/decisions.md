@@ -424,3 +424,539 @@ across a save and reload, and here it also dropped the tick-1 contacts of
 event-driven sources. Leaving Moved out of the hash would only hide that
 difference, and a scene-level `moving` flag would say through a new key
 what the component registry already expresses.
+
+## ADR-029 se_os is the headless OS layer; Tracy is linked by se_core (2026-11-08)
+
+**Decision.** A new STATIC module, se_os (engine/se_os; ALLOW_ONLY se_core;
+not DETERMINISTIC), holds everything threads need from the OS on every
+platform: StartThread, Thread and RoleScope (OS thread names, QoS, CPU
+sets), the CPU topology and its pool-size and CPU-set rules, the unbiased
+clock, debugger detection and ExecutableDir. It may include `<windows.h>`
+and POSIX headers but never SDL, so the SDL-free WSL sanitizer builds have
+it, and it is the only module that may create a thread. Its rules:
+- The PerformanceOnly count is the P-cores on main's last-level cache minus
+  one, capped at ForkPoolSize: the spec's formula alone gives 3 on the
+  4-core laptop, where the design's table (and the pool) has 2.
+- Main's last-level cache is the one with the most P-cores (the lowest id
+  on a tie); "P-cores" are the cores of the highest efficiency class, so
+  every core on a homogeneous CPU.
+- Linux kEco raises the thread's nice value by 5, which lowers its
+  priority, as EcoQoS does on Windows; the spec's "lowers the nice value"
+  would have raised the priority of background work. Restoring the old
+  value needs CAP_SYS_NICE, so the destructor tries and stays silent.
+- CPU sets name the OS's ids (CPU set ids on Windows, CPU numbers on Linux)
+  as CpuTopology reports them, so a request needs no lookup at apply time.
+- QueryUnbiasedInterruptTimePrecise is looked up in KernelBase at run time:
+  kernel32.lib does not export it and linking mincore.lib would break the
+  ALLOW_ONLY list.
+- Tracy is a private dependency of se_core (TracyClient, SE_TRACY builds
+  only), so the profiling macros sit beside the code they measure; only
+  se_core/src/profile.cc includes Tracy. TracyClient is built with
+  TRACY_DELAYED_INIT and TRACY_MANUAL_LIFETIME (nothing starts until
+  `profile::Start()`, and every macro checks the started flag), keeps
+  TRACY_ON_DEMAND, TRACY_ONLY_LOCALHOST and TRACY_NO_BROADCAST, sets
+  TRACY_DBGHELP_LOCK=SeDbgHelp (se_core defines the lock) and
+  TRACY_NO_CRASH_HANDLER (crashpad owns crashes). Zones with run-time names
+  (schedule systems, fork sites) use `SE_PROFILE_ZONE_DYNAMIC`, an addition
+  to the spec's macro list. Thread names given before the start are applied
+  by each thread's first profiled event.
+
+**Why.** Threads must have the same names, roles and placement in the
+SDL-free test builds as in the runtime, and se_core may not include
+platform headers. Linking Tracy from se_core keeps the zone macros free of
+a dependency on a higher module; the manual lifetime is the only Tracy mode
+that guarantees no socket and no thread in tests, tools and benches.
+
+## ADR-030 Two more fault boundaries: thread creation and the log sinks (2026-11-08)
+
+**Decision.** ADR-006's list of `// se-fault-boundary` files gains:
+- se_os/src/thread.cc: `std::jthread` reports a thread the OS cannot
+  create with std::system_error, which `StartThread` returns as an Error.
+  An exception that escapes a thread's body is not caught: the entry is
+  noexcept, so std::terminate runs at the throw and the crash handler
+  records it there.
+- se_log/src/log_worker.cc: spdlog reports file errors (opening, writing,
+  rotating, flushing) with spdlog_ex. The sinks are created and called only
+  there; `LogWorker::Start` turns a failure into an Error with the path, and
+  a failure while running is counted (LogWorkerStats::sink_errors),
+  reported once on stderr, and survived.
+
+**Why.** Both are third-party throws at the edge of engine code: the
+standard library's thread constructor and spdlog's sinks. Returning
+std::expected from StartThread is the spec's contract, and a full disk must
+not take the log worker down.
+
+## ADR-031 Breadcrumbs and rings live in dump-stream memory (2026-11-08)
+
+**Decision.** The ThreadRegistry's table, every log ring and the InputFrame
+ring are the plain-data layouts of docs/milestone-specs.md "Dump stream
+layout" (se_core/dump_stream.h, pinned by static_assert), and the live
+counters are those fields: `head`, `dropped`, a slot's `packed` breadcrumb
+and `state`. Fields other threads read while they change are accessed
+through `std::atomic_ref` (`AtomicLoad`, `AtomicStore`, and byte-wise
+relaxed stores for names), never through a second copy. A thread's
+`Breadcrumb` (se_core/breadcrumb.h) keeps its API but becomes a handle: it
+writes its own word until a `ThreadSlotScope` binds it to the slot's
+`packed` word, and it carries the value over on bind and unbind. The
+registry hands every region to an optional `DumpStreamHook` (the
+breadcrumb table, the library ring, and each slot's ring when it is
+allocated), which the integration points at se_crash's RegisterStream.
+Rings and the table are allocated once and never freed; the InputFrame ring
+a process registers must likewise never be destroyed. Registry names keep 16
+characters.
+
+**Why.** A crash dump must show the real state, so the memory the threads
+write is the memory the handler reads; a copy refreshed by the producer
+would lag exactly when it matters. `std::atomic_ref` over plain structs
+keeps the layout checkable with `offsetof` and the accesses race-free under
+TSan. Binding the existing Breadcrumb rather than replacing it leaves every
+M2 call site (the Schedule, ForkScope, the tests) unchanged.
+
+## ADR-032 The log backend: rings, a consumer, and ordered output (2026-11-08)
+
+**Decision.** The SE_LOG_* front end (se_core/log.h; call sites unchanged)
+writes a LogRecord into the calling thread's LogRing while a `LogConsumer`
+is attached (`AttachLogConsumer`; se_log's LogWorker is the only one), and
+writes synchronously in the M2 format, `[I t=12 main] message (file:line)`,
+otherwise. Details the spec leaves open:
+- Ordering. A producer marks its ring before it stamps a record
+  (`LogRing::BeginWrite`) and clears the mark after the push. Each wake the
+  worker writes only the records older than every mark in progress and
+  holds the rest for the next wake, so lines from different threads come
+  out in (timestamp, sequence) order across wakes, not only within one.
+  Stop and the fatal flush write everything.
+- Detach. `DetachLogConsumer` clears the consumer and then waits (at most
+  1 s) for marks in progress; a producer checks the consumer after setting
+  its mark, so every record is either in a ring the worker drains a last
+  time or written synchronously, never lost. *(Superseded by ADR-045: the
+  wait has no deadline.)*
+- The main thread without a slot (it normally has slot 0) uses the library
+  ring only through try_lock, and counts a drop when the lock is busy.
+- SE_LOG_FATAL pushes the record and asks the consumer to flush while the
+  mark is held (so the worker cannot be detached meanwhile); the worker
+  writes everything and flushes its sinks; the caller waits up to 2 s. If
+  the record was dropped, the flush timed out, or the fatal call is on the
+  worker itself, the synchronous line goes to stderr before the abort.
+- `LogConfig` adds `wake_on_push` (default on) so tests can let a ring fill
+  up, and `rate_limit_per_second = 0` turns the rate limit off. The time
+  column counts from `LogEpochNs()`, the first time it was read (LogWorker
+  Start reads it).
+- `kLogMaxMessage` is 448, the record's message field, as the dump layout
+  requires; longer messages are still truncated, not dropped.
+
+**Why.** The design requires that nothing blocks a producer and that the
+rings double as the crash tail; the watermark keeps the file's order
+meaningful without making producers wait for the worker, and the mark is
+the same mechanism Stop needs to drain without losing records.
+
+## ADR-033 se_crash drives crashpad's client API directly; nothing is uploaded (2026-11-08)
+
+**Decision.** se_crash (M4b) uses crashpad's client API from the pinned
+sentry-native archive (CrashpadClient, CrashpadInfo, CrashReportDatabase,
+crashpad annotations), not sentry_init: the sentry library is never linked
+(se_crash FORBIDs it; only `crashpad::client` is), and the build copies
+`crashpad_handler` next to each executable that starts crash capture
+(`se_crash_copy_handler`). The contract the M4 integration and later
+milestones build on:
+- `Start(CrashConfig)` launches the handler synchronously with no URL, no
+  metrics directory and no extra arguments, after turning uploads off in
+  the database settings. Failures are Errors: kInvalidArgument (empty path,
+  already started), kNotFound (no handler executable), kIo (database or
+  launch), kUnsupported (stub builds). crashpad's process-wide state allows
+  one launch per process; if the launch fails, the exception filter and the
+  SIGABRT handler that StartHandler installed first are put back.
+- Fatal faults reach the handler from Start to process exit: crashpad
+  cannot uninstall its exception filter. Destroying the CrashGuard ends
+  DumpWithoutCrash (kUnsupported afterwards) and restores the previous
+  terminate handler.
+- The terminate handler records why std::terminate ran in the annotation
+  object `se.terminate` ("std::terminate with exception: <what>" or
+  "std::terminate without an active exception"; for a throw through
+  noexcept MSVC keeps the exception active, clang-cl does not), then calls
+  the previous handler or std::abort, which crashpad's SIGABRT handler
+  turns into a dump (exception code STATUS_FATAL_APP_EXIT). It rethrows
+  the active exception to read its message, so
+  engine/se_crash/src/terminate_handler.cc is a `// se-fault-boundary`
+  file, one more boundary than ADR-006 lists.
+- `DumpWithoutCrash(reason)` sets the annotation object `se.dump_reason`,
+  asks the handler for a dump and returns when crashpad's dump-completed
+  event fires (crashpad waits without a timeout). Requests are serialised
+  by a mutex held across the dump, which the watchdog and main's fault
+  path can both take: an exception to "no lock shared between main and a
+  helper", accepted because crashpad itself admits one dump at a time and
+  the handler suspends every thread of the process while it writes one.
+- `RegisterStream(type, data, size)` wraps
+  CrashpadInfo::AddUserDataMinidumpStream under a mutex (crashpad does not
+  lock its list) and rejects types outside 0x53450001-0x5345FFFF, empty
+  regions and duplicates (the minidump writer would drop a second stream
+  of a type). Types: 0x53450001 breadcrumbs, 0x53450002 InputFrame ring,
+  0x53450003 SessionLog tail, 0x53450004 flight recorder, and
+  0x53450100 + slot for the log ring of ThreadRegistry slot `slot`, with
+  slot 64 for the shared library ring. tools/minidump/read_dump.py knows
+  these values and decodes each stream by its own header.
+- `CrashConfig::annotations` become crashpad's process annotations.
+
+**Why.** Registered streams need AddUserDataMinidumpStream, which
+sentry_init does not expose, and the engine wants no upload path at all
+rather than a configured-off one. The mutex in DumpWithoutCrash keeps the
+reason annotation of concurrent requests apart at no cost the dump itself
+does not already impose.
+
+## ADR-034 Crash capture runs on Windows only for now, and not under ASan (2026-11-08)
+
+**Decision.** se_crash has two backends with one API: crashpad (Windows,
+`SE_CRASH=ON`) and a stub (Start and DumpWithoutCrash return kUnsupported,
+RegisterStream validates and keeps nothing). The stub is built on Linux
+and in msvc-asan:
+- Linux: crashpad's Linux build calls `find_package(CURL REQUIRED)` for its
+  HTTP transport (external/crashpad/util/CMakeLists.txt) even with
+  SENTRY_TRANSPORT=none, and the WSL machine has libcurl's runtime but not
+  its development files. Installing packages is the owner's step, so the
+  Linux presets keep `SE_CRASH=OFF`, the crash tests are not registered
+  there (crash.stub runs instead) and docs/gates.md, "Linux crash capture",
+  names the package and the remaining work.
+- msvc-asan keeps `SE_CRASH=OFF`, as since M0. Measured with crashpad
+  built under /fsanitize=address: ASan's own exception handler takes
+  access violations and stack overflows before crashpad's filter, prints
+  its report and exits 1 without a dump, so those two crash tests cannot
+  pass there; abort, std::terminate and DumpWithoutCrash dumps work but
+  take 7-10 s each (docs/gates.md, "Crash capture under ASan"). The crash
+  tests run in msvc-dev and clangcl-dev; msvc-asan runs crash.stub, and
+  M5's init-failure tests under ASan see crash capture fail as it may in
+  the field.
+
+**Why.** The stub keeps every caller free of build switches, and a crash
+test that cannot run is better absent than skipped silently: the gates.md
+entries say exactly what would enable each.
+
+## ADR-036 The App runs headless for its callback tests (2026-11-08)
+
+**Decision.** AppConfig gains `--headless`: SDL starts with its dummy video
+driver, and boot steps 6 (window) and 7 (GPU device) do nothing; the frame
+plans and runs ticks but records nothing, and `--frames` counts iterates.
+The callback tests (AppQuit(NULL), throws injected in AppIterate and
+AppEvent, a failure at every boot step, the two-phase quit with providers,
+LOW_MEMORY and TERMINATING from an engine thread through the inbox) run the
+real App this way as unit tests, on Windows and under TSan and ASan in WSL.
+The windowed paths (Modal, NULL acquires, Suspended, session end, power,
+the boot-step sweep of the rampage executable) are desktop tests. AppConfig
+also gains `--no-activate` (the window is shown without focus, for tests),
+`--content-root`, `--pref-dir`, `--return-on-quit` (Release builds end the
+process after SDL_AppQuit otherwise) and `--log-level`; arguments after
+`--` go to the game. Test hooks (`--fail-init-step`, `--inject-throw
+iterate|event[:N]`, `--inject-null-acquire FROM:COUNT`) exist in every build
+but Release (SE_RUNTIME_TEST_HOOKS). The injected throw is a standard
+library one (`std::vector::at` past the end), so engine code still never
+writes `throw`.
+
+**Why.** The spec lists the callback tests apart from the desktop ones, and
+TSan exists only in WSL, which has no window system or Vulkan driver; a
+headless App lets the callbacks' fault paths and the quit drain run under
+the sanitizers instead of only on this desktop.
+
+## ADR-037 The M4 parts plug into se_runtime through one hooks file (2026-11-08)
+
+**Decision.** M5 builds se_runtime without se_os, se_log and se_crash (the
+M4 tracks build them in parallel). Every place they plug in is a function in
+`engine/se_runtime/include/se_runtime/integration.h`, marked
+`INTEGRATION(M4a)` or `INTEGRATION(M4b)`: EnterMainThread/LeaveMainThread
+(the main RoleScope, HighQoS), StartCrashCapture (boot step 1),
+RequestFaultDump (the callbacks' fault path), StartLogging (boot step 2),
+ReadCpuTopology (step 8), StartHelperThreads with the WatchdogInputs (step
+9: the iterate counter, Modal, Suspended and heartbeat atomics),
+HelperThreads::ArmWatchdog (after the first iterate), StartShutdownDeadline
+(when the quit drain ends), HelperThreads::Stop (shutdown steps 16 and 17),
+EngineThreadsRunning and ShutdownLoggingOnly. In M5 they keep M2's
+behaviour (RegisterMainThread, synchronous logging) and start no thread.
+se_runtime's link list gains se_os, se_log and se_crash at integration.
+The integration filled them in (ADR-042, ADR-043).
+
+**Why.** Three tracks edit in parallel; one file of documented no-ops makes
+the integration a fill-in rather than a search through the App.
+
+## ADR-038 Fault paths do not allocate; the window procedure is not a catch boundary (2026-11-08)
+
+**Decision.** Inside the noexcept callbacks' catch handlers, the exception
+text is copied into a fixed buffer and the message box text is assembled
+in one (ShowFaultMessage), so a fault caused by exhausted memory can still
+be reported. The Inbox is two fixed buffers of 64 events swapped at each
+take (the design's "mutex-guarded vector" without allocation in the filter,
+which runs on SDL's pushing thread). The window subclass procedure calls a
+WindowListener whose methods are noexcept and is not a fault boundary: an
+exception there ends the process through std::terminate (the crash handler
+records it from M4 on) instead of unwinding through the Windows modal
+loop. ADR-006's list of boundaries is unchanged.
+
+**Why.** The design forbids unwinding through SDL's C frames and the modal
+loop; std::terminate inside a noexcept frame is defined behaviour, a catch
+in the window procedure would have to invent a recovery the design does not
+have (the quit path runs from the callbacks).
+
+## ADR-039 M5's frame clock falls back to measured frames; its costs leave out the swapchain wait (2026-11-08)
+
+**Decision.** Until M6's pacer and M7's renderer measure them, the App
+feeds CostTracker each tick's cost and, as the non-tick cost R, the
+iterate's time minus the ticks and minus the whole frame transaction
+(command buffer, SDL_WaitForGPUSwapchain, acquire, submit); the GPU cost is
+unknown (NaN). The present mode is VSYNC, so the transaction includes the
+wait for a swapchain image.
+
+**Why.** Counted as CPU time, the VSYNC wait makes R about one period, k_95
+falls below k_rt and the stepper enters Overloaded after a second, running
+one tick per frame: at 60 Hz the game would run at half speed.
+
+**Decision (frame clock).** The FrameClock's period is SDL's display mode
+unless a moving average of the frame deltas (weight 0.1, stalls over
+0.25 s left out) differs from it by more than 5%; then the clock reports
+the measured period, and the FixedStepper runs Free cadence on real time.
+
+**Why.** Running the rampage executable on this machine, SDL reported a
+60 Hz display for a window whose VSYNC presents came at 165 Hz. In Locked
+cadence with unknown vblank counts the stepper rounds each 6 ms delta to
+zero vblanks: 300 presented frames ran 2 ticks. The same happens in a
+modal loop, whose WM_TIMER iterates do not follow the display. M6's
+pacer uses present statistics and drops to Standard on such a
+disagreement; until then the measured rate keeps 120 ticks per second.
+
+## ADR-040 Lifecycle details the design leaves open (2026-11-08)
+
+**Decision.**
+- Suspended has two sources, the window (MINIMIZED, HIDDEN, OCCLUDED) and a
+  power suspend; each is cleared only by its own resume (RESTORED, SHOWN,
+  EXPOSED or MAXIMIZED, or the 10 Hz probe, for the window; power resume
+  for power). The probe renders only for a window suspension.
+- FocusLost iterates at the full rate and gameplay continues by default
+  (`LifecycleConfig::pause_on_focus_lost`); the design's 30 Hz present cap
+  belongs with the game's Pause state (M13). Focus is read from the window
+  at boot, so a window shown without focus (tests) starts in FocusLost.
+- QuitPending dominates the state shown; a draining quit iterates at 10 Hz
+  while nothing is visible and at the full rate otherwise.
+- WM_QUERYENDSESSION, WM_ENDSESSION and TERMINATING run the recovery hook
+  once and end the app at the next iterate without a drain, as the design's
+  Running -> ShuttingDown says, even if the session end is later cancelled.
+- `--frames N` counts presented frames (NULL acquires do not count).
+
+**Why.** The spec states the rules but not these interactions; each choice
+keeps a condition from being cleared by an unrelated event.
+
+## ADR-041 Linux builds the platform with SDL's dummy and offscreen video (2026-11-08)
+
+**Decision.** The Linux presets build se_platform, se_render, se_runtime,
+the rampage executable and the platform tests. SDL3 is configured without
+window-system and system-library detection (X11, Wayland, KMSDRM, OpenGL,
+IBus, D-Bus, libudev, liburing, libusb, ALSA, JACK, PipeWire, PulseAudio,
+sndio, OSS off; dummy and offscreen video on; `SDL_UNIX_CONSOLE_BUILD=ON`,
+without which SDL refuses to configure). `SE_SDL_WINDOW_SYSTEMS=ON` restores
+SDL's own detection for M18. The Vulkan GPU backend still compiles (SDL
+bundles its headers) but no WSL test creates a device: window, GPU and
+desktop tests carry the desktop or gpu labels, which the Linux test presets
+exclude.
+
+**Why.** The inbox, wake, lifecycle, quit and callback tests must run under
+TSan and ASan, and WSL has no window-system development packages (installing
+them is out of scope for M5; docs/gates.md).
+
+## ADR-042 How the M4 parts run in the App (2026-11-08)
+
+**Decision.** The hooks of ADR-037 are filled in as follows.
+- Main thread: EnterMainThread calls RegisterMainThread and holds
+  `RoleScope{kMain, "main", Qos::kHigh}` (registry slot 0, its 4096-record
+  ring) until the end of SDL_AppQuit. It applies no CPU set: main's set
+  matters once fork workers exist (M14).
+- Boot step 1 resolves the pref path first (SDL_GetPrefPath and
+  SDL_CreateDirectory need no SDL_Init), because the crash database
+  (`<pref>/crashdb`) and the log file (`<pref>/logs/<app>.log`) live under
+  it; step 5 now resolves only the content root.
+- Crash capture is per process, not per App. The first StartCrashCapture
+  registers the dump streams (the ThreadRegistry hook: the breadcrumb table,
+  every slot's log ring as it is first allocated, the library ring as
+  `LogRingStream(64)`; and one never-destroyed InputFrameRing that every
+  App's SimDriver writes) and starts crashpad's handler from next to the
+  executable. The CrashGuard is then kept until the process exits:
+  crashpad cannot uninstall its filter or launch a second handler, and the
+  SDL_AppInit catch-all, which runs after a failed App has been torn down,
+  must still be able to request a dump. Later boots in the process report
+  the same state. `--no-crash-capture` skips the handler (the in-process
+  App tests, which boot many Apps in one process); the streams are still
+  registered.
+- The log worker starts at boot step 2, not step 9: LogWorker::Start
+  configures the sinks and starts its thread together, and no other engine
+  thread exists yet, which is what the design requires. A log file that
+  cannot be opened is logged and the worker runs without it; it is not a
+  boot failure. Step 9 starts the watchdog. Shutdown: Logging::Stop
+  (SDL's log output to stderr, drain, spdlog::shutdown) at step 16, the
+  watchdog join at step 17, then profile::Stop when `--profile` started it.
+- The log worker's stderr sink writes through se::WriteConsoleLine, so a
+  sink a test installed with SetLogSink receives the worker's lines as it
+  receives synchronous ones (the callback tests read the fault lines that
+  way).
+- A fault in a callback, or in SDL_AppInit, requests its dump with
+  DumpWithoutCrash on the faulting thread, so the dump shows that thread as
+  it was; the watchdog's queue is for dumps its own thread writes.
+- Boot step 8 reads the CPU topology and gives the (still empty) fork pool
+  `max_workers = ForkPoolSize(topology)`.
+- Test builds add the M4 exit hooks `--crash-test after-ticks:N` (an access
+  violation on main right after tick N) and `--dump-test after-ticks:N`
+  (the watchdog writes a dump after tick N; the ticks stop until it is
+  written, then the App quits). The frame's StepPlan is cut so that the
+  last tick it runs is N.
+- The heartbeat flag is no longer set on every iterate: it marks long work
+  on main that still makes progress (M9's loads, M12), so a flag that is
+  always set would excuse every hang.
+
+**Why.** Each point follows from a constraint the parts brought: crashpad's
+one launch per process, LogWorker::Start's single call, SDL_AppQuit after a
+failed boot, and in-process tests that boot repeatedly.
+
+## ADR-043 The watchdog skeleton (2026-11-08)
+
+**Decision.** `se::crash::Watchdog` (se_crash, which now links se_os) runs
+as role kWatchdog through StartThread. It waits on a binary_semaphore with
+a 1 s timeout (requests, the deadline start and the stop also release it,
+at most once per wait) and measures periods on the unbiased clock. Each
+period goes into the pure `HangDetector`: until Arm() (the first iterate)
+only the 30 s boot budget applies, which is reported once with a dump and
+never while a debugger is attached; armed, a period without iterate
+progress that Suspended, Modal, the heartbeat or a debugger does not excuse
+is a stall, and 5 in a row are a hang, once per episode, but only with
+`declare_hangs`, which stays off until M12. `RequestDump(reason)` is main
+only (an SPSC queue of 8): the watchdog thread writes one dump per request,
+and Stop still writes the ones queued. `StartShutdownDeadline()` starts the
+5 s deadline; on expiry the watchdog requests a dump, has the log worker
+flush (se::FlushLog, 1 s) and ends the process with TerminateProcess
+(exit code 3). The dump function is injectable for tests.
+
+**Why.** The design's watchdog reads only atomics and never waits on main,
+and main never waits on it; a queue main fills and a semaphore it releases
+keep both true. Declaring hangs needs M12's GPU and compositor labels, so
+M4 gives the interface and the boot budget only, as the spec asks.
+
+## ADR-044 Game code run during shutdown is contained (2026-11-09)
+
+**Decision.** The game hooks that run inside the App's teardown,
+`GameSetup::on_shutdown` and every `GameState::OnExit` (from
+`GameStateStack::Clear` at shutdown steps 5-6), go through `RunGameHook`
+(engine/se_runtime/src/game_hook.h). It is defined in sdl_app.cc, the SDL
+callbacks' fault boundary, because the teardown only ever runs inside an
+SDL callback (SDL_AppQuit, or SDL_AppInit undoing a failed boot), so
+ADR-006's list of boundary files is unchanged. A throw is logged
+("fault in GameSetup::on_shutdown: ..."), a dump is requested, and the
+remaining steps run, so logging still drains and stops (step 16) and the
+watchdog still stops (step 17). No message box is shown: the shutdown
+deadline is already running. A state whose OnExit throws stays on the
+stack with the ones below it; destroying the GameRuntime destroys them and
+their Worlds without another OnExit. `App::Shutdown` now returns the result
+the process ends with, SDL_APP_FAILURE after such a fault (the exit code of
+Release builds, which end the process themselves; elsewhere SDL has
+already fixed the exit code from the last iterate). SdlAppQuit destroys the
+App before main's RoleScope ends on every path, and `App::Teardown` marks
+itself done only after its last step, so a teardown that an engine-side
+throw cut short runs its remaining (idempotent) steps from ~App instead of
+leaving the log worker, the watchdog, the device, the window and SDL
+alive.
+
+**Why.** A throwing hook used to skip the rest of the teardown and leave
+the App to be destroyed after LeaveMainThread, where ~App's main-thread
+assertion aborted (Debug and Dev), or the Release process ended with the
+log worker undrained, so the fault's own records could miss the log file.
+
+## ADR-045 The log consumer is detached without a deadline, and attached after its thread starts (2026-11-09)
+
+**Decision.** `DetachLogConsumer` waits for every ring write mark in
+progress without a deadline, replacing ADR-032's "at most 1 s". When it
+returns, no thread uses the consumer any more, so LogWorker::Stop can
+destroy its State. Each wait ends: a mark covers one push, or a flush
+(SE_LOG_FATAL, 2 s; `FlushLog`, its caller's timeout) that the worker
+keeps serving, because Stop detaches before it asks the worker to stop; at
+shutdown the watchdog's 5 s deadline bounds the whole step 16 as well. The
+caller must not hold a mark itself (no SE_LOG_* call path detaches).
+`LogWorker::Start` now starts its thread first and attaches the consumer
+after it: the thread waits for the outcome and runs only when the attach
+succeeded. A thread that cannot be created therefore leaves no records
+stranded in the rings, and a second worker that finds the first one
+attached never drains the first one's rings.
+
+**Why.** After a timed-out detach a producer still inside its mark (a
+fatal flush lasts up to 2 s, longer than the old 1 s) could call
+OnRecordPushed or poll the flush counter of a freed State. The old start
+order attached before the thread existed, so a failed thread start left
+whatever was pushed meanwhile in the rings with nobody to write it.
+
+## ADR-046 The dump reader checks every record against its index (2026-11-09)
+
+**Decision.** tools/minidump/read_dump.py relies on two writer rules and
+reports records that break them under "problems" (and `--strict`):
+- InputFrame stamps follow InputFrameRing: 2n + 1 while frame n is being
+  written, 2n + 2 once complete (se_core/input_frame_ring.h). A slot in
+  the ring must say "frame n, complete"; each record gets a `status` (ok,
+  torn, overwritten, not written) and the frame it `holds`, and only ok
+  slots are decoded. The crash probe writes its synthetic ring the same
+  way (it used to count writes per slot).
+- Log records in one ring take increasing sequence numbers (one producer
+  at a time; the library ring assigns them under its lock).
+One record is exempt: the oldest slot of a full ring is the one the
+producer writes next, so a dump of a running writer may catch it being
+overwritten. Such a slot is marked (an InputFrame slot holding frame
+`head`, torn or not yet published; a log record flagged `may_be_torn`, and
+`torn` when its sequence shows the next record's header) and not decoded
+as its own index, but it is not a problem. Anything else that does not fit
+is.
+
+**Why.** The reader is both the diagnostic tool and the crash tests'
+oracle; it accepted a slot holding a later frame, and a log record with a
+new header over old text, as valid records of their index. Treating the
+oldest slot of a live ring as a problem would make every dump of a busy
+thread fail `--strict` (the probe's torn slot is that case on purpose).
+
+## ADR-047 Other threads push SDL events only between the first iterate and shutdown step 4 (2026-11-09)
+
+**Decision.** `WakeEventScope` gains `Open()` and `Close()`. The App opens
+it at its first iterate and closes it at the start of shutdown step 4,
+before the event filter is removed; outside that window WakeMain does
+nothing, and Close returns only when no WakeMain that saw the window open
+is still inside SDL_PushEvent. Any other engine code that pushes SDL events
+from a thread other than main (M8's samplers, M9's lane) keeps to the same
+window; WakeMain is the only push engine code makes today.
+
+**Why.** SDL_PushEvent reads its event-watch list without SDL's lock
+(SDL_DispatchEventWatchList checks the filter, and with no filter the
+watcher count), while main changes that list: SDL_InitMainCallbacks adds
+SDL's own watcher right after SDL_AppInit returns, SDL_QuitMainCallbacks
+removes it before SDL_AppQuit, and the App sets the event filter at boot
+step 4 and clears it at shutdown step 4. TSan reported the first race in
+M5's wake test. The App's window lies inside the time its filter is set
+and after SDL's watcher exists, so a push there never overlaps a change.
+The design starts helper threads at boot step 9, inside SDL_AppInit, so the
+rule has to live in the push itself rather than in the start order.
+
+## ADR-048 The M4 bans have no opt-out and cover more forms (2026-11-09)
+
+**Decision.** check_banned_api.py's rules thread, debugbreak, dump,
+dump_header and timer cannot be silenced with `// se-allow(<rule>)` (the
+thread rule's exception remains the se_os module). The thread rule also
+matches `std::async`, `std::execution::par` and `par_unseq`,
+`CreateRemoteThread*`, `QueueUserWorkItem`, `CreateThreadpool*` and
+`TrySubmitThreadpoolCallback`; the debugbreak rule matches
+`__builtin_debugtrap` and `std::breakpoint*`. check_includes.py's windows
+ban matches `<windows.h>` in any letter case and the Win32 headers it
+gathers (winbase.h, processthreadsapi.h, synchapi.h, ... ; the list is
+WIN32_HEADERS) outside se_os, se_crash, se_platform and se_render. With
+`--expect RULE`, a planted fixture passes only if every one of its files
+violates RULE, so each form has its own fixture file; `dump_header` has its
+own test (`checks.planted.dump_header`, on the dump_write fixture).
+
+**Why.** The spec states these bans without exceptions ("anywhere",
+"never DebugBreak"), and each gap the review found (an async launch, a
+debug trap, `<WINDOWS.H>`, an opt-out comment) passed CI; a fixture whose
+first file fires no longer hides a second form that does not.
+
+## ADR-049 The log worker and the watchdog emit a zone per wake (2026-11-09)
+
+**Decision.** `LogWorker drain` (each DrainOnce) and `Watchdog wake` (each
+watchdog wake) are profiler zones. Inert unless `--profile` started Tracy,
+they make both helper threads appear in a capture, and their first zone
+after profile::Start() applies the Tracy name RoleScope recorded before the
+start (ADR-029): the log worker starts at boot step 2, before the profiler.
+
+**Why.** Tracy names a thread only through that thread's own events, and
+neither helper had any, so the "named threads" gate could not pass.

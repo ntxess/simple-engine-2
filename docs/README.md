@@ -27,11 +27,20 @@ behaviour reference until every rule and editor operation is ported.
 | Target | Directory | What it is |
 |---|---|---|
 | se_core | engine/se_core | Kernel: World, Schedule, component registry, hashing, detmath, jobs, time (M2) |
+| se_os | engine/se_os | The headless OS layer for threads: StartThread and RoleScope (names, roles, registry slots, QoS, CPU sets), the CPU topology and pool sizes, the unbiased clock, debugger detection, ExecutableDir; depends on se_core only (M4, ADR-029) |
+| se_log | engine/se_log | The log worker: drains the per-thread log rings into the spdlog file, stderr and panel sinks; the only module that includes spdlog (M4, ADR-032) |
 | se_sim | engine/se_sim | Game modules, GameStateStack, SessionLog, replays, SimDriver (M2) |
 | se_render_core | engine/se_render_core | Headless renderer half: SpriteRenderer, Camera2D, BuildRenderList; depends on se_core only (M3) |
+| se_crash | engine/se_crash | Out-of-process crash capture on crashpad: Start/CrashGuard, RegisterStream, DumpWithoutCrash, the terminate annotation; nothing uploaded; a stub on Linux and in msvc-asan (M4, ADR-033, ADR-034). The watchdog skeleton: role kWatchdog, the HangDetector (boot budget; hangs declared from M12), RequestDump, the shutdown deadline (M4 integration, ADR-043) |
 | game_rampage | games/rampage | The legacy Sandbox's gameplay on the kernel: components, systems, scenes and prefabs (assets/), legacy scenarios, projections (M3) |
+| se_platform | engine/se_platform | SDL3 on the main thread: SDL's initialisation, the event filter and Inbox, WakeMain, the window and its Win32 subclass (Modal, session end, power), se::fs on SDL's filesystem API (M5) |
+| se_render | engine/se_render | The SDL_GPU device (D3D12 on Windows, Vulkan on Linux) and the frame transaction, clear-only until M7 (M5) |
+| se_runtime | engine/se_runtime | The App on SDL's main callbacks: boot steps, the frame, the lifecycle and two-phase quit state machines, BasicInputService, the noexcept callbacks (`SE_DEFINE_SDL_APP`) (M5); the main thread's RoleScope, crash capture and its dump streams, the log worker and the watchdog in boot order (integration.h; ADR-042) |
+| rampage | games/rampage/app | The rampage executable: the sandbox scene at 120 Hz in a window, clear-only until M7 (M5); crashpad_handler is copied next to it |
 | se_replay | tools/se_replay | Headless runs of a game module: per-tick hashes, replays, projections |
 | refcmp | tools/refcmp/refcmp.py | Compares two `.seproj` projections within the M3 tolerances (Python 3, stdlib only) |
+| read_dump | tools/minidump/read_dump.py | Decodes a crash dump: threads, exception, annotations and the first-party streams (breadcrumbs, log rings, InputFrame ring), and lists every record that does not fit its index (a stale or torn InputFrame slot, log sequence numbers out of order) under "problems", apart from the one a running writer was overwriting (ADR-046); the crash tests' oracle (Python 3, stdlib only) |
+| se_crash_probe | tests/crash | Registers dump streams with known contents, then crashes or requests dumps; the `crash.*` tests (label crash) check its dumps with read_dump. `crash.rampage_*` (labels desktop and crash) check the M4 exit dumps of the rampage executable |
 | se_bench | bench/se_bench | Benchmark suites and their Release gates (`bench.*`) |
 | legacy tree | core/, app/ | The SFML reference (`SE_BUILD_LEGACY`, legacy presets) |
 
@@ -76,7 +85,49 @@ out\build\msvc-release\bin\se_bench --suite rampage_tick_5k --json rampage_tick_
 The `bench.*` tests run only in the msvc-release preset, against
 bench/thresholds.json; run them on an otherwise idle machine.
 
+The rampage executable runs the sandbox scene in a window (clear-only
+until M7; the title shows the tick and the lifecycle state). `--frames N`
+quits after N presented frames; the runtime's options are listed in
+engine/se_runtime/include/se_runtime/app_config.h:
+
+```bat
+out\build\msvc-dev\bin\rampage --frames 600
+```
+
+Every run of an engine executable writes its log through the log worker to
+`<pref>/logs/<app>.log` (rotated at 5 MB, 3 kept) and to stderr, and keeps
+its crash database in `<pref>/crashdb`; `<pref>` is SDL's pref path
+(`%APPDATA%\simple-engine\rampage\` for rampage) or `--pref-dir DIR`.
+`--profile` starts Tracy (builds with `SE_TRACY`: msvc-dev, msvc-release,
+clangcl-dev), which listens on 127.0.0.1:8086 for the profiler GUI.
+
+Crash dumps (Windows; the crashpad handler writes them into the database's
+reports/ directory, out of process; nothing is uploaded) decode with:
+
+```bat
+python tools\minidump\read_dump.py out\build\msvc-dev\crash_out\abort\db\reports\<id>.dmp
+python tools\minidump\read_dump.py DUMP --json
+python tools\minidump\read_dump.py DUMP --records 20
+```
+
+The text output lists the streams, the threads with their names, the
+exception record (code and thread), the annotations (`se.app`,
+`se.dump_reason` for a requested dump, `se.terminate` after
+std::terminate) and the first-party streams: the breadcrumb table (one row
+per ThreadRegistry slot: state, name, OS thread id, role, phase, system,
+chunk and tick), one log ring per slot (0x53450100 + slot; the shared
+library ring is slot 64), each record as the log worker would print it, and
+the InputFrame ring (0x53450002) with each slot's seqlock stamp (2n + 2 for
+a complete frame n, odd while it was being written) and its frame.
+`--records N` shows the newest N records of each ring; `--json` gives
+everything for scripts (tests/crash/rampage_dump_test.py shows how). In a
+test build, `rampage --crash-test after-ticks:240` and
+`rampage --dump-test after-ticks:240` write the M4 exit dumps.
+
 `scripts/ci.ps1` runs the commit gate (msvc-dev, msvc-asan, clangcl-dev,
 including the `lint` and `checks` test labels); `scripts/ci.ps1 -Milestone`
-adds Debug, Release and the WSL Linux sanitizer presets. The legacy tree
+adds Debug, Release, the WSL Linux sanitizer presets and the desktop
+tests. `scripts/ci.ps1 -Desktop` runs only the desktop tests (label
+`desktop`: real windows on this machine's desktop, opened without taking
+focus) on msvc-dev and msvc-asan. The legacy tree
 builds with the `legacy-msvc-debug` and `legacy-msvc-release` presets.

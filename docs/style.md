@@ -50,7 +50,28 @@ and thread, and a non-trivial one is destroyed at exit. Constants are
 `static const`, `constexpr` or `constinit`; a never-destroyed singleton is
 `static T* const kName = new T`. A single line can opt out with
 `// se-allow(<rule>): <reason>` (rules: throw, rtti, header, clock, random,
-math, static, catch).
+math, static, catch). The M4 rules below (thread, debugbreak, dump,
+dump_header, timer) have no opt-out.
+
+## Threads, debugging and platform headers (M4)
+
+Engine threads are named roles started with `se::StartThread` (se_os); no
+other engine module creates a thread (`std::thread`, `std::jthread`,
+`std::async`, `CreateThread`, `CreateRemoteThread`, `_beginthreadex`,
+`pthread_create`, the Win32 thread pool, `std::execution::par`; rule
+`thread`). Engine code never calls `DebugBreak`, `__debugbreak`,
+`__builtin_trap`, `__builtin_debugtrap` or `std::breakpoint*` (rule
+`debugbreak`), and never writes a dump in process (`MiniDumpWriteDump`,
+rule `dump`; `<dbghelp.h>`, rule `dump_header`): a fault aborts and
+crashpad writes the dump out of process. Nothing, tests included, calls
+`timeBeginPeriod`/`timeEndPeriod` (rule `timer`). None of these rules can
+be silenced with `se-allow`. Only se_log includes spdlog, and only se_os,
+se_crash, se_platform and se_render include `<windows.h>` (in any letter
+case) or the Win32 headers it gathers (`<winbase.h>`,
+`<processthreadsapi.h>`, ...). tools/checks/check_banned_api.py and
+check_includes.py enforce these, each with a planted fixture
+(`checks.planted.*`) of one file per form, every one of which must be
+caught.
 
 ## Tools
 

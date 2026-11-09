@@ -135,6 +135,9 @@ macro(_se_options_tracy)
   set(TRACY_ON_DEMAND ON CACHE BOOL "" FORCE)
   set(TRACY_ONLY_LOCALHOST ON CACHE BOOL "" FORCE)
   set(TRACY_NO_BROADCAST ON CACHE BOOL "" FORCE)
+  # Nothing starts before profile::Start() (ADR-029); crashpad owns crashes.
+  set(TRACY_MANUAL_LIFETIME ON CACHE BOOL "" FORCE)
+  set(TRACY_NO_CRASH_HANDLER ON CACHE BOOL "" FORCE)
 endmacro()
 macro(_se_options_sentry)
   set(SENTRY_BACKEND crashpad CACHE STRING "" FORCE)
@@ -159,7 +162,25 @@ macro(_se_options_sdl3)
   set(SDL_TESTS OFF CACHE BOOL "" FORCE)
   set(SDL_EXAMPLES OFF CACHE BOOL "" FORCE)
   set(SDL_INSTALL OFF CACHE BOOL "" FORCE)
+  # Linux without window-system packages (the WSL presets, M5): SDL's dummy
+  # and offscreen video drivers only, and no system libraries SDL would look
+  # for. SE_SDL_WINDOW_SYSTEMS=ON restores SDL's own detection (M18).
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT SE_SDL_WINDOW_SYSTEMS)
+    foreach(_se_sdl_off X11 WAYLAND KMSDRM OPENGL OPENGLES RPI ROCKCHIP VIVANTE
+            IBUS DBUS LIBUDEV LIBURING HIDAPI_LIBUSB ALSA JACK PIPEWIRE
+            PULSEAUDIO SNDIO OSS)
+      set(SDL_${_se_sdl_off} OFF CACHE BOOL "" FORCE)
+    endforeach()
+    set(SDL_OFFSCREEN ON CACHE BOOL "" FORCE)
+    set(SDL_DUMMYVIDEO ON CACHE BOOL "" FORCE)
+    # SDL refuses to configure without X11 or Wayland unless told this is
+    # intended.
+    set(SDL_UNIX_CONSOLE_BUILD ON CACHE BOOL "" FORCE)
+  endif()
 endmacro()
+option(SE_SDL_WINDOW_SYSTEMS
+  "Linux: let SDL3 build its X11, Wayland and KMSDRM drivers (needs their dev packages)"
+  OFF)
 macro(_se_options_imgui)
 endmacro()
 

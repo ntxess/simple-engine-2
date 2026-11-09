@@ -9,9 +9,15 @@
 // type-checked but generates no code. Each line carries the thread role and
 // the sim tick from the thread's breadcrumb.
 //
-// M2 writes synchronously to stderr. M4 replaces the backend with per-thread
-// rings and a log worker without touching call sites. SE_LOG_FATAL logs,
-// flushes and aborts; it is never stripped.
+// Backend (M4). While a log consumer (se_log's LogWorker) is attached, each
+// record goes into the calling thread's LogRing (se_core/log_ring.h; the
+// thread's ThreadRegistry slot, or the shared library ring for threads
+// without one) and the worker writes it; a full ring drops the record and
+// counts it, so logging never waits. Without a consumer (tests, tools,
+// before boot finishes, after shutdown) records are written synchronously
+// to stderr, or to the sink a test installs. SE_LOG_FATAL logs, has the
+// worker flush its sinks (or writes to stderr itself), and aborts; it is
+// never stripped.
 
 #ifndef SE_CORE_LOG_H_
 #define SE_CORE_LOG_H_
@@ -45,8 +51,9 @@ enum class LogLevel : std::uint8_t {
 #endif
 inline constexpr int kLogMinLevel = SE_LOG_MIN_LEVEL;
 
-// The longest message kept; longer messages are truncated.
-inline constexpr std::size_t kLogMaxMessage = 480;
+// The longest message kept (LogRecord::message); longer messages are
+// truncated.
+inline constexpr std::size_t kLogMaxMessage = 448;
 
 // Sets the run-time threshold (default kInfo).
 void SetLogLevel(LogLevel level) noexcept;
@@ -64,6 +71,58 @@ void LogWrite(LogLevel level, const char* file, int line,
 
 // Flushes, then aborts the process (SE_LOG_FATAL).
 [[noreturn]] void LogFatalAbort() noexcept;
+
+// Writes one formatted line (without its newline) where synchronous lines
+// go: the sink a test installed, or stderr. The log worker's console sink
+// writes through it, so a test's sink receives the lines with or without
+// a worker.
+void WriteConsoleLine(LogLevel level, std::string_view line);
+
+// Has the attached consumer write and flush every record pushed so far,
+// waiting at most |timeout_ns| (the watchdog's shutdown deadline, before it
+// ends the process); without one, flushes stderr. Returns false when the
+// flush did not finish in time, or cannot be done from the calling thread
+// (a thread without a ring of its own, or the consumer's own thread).
+bool FlushLog(std::uint64_t timeout_ns) noexcept;
+
+// The origin of the log's time column: ProfileNowNs() when it was first
+// read.
+[[nodiscard]] std::uint64_t LogEpochNs() noexcept;
+
+// The receiver of ring records: the log worker (se_log). The front end calls
+// OnRecordPushed after each push into a ring, from the pushing thread, and
+// Flush from SE_LOG_FATAL.
+class LogConsumer {
+ public:
+  // A record was pushed (any thread; must not block).
+  virtual void OnRecordPushed() noexcept = 0;
+  // Writes every record pushed so far and flushes the sinks; returns false
+  // when that did not finish within |timeout_ns| or cannot be done from the
+  // calling thread.
+  virtual bool Flush(std::uint64_t timeout_ns) noexcept = 0;
+
+  virtual ~LogConsumer() = default;
+
+ protected:
+  LogConsumer() = default;
+  LogConsumer(const LogConsumer&) = default;
+  LogConsumer& operator=(const LogConsumer&) = default;
+};
+
+// Routes records to |consumer|'s rings from now on. Returns false when
+// another consumer is attached.
+[[nodiscard]] bool AttachLogConsumer(LogConsumer* consumer) noexcept;
+
+// Returns the front end to the synchronous path. When it returns, no thread
+// is writing a ring record or using |consumer| any more: it waits for every
+// write in progress, without a deadline (ADR-045), so the consumer can
+// drain the rings a last time and then be destroyed. The consumer must
+// keep serving Flush until it returns (a flush in progress holds its
+// writer's mark), and the caller must not hold a write mark itself.
+void DetachLogConsumer(LogConsumer* consumer) noexcept;
+
+// True while a consumer is attached.
+[[nodiscard]] bool LogConsumerAttached() noexcept;
 
 // Formats into a fixed buffer (no allocation) and writes the message.
 // Formatting can throw std::format_error for invalid dynamic arguments (a
