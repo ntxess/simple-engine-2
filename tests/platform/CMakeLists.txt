@@ -20,14 +20,21 @@ file(MAKE_DIRECTORY "${_se_platform_out}")
 se_add_module(se_platform_test_support KIND STATIC
   SOURCES
     support/callback_loop.cc
+    support/test_app.cc
   PUBLIC_DEPS
     se_platform
+    se_runtime
+    se_sim
   TEST)
 target_include_directories(se_platform_test_support PUBLIC
   "${CMAKE_SOURCE_DIR}/tests")
+target_compile_definitions(se_platform_test_support PRIVATE
+  SE_TEST_OUT_DIR="${_se_platform_out}")
 
 se_add_module(se_platform_tests KIND EXECUTABLE
   SOURCES
+    app_desktop_test.cc
+    callbacks_test.cc
     fs_test.cc
     gpu_test.cc
     inbox_test.cc
@@ -46,6 +53,9 @@ se_add_module(se_platform_tests KIND EXECUTABLE
     se_sim
     Catch2::Catch2WithMain
   TEST)
+if(WIN32)
+  target_link_libraries(se_platform_tests PRIVATE comctl32)
+endif()
 target_compile_definitions(se_platform_tests PRIVATE
   SE_TEST_OUT_DIR="${_se_platform_out}")
 

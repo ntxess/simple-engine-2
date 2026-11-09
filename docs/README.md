@@ -32,6 +32,7 @@ behaviour reference until every rule and editor operation is ported.
 | game_rampage | games/rampage | The legacy Sandbox's gameplay on the kernel: components, systems, scenes and prefabs (assets/), legacy scenarios, projections (M3) |
 | se_platform | engine/se_platform | SDL3 on the main thread: SDL's initialisation, the event filter and Inbox, WakeMain, the window and its Win32 subclass (Modal, session end, power), se::fs on SDL's filesystem API (M5) |
 | se_render | engine/se_render | The SDL_GPU device (D3D12 on Windows, Vulkan on Linux) and the frame transaction, clear-only until M7 (M5) |
+| se_runtime | engine/se_runtime | The App on SDL's main callbacks: boot steps, the frame, the lifecycle and two-phase quit state machines, BasicInputService, the noexcept callbacks (`SE_DEFINE_SDL_APP`) and the M4 integration hooks (M5) |
 | se_replay | tools/se_replay | Headless runs of a game module: per-tick hashes, replays, projections |
 | refcmp | tools/refcmp/refcmp.py | Compares two `.seproj` projections within the M3 tolerances (Python 3, stdlib only) |
 | se_bench | bench/se_bench | Benchmark suites and their Release gates (`bench.*`) |

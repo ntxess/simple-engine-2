@@ -424,3 +424,99 @@ across a save and reload, and here it also dropped the tick-1 contacts of
 event-driven sources. Leaving Moved out of the hash would only hide that
 difference, and a scene-level `moving` flag would say through a new key
 what the component registry already expresses.
+
+## ADR-036 The App runs headless for its callback tests (2026-11-08)
+
+**Decision.** AppConfig gains `--headless`: SDL starts with its dummy video
+driver, and boot steps 6 (window) and 7 (GPU device) do nothing; the frame
+plans and runs ticks but records nothing, and `--frames` counts iterates.
+The callback tests (AppQuit(NULL), throws injected in AppIterate and
+AppEvent, a failure at every boot step, the two-phase quit with providers,
+LOW_MEMORY and TERMINATING from an engine thread through the inbox) run the
+real App this way as unit tests, on Windows and under TSan and ASan in WSL.
+The windowed paths (Modal, NULL acquires, Suspended, session end, power,
+the boot-step sweep of the rampage executable) are desktop tests. AppConfig
+also gains `--no-activate` (the window is shown without focus, for tests),
+`--content-root`, `--pref-dir`, `--return-on-quit` (Release builds end the
+process after SDL_AppQuit otherwise) and `--log-level`; arguments after
+`--` go to the game. Test hooks (`--fail-init-step`, `--inject-throw
+iterate|event[:N]`, `--inject-null-acquire FROM:COUNT`) exist in every build
+but Release (SE_RUNTIME_TEST_HOOKS). The injected throw is a standard
+library one (`std::vector::at` past the end), so engine code still never
+writes `throw`.
+
+**Why.** The spec lists the callback tests apart from the desktop ones, and
+TSan exists only in WSL, which has no window system or Vulkan driver; a
+headless App lets the callbacks' fault paths and the quit drain run under
+the sanitizers instead of only on this desktop.
+
+## ADR-037 The M4 parts plug into se_runtime through one hooks file (2026-11-08)
+
+**Decision.** M5 builds se_runtime without se_os, se_log and se_crash (the
+M4 tracks build them in parallel). Every place they plug in is a function in
+`engine/se_runtime/include/se_runtime/integration.h`, marked
+`INTEGRATION(M4a)` or `INTEGRATION(M4b)`: EnterMainThread/LeaveMainThread
+(the main RoleScope, HighQoS), StartCrashCapture (boot step 1),
+RequestFaultDump (the callbacks' fault path), StartLogging (boot step 2),
+ReadCpuTopology (step 8), StartHelperThreads with the WatchdogInputs (step
+9: the iterate counter, Modal, Suspended and heartbeat atomics),
+HelperThreads::ArmWatchdog (after the first iterate), StartShutdownDeadline
+(when the quit drain ends), HelperThreads::Stop (shutdown steps 16 and 17),
+EngineThreadsRunning and ShutdownLoggingOnly. In M5 they keep M2's
+behaviour (RegisterMainThread, synchronous logging) and start no thread.
+se_runtime's link list gains se_os, se_log and se_crash at integration.
+
+**Why.** Three tracks edit in parallel; one file of documented no-ops makes
+the integration a fill-in rather than a search through the App.
+
+## ADR-038 Fault paths do not allocate; the window procedure is not a catch boundary (2026-11-08)
+
+**Decision.** Inside the noexcept callbacks' catch handlers, the exception
+text is copied into a fixed buffer and the message box text is assembled
+in one (ShowFaultMessage), so a fault caused by exhausted memory can still
+be reported. The Inbox is two fixed buffers of 64 events swapped at each
+take (the design's "mutex-guarded vector" without allocation in the filter,
+which runs on SDL's pushing thread). The window subclass procedure calls a
+WindowListener whose methods are noexcept and is not a fault boundary: an
+exception there ends the process through std::terminate (the crash handler
+records it from M4 on) instead of unwinding through the Windows modal
+loop. ADR-006's list of boundaries is unchanged.
+
+**Why.** The design forbids unwinding through SDL's C frames and the modal
+loop; std::terminate inside a noexcept frame is defined behaviour, a catch
+in the window procedure would have to invent a recovery the design does not
+have (the quit path runs from the callbacks).
+
+## ADR-039 M5's frame costs leave out the swapchain wait (2026-11-08)
+
+**Decision.** Until M6's pacer and M7's renderer measure them, the App
+feeds CostTracker each tick's cost and, as the non-tick cost R, the
+iterate's time minus the ticks and minus the whole frame transaction
+(command buffer, SDL_WaitForGPUSwapchain, acquire, submit); the GPU cost is
+unknown (NaN). The present mode is VSYNC, so the transaction includes the
+wait for a swapchain image.
+
+**Why.** Counted as CPU time, the VSYNC wait makes R about one period, k_95
+falls below k_rt and the stepper enters Overloaded after a second, running
+one tick per frame: at 60 Hz the game would run at half speed.
+
+## ADR-040 Lifecycle details the design leaves open (2026-11-08)
+
+**Decision.**
+- Suspended has two sources, the window (MINIMIZED, HIDDEN, OCCLUDED) and a
+  power suspend; each is cleared only by its own resume (RESTORED, SHOWN,
+  EXPOSED or MAXIMIZED, or the 10 Hz probe, for the window; power resume
+  for power). The probe renders only for a window suspension.
+- FocusLost iterates at the full rate and gameplay continues by default
+  (`LifecycleConfig::pause_on_focus_lost`); the design's 30 Hz present cap
+  belongs with the game's Pause state (M13). Focus is read from the window
+  at boot, so a window shown without focus (tests) starts in FocusLost.
+- QuitPending dominates the state shown; a draining quit iterates at 10 Hz
+  while nothing is visible and at the full rate otherwise.
+- WM_QUERYENDSESSION, WM_ENDSESSION and TERMINATING run the recovery hook
+  once and end the app at the next iterate without a drain, as the design's
+  Running -> ShuttingDown says, even if the session end is later cancelled.
+- `--frames N` counts presented frames (NULL acquires do not count).
+
+**Why.** The spec states the rules but not these interactions; each choice
+keeps a condition from being cleared by an unrelated event.
