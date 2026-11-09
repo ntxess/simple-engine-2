@@ -47,6 +47,7 @@
 #include "se_sim/replay.h"
 #include "se_sim/session_log.h"
 #include "se_sim/sim_driver.h"
+#include "src/game_hook.h"
 
 namespace se {
 
@@ -718,9 +719,14 @@ void App::LogProgress(std::uint64_t now_ns) {
               presented_frames_, lifecycle_.NullAcquires());
 }
 
-void App::Shutdown(SDL_AppResult result) {
+SDL_AppResult App::Shutdown(SDL_AppResult result) {
   SE_ASSERT_MAIN_THREAD();
-  if (setup_.on_shutdown) setup_.on_shutdown(*this, result);
+  if (setup_.on_shutdown) {
+    auto hook = [this, result] { setup_.on_shutdown(*this, result); };
+    if (!RunGameHook("GameSetup::on_shutdown", hook)) {
+      shutdown_faulted_ = true;
+    }
+  }
   SE_LOG_INFO(
       "shutdown ({}): {} iterates, {} presented frames, ran {} ticks "
       "(next tick {}), {} NULL acquires, {} inbox events",
@@ -728,11 +734,11 @@ void App::Shutdown(SDL_AppResult result) {
       presented_frames_, ticks_run_, NextTick(), lifecycle_.NullAcquires(),
       inbox_events_);
   Teardown();
+  return shutdown_faulted_ ? SDL_APP_FAILURE : result;
 }
 
 void App::Teardown() {
   if (torn_down_) return;
-  torn_down_ = true;
   lifecycle_.OnShutdownStarted();
   // Step 3: normally started when the quit drain ended.
   if (booted_ && !quit_.DeadlineStarted() && helpers_) {
@@ -741,12 +747,16 @@ void App::Teardown() {
   // Step 4: no more diverted events; the GPU finishes its work.
   if (filter_) filter_->Remove();
   if (gpu_) gpu_->WaitForIdle();
-  // Steps 5-6: every World, on main.
+  // Steps 5-6: every World, on main. A throwing OnExit leaves its state
+  // and the ones below it on the stack; destroying the GameRuntime destroys
+  // them (and their Worlds) without another OnExit.
   if (game_) {
-    {
+    auto clear = [this] {
+      AssertMainThread();
       const InlineOwnerScope owner(OnMainThread());
       game_->states.Clear();
-    }
+    };
+    if (!RunGameHook("GameState::OnExit", clear)) shutdown_faulted_ = true;
     game_.reset();
   }
   // Step 12: release the window from the device, destroy the device.
@@ -774,6 +784,7 @@ void App::Teardown() {
   // Crash capture stays until the process exits (integration.h).
   crash_.reset();
   lifecycle_.OnExited();
+  torn_down_ = true;
 }
 
 SDL_AppResult App::OnCallbackFault(std::string_view where,

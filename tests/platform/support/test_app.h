@@ -23,6 +23,10 @@ namespace se::testing {
 // A GameSetup for the test module; tests add hooks.
 [[nodiscard]] GameSetup TestGameSetup();
 
+// While set, the "play" state's OnExit throws std::runtime_error before it
+// destroys its World (the shutdown fault tests).
+void SetPlayExitThrows(bool throws);
+
 // Runs an App made from |setup| with |args| (plus the defaults above).
 // Returns what SDL_EnterAppMainCallbacks returns: 0 after SUCCESS, 1 after
 // FAILURE (a failed boot included).

@@ -10,6 +10,7 @@
 #include <expected>
 #include <memory>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -32,6 +33,11 @@
 namespace se::testing {
 namespace {
 
+bool& PlayExitThrows() {
+  static bool throws = false;
+  return throws;
+}
+
 class PlayState final : public GameState {
  public:
   explicit PlayState(const StateEnv& env) : env_(env) {}
@@ -47,6 +53,9 @@ class PlayState final : public GameState {
   }
 
   void OnExit() SE_REQUIRES(g_sim_owner) override {
+    if (PlayExitThrows()) {
+      throw std::runtime_error("GameState::OnExit test fault");
+    }
     worlds_[0] = nullptr;
     world_.reset();
   }
@@ -97,6 +106,8 @@ const GameModule& PlatformTestModule() {
   };
   return kModule;
 }
+
+void SetPlayExitThrows(bool throws) { PlayExitThrows() = throws; }
 
 GameSetup TestGameSetup() {
   GameSetup setup;

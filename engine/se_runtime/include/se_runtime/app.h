@@ -37,6 +37,9 @@
 // filter, SDL_WaitForGPUIdle, destroy the Worlds, release the device,
 // remove the subclass and destroy the window, SDL_QuitSubSystem, stop the
 // log worker (step 16), join the watchdog (step 17), stop the profiler.
+// Game code that runs during shutdown (GameSetup::on_shutdown and every
+// GameState::OnExit) has its throws contained: the fault is logged and
+// dumped and the remaining steps still run (ADR-044).
 //
 // Test builds add the M4 exit hooks: --crash-test after-ticks:N faults on
 // main right after tick N; --dump-test after-ticks:N has the watchdog write
@@ -155,7 +158,9 @@ class App final : public WindowListener {
   // boundary).
   SDL_AppResult Iterate() SE_REQUIRES(g_main);
   SDL_AppResult HandleEvent(const SDL_Event& event) SE_REQUIRES(g_main);
-  void Shutdown(SDL_AppResult result) SE_REQUIRES(g_main);
+  // Runs the shutdown order. Returns |result|, or SDL_APP_FAILURE when a
+  // game hook faulted during shutdown (contained, ADR-044).
+  SDL_AppResult Shutdown(SDL_AppResult result) SE_REQUIRES(g_main);
   // A callback caught an exception: request a dump, tell the user (unless
   // SE_NO_MESSAGE_BOX=1), and return SDL_APP_FAILURE so SDL runs the quit
   // path.
@@ -263,7 +268,10 @@ class App final : public WindowListener {
   CallbackRate applied_rate_ = CallbackRate::kFull;
   bool quit_pending_seen_ = false;
   bool booted_ = false;
+  // Set when every teardown step has run; a teardown that a throw cut
+  // short runs its remaining (idempotent) steps again from ~App.
   bool torn_down_ = false;
+  bool shutdown_faulted_ = false;
   std::uint64_t iterates_ = 0;
   std::uint64_t events_ = 0;
   std::uint64_t inbox_events_ = 0;

@@ -2,9 +2,9 @@
 //
 // The SDL callbacks and the App, headless (no window, no GPU device), so
 // these run everywhere, under TSan and ASan in WSL too: AppQuit(NULL),
-// throws injected in AppIterate and AppEvent, a failure at every boot
-// step, the two-phase quit with providers, and immediate events from an
-// engine thread through the inbox.
+// throws injected in AppIterate and AppEvent, throws from game code during
+// shutdown, a failure at every boot step, the two-phase quit with
+// providers, and immediate events from an engine thread through the inbox.
 
 #include <SDL3/SDL_events.h>
 #include <SDL3/SDL_init.h>
@@ -12,6 +12,7 @@
 #include <atomic>
 #include <catch2/catch_test_macros.hpp>
 #include <cstdint>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -153,6 +154,44 @@ TEST_CASE("A throw in SDL_AppEvent reaches the catch-all and quits",
   REQUIRE(observed.shutdowns == 1);
   CHECK(observed.shutdown_result == SDL_APP_FAILURE);
   CHECK(Logged("fault in SDL_AppEvent"));
+}
+
+// A throw from game code while the App shuts down is contained: the
+// remaining steps run, so the log worker writes the fault and stops and no
+// engine thread is left (before ADR-044, ~App ran after main's role had
+// ended and aborted on its main-thread check).
+void RequireCleanShutdownAfterFault(std::string_view where) {
+  CHECK(Logged("fault in " + std::string(where)));
+  CHECK(Logged("test fault"));
+  CHECK(Logged("shutdown (success)"));
+  REQUIRE(integration::EngineThreadsRunning() == 0);
+  REQUIRE(SDL_WasInit(0) == 0);
+}
+
+TEST_CASE("A throw from GameSetup::on_shutdown is contained", "[callbacks]") {
+  const LogCapture log;
+  int shutdowns = 0;
+  GameSetup setup = TestGameSetup();
+  setup.on_shutdown = [&shutdowns](App& /*app*/, SDL_AppResult /*result*/) {
+    ++shutdowns;
+    throw std::runtime_error("on_shutdown test fault");
+  };
+  // SDL's exit code comes from the last iterate (SUCCESS); Release builds
+  // that end the process themselves exit with 1 after a shutdown fault.
+  REQUIRE(RunTestApp(std::move(setup), {"--headless", "--frames", "3"}) == 0);
+  REQUIRE(shutdowns == 1);
+  RequireCleanShutdownAfterFault("GameSetup::on_shutdown");
+}
+
+TEST_CASE("A throw from GameState::OnExit at shutdown is contained",
+          "[callbacks]") {
+  const LogCapture log;
+  testing::SetPlayExitThrows(true);
+  const int result =
+      RunTestApp(TestGameSetup(), {"--headless", "--frames", "3"});
+  testing::SetPlayExitThrows(false);
+  REQUIRE(result == 0);
+  RequireCleanShutdownAfterFault("GameState::OnExit");
 }
 
 TEST_CASE("A failure at each boot step leaves nothing behind", "[callbacks]") {

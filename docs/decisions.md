@@ -831,6 +831,35 @@ and main never waits on it; a queue main fills and a semaphore it releases
 keep both true. Declaring hangs needs M12's GPU and compositor labels, so
 M4 gives the interface and the boot budget only, as the spec asks.
 
+## ADR-044 Game code run during shutdown is contained (2026-11-09)
+
+**Decision.** The game hooks that run inside the App's teardown,
+`GameSetup::on_shutdown` and every `GameState::OnExit` (from
+`GameStateStack::Clear` at shutdown steps 5-6), go through `RunGameHook`
+(engine/se_runtime/src/game_hook.h). It is defined in sdl_app.cc, the SDL
+callbacks' fault boundary, because the teardown only ever runs inside an
+SDL callback (SDL_AppQuit, or SDL_AppInit undoing a failed boot), so
+ADR-006's list of boundary files is unchanged. A throw is logged
+("fault in GameSetup::on_shutdown: ..."), a dump is requested, and the
+remaining steps run, so logging still drains and stops (step 16) and the
+watchdog still stops (step 17). No message box is shown: the shutdown
+deadline is already running. A state whose OnExit throws stays on the
+stack with the ones below it; destroying the GameRuntime destroys them and
+their Worlds without another OnExit. `App::Shutdown` now returns the result
+the process ends with, SDL_APP_FAILURE after such a fault (the exit code of
+Release builds, which end the process themselves; elsewhere SDL has
+already fixed the exit code from the last iterate). SdlAppQuit destroys the
+App before main's RoleScope ends on every path, and `App::Teardown` marks
+itself done only after its last step, so a teardown that an engine-side
+throw cut short runs its remaining (idempotent) steps from ~App instead of
+leaving the log worker, the watchdog, the device, the window and SDL
+alive.
+
+**Why.** A throwing hook used to skip the rest of the teardown and leave
+the App to be destroyed after LeaveMainThread, where ~App's main-thread
+assertion aborted (Debug and Dev), or the Release process ended with the
+log worker undrained, so the fault's own records could miss the log file.
+
 ## ADR-045 The log consumer is detached without a deadline, and attached after its thread starts (2026-11-09)
 
 **Decision.** `DetachLogConsumer` waits for every ring write mark in

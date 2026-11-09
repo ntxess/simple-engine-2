@@ -25,6 +25,8 @@ se_add_module(se_runtime KIND STATIC
     se_render
   FORBID
     se_imgui miniaudio sentry lz4_static)
+# Internal headers are included as "src/<name>.h".
+target_include_directories(se_runtime PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 
 # Test hooks (--fail-init-step, --inject-throw, --inject-null-acquire) in
 # every build but Release.

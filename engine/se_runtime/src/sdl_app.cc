@@ -4,6 +4,8 @@
 // noexcept and catches everything, so a standard-library, EnTT or glaze
 // throw never unwinds through SDL's C frames or the Windows modal loop. A
 // caught fault requests a dump, tells the user and runs the quit path.
+// RunGameHook (src/game_hook.h) contains the game code the App's teardown
+// runs inside these callbacks (ADR-044).
 
 #include "se_runtime/sdl_app.h"
 
@@ -28,6 +30,7 @@
 #include "se_runtime/app.h"
 #include "se_runtime/app_config.h"
 #include "se_runtime/integration.h"
+#include "src/game_hook.h"
 
 namespace se {
 namespace {
@@ -97,6 +100,19 @@ void ReportBootFailure(const Error& error) noexcept {
 
 }  // namespace
 
+bool RunGameHook(std::string_view where, GameHookBody body,
+                 void* context) noexcept {
+  try {
+    body(context);
+    return true;
+  } catch (...) {
+    ExceptionText buffer;
+    LogFault(where, CurrentExceptionText(buffer));
+    integration::RequestFaultDump(where);
+    return false;
+  }
+}
+
 void SetTerminateOnQuit(bool terminate) noexcept {
   g_terminate_on_quit.store(terminate);
 }
@@ -164,8 +180,7 @@ void SdlAppQuit(void* appstate, SDL_AppResult result) noexcept {
   try {
     AssertMainThread();
     if (app) {
-      app->Shutdown(result);
-      app.reset();
+      result = app->Shutdown(result);
     } else {
       SE_LOG_INFO(
           "SDL_AppQuit without an app (boot failed): {} engine threads "
@@ -176,7 +191,12 @@ void SdlAppQuit(void* appstate, SDL_AppResult result) noexcept {
   } catch (...) {
     ExceptionText buffer;
     Report("SDL_AppQuit", CurrentExceptionText(buffer));
+    result = SDL_APP_FAILURE;
   }
+  // On every path the App is gone before main's role ends: ~App asserts
+  // the main thread and runs whatever teardown steps a throw skipped, so
+  // the log worker and the watchdog always stop (steps 16 and 17).
+  app.reset();
   integration::LeaveMainThread();
   if (g_terminate_on_quit.load()) {
     // Release builds skip CRT and DLL teardown, which have no deadline.
