@@ -68,6 +68,9 @@ endfunction()
 se_bench_suite(renderlist_10k
   SOURCES suites/renderlist_10k.cc
   DEPS se_render_core)
+se_bench_suite(rampage_tick_5k
+  SOURCES suites/rampage_tick_5k.cc
+  DEPS game_rampage)
 
 add_test(NAME se_bench.list COMMAND se_bench --list)
 set_tests_properties(se_bench.list PROPERTIES
