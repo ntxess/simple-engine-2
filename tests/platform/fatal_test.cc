@@ -12,6 +12,7 @@
 #include <SDL3/SDL_stdinc.h>
 
 #include <catch2/catch_test_macros.hpp>
+#include <csignal>
 
 namespace se {
 namespace {
@@ -37,6 +38,9 @@ TEST_CASE("SE_NO_MESSAGE_BOX=1 replaces SDL's assertion dialog", "[fatal]") {
 }
 
 TEST_CASE("A failed SDL assertion prints and aborts", "[.sdl_assertion]") {
+  // The abort ends the process as it would outside the test (Catch2's
+  // own SIGABRT report allocates in the handler, which TSan reports).
+  static_cast<void>(std::signal(SIGABRT, SIG_DFL));
   // Not a constant: the compiler would warn about the macro's loop.
   volatile bool holds = false;
   SDL_assert_release(holds);

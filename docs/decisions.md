@@ -1908,8 +1908,12 @@ the unpatched test preset excludes the desktop label.
 - Tests: `platform.Test executables never show SDL's assertion dialog`,
   `platform.SE_NO_MESSAGE_BOX=1 replaces SDL's assertion dialog`, and
   `platform.sdl_assertion_aborts`, which runs a hidden case that fails an
-  SDL_assert_release and passes only on the printed line (a dialog would
-  run into the timeout).
+  SDL_assert_release through tests/platform/run_app.py (`--expect-abort`:
+  the process must end in abort(), exit status 3 on Windows or SIGABRT
+  elsewhere, having printed the line; a dialog would run into the
+  timeout). The case restores SIGABRT's default action first, since
+  Catch2's own report allocates inside the signal handler, which TSan
+  flags.
 - `scripts/ci.ps1 -Desktop` (and so -Milestone) also builds
   msvc-unpatched-dev and runs `ctest -L desktop -R
   pacing[.]unpatched_standard --no-tests=error` there.

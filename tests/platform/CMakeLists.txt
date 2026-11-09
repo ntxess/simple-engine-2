@@ -81,12 +81,15 @@ catch_discover_tests(se_platform_tests
     TIMEOUT 60)
 
 # A failed SDL assertion prints and aborts, never opening SDL's dialog
-# (ADR-070): with a dialog the test would hang until its timeout.
+# (ADR-070): with a dialog the test would hang until its timeout. CTest
+# counts a signal as a failure whatever the output, so run_app.py checks
+# the abort and the printed line.
 add_test(NAME platform.sdl_assertion_aborts
-  COMMAND se_platform_tests "[.sdl_assertion]")
+  COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/run_app.py"
+          --expect-abort --expect "SDL assertion failed: 'holds'"
+          --timeout 30 -- $<TARGET_FILE:se_platform_tests> "[.sdl_assertion]")
 set_tests_properties(platform.sdl_assertion_aborts PROPERTIES
-  LABELS unit TIMEOUT 30
-  PASS_REGULAR_EXPRESSION "SDL assertion failed: 'holds'")
+  LABELS unit TIMEOUT 60)
 
 # The rampage executable (label desktop): it runs the sandbox for 300
 # presented frames and quits through the two-phase quit, and a failure at
