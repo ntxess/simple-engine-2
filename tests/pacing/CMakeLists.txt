@@ -2,7 +2,8 @@
 # "pacing."):
 #
 #   se_pacing_tests   Catch2. PacerPolicy (pure: the mode, the period, the
-#                     paced wake, misses, HalfRate, latency): label unit,
+#                     paced wake, misses, HalfRate, latency) and the vblank
+#                     sampler's loop on a fake vblank source: label unit,
 #                     everywhere, TSan included.
 #
 # Like tests/platform, the binary links the real WakeMain() through
@@ -11,6 +12,7 @@
 se_add_module(se_pacing_tests KIND EXECUTABLE
   SOURCES
     pacer_policy_test.cc
+    vblank_sampler_test.cc
     ../support/tracy_inert_listener.cc
   PRIVATE_DEPS
     se_core
