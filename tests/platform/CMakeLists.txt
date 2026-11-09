@@ -31,6 +31,9 @@ se_add_module(se_platform_tests KIND EXECUTABLE
     fs_test.cc
     gpu_test.cc
     inbox_test.cc
+    lifecycle_test.cc
+    quit_test.cc
+    runtime_test.cc
     sdl_context_test.cc
     wake_test.cc
     window_test.cc
@@ -39,6 +42,8 @@ se_add_module(se_platform_tests KIND EXECUTABLE
     se_platform
     se_platform_test_support
     se_render
+    se_runtime
+    se_sim
     Catch2::Catch2WithMain
   TEST)
 target_compile_definitions(se_platform_tests PRIVATE
