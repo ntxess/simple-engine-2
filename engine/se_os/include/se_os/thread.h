@@ -62,7 +62,7 @@ enum class Qos : std::uint8_t {
 // ids on Windows, CPU numbers on Linux, as CpuTopology reports them. An
 // empty request leaves the thread's placement alone.
 struct CpuSetRequest {
-  std::vector<std::uint32_t> os_ids;
+  std::vector<std::uint32_t> os_ids{};
 
   [[nodiscard]] bool Empty() const noexcept { return os_ids.empty(); }
 };
@@ -71,9 +71,9 @@ struct ThreadSpec {
   ThreadRole role = ThreadRole::kLibrary;
   // Shown by debuggers, profilers and the logs; at most kThreadNameSize
   // characters are kept (15 for the Linux OS name).
-  std::string_view name;
+  std::string_view name{};
   Qos qos = Qos::kDefault;
-  CpuSetRequest cpus;
+  CpuSetRequest cpus{};
 };
 
 // Gives the calling thread its role for the lifetime of the scope (see the

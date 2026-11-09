@@ -3,5 +3,6 @@
 
 add_subdirectory(se_core)
 add_subdirectory(se_os)
+add_subdirectory(se_log)
 add_subdirectory(se_sim)
 add_subdirectory(se_render_core)

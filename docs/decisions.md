@@ -511,3 +511,39 @@ would lag exactly when it matters. `std::atomic_ref` over plain structs
 keeps the layout checkable with `offsetof` and the accesses race-free under
 TSan. Binding the existing Breadcrumb rather than replacing it leaves every
 M2 call site (the Schedule, ForkScope, the tests) unchanged.
+
+## ADR-032 The log backend: rings, a consumer, and ordered output (2026-11-08)
+
+**Decision.** The SE_LOG_* front end (se_core/log.h; call sites unchanged)
+writes a LogRecord into the calling thread's LogRing while a `LogConsumer`
+is attached (`AttachLogConsumer`; se_log's LogWorker is the only one), and
+writes synchronously in the M2 format, `[I t=12 main] message (file:line)`,
+otherwise. Details the spec leaves open:
+- Ordering. A producer marks its ring before it stamps a record
+  (`LogRing::BeginWrite`) and clears the mark after the push. Each wake the
+  worker writes only the records older than every mark in progress and
+  holds the rest for the next wake, so lines from different threads come
+  out in (timestamp, sequence) order across wakes, not only within one.
+  Stop and the fatal flush write everything.
+- Detach. `DetachLogConsumer` clears the consumer and then waits (at most
+  1 s) for marks in progress; a producer checks the consumer after setting
+  its mark, so every record is either in a ring the worker drains a last
+  time or written synchronously, never lost.
+- The main thread without a slot (it normally has slot 0) uses the library
+  ring only through try_lock, and counts a drop when the lock is busy.
+- SE_LOG_FATAL pushes the record and asks the consumer to flush while the
+  mark is held (so the worker cannot be detached meanwhile); the worker
+  writes everything and flushes its sinks; the caller waits up to 2 s. If
+  the record was dropped, the flush timed out, or the fatal call is on the
+  worker itself, the synchronous line goes to stderr before the abort.
+- `LogConfig` adds `wake_on_push` (default on) so tests can let a ring fill
+  up, and `rate_limit_per_second = 0` turns the rate limit off. The time
+  column counts from `LogEpochNs()`, the first time it was read (LogWorker
+  Start reads it).
+- `kLogMaxMessage` is 448, the record's message field, as the dump layout
+  requires; longer messages are still truncated, not dropped.
+
+**Why.** The design requires that nothing blocks a producer and that the
+rings double as the crash tail; the watermark keeps the file's order
+meaningful without making producers wait for the worker, and the mark is
+the same mechanism Stop needs to drain without losing records.
