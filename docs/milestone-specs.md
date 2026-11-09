@@ -1,4 +1,4 @@
-# Milestone specs: M1 (legacy reference), M2 (headless kernel), M3 (gameplay port)
+# Milestone specs: M1 to M5
 
 Detailed specs for the first milestones after M0. The milestone table and the
 exit criteria are in docs/implementation-plan.md; the design is in
@@ -409,3 +409,445 @@ depends on se_core. Rendering never writes simulation state.
   - the legacy presets;
   - WSL linux-clang-debug, -asan and -tsan, with linux-clang goldens for
     every new golden.
+
+## M4 Thread roles, contract checks and crash capture (design build step 2)
+
+Design sources: docs/design/mt-design.md "Threads" (log worker, watchdog,
+library-owned threads), "Determinism And Debugging" (crash and hang capture,
+tooling), "Failure Handling", "Platform" (DbgHelp, QoS, spdlog), the API
+sketch, and build step 2. M2 already provides `thread_role.h` (g_main,
+g_sim_owner, ThreadRole, RegisterMainThread, SetCurrentRole), `breadcrumb.h`
+(the packed word), the `SE_LOG_*` front end (`log.h`) and the schedule's
+per-system breadcrumbs. M4 builds the rest without touching log call sites.
+
+M4 runs as two tracks, M4a (threads and logs) and M4b (crash capture), plus
+the integration step that wires them to each other and to M5.
+
+### Dump stream layout (the contract between M4a and M4b)
+
+Every memory region registered as a dump stream starts with this header and
+is followed by `capacity` records of `record_size` bytes, all in one
+contiguous allocation that is never freed. Little-endian, natural alignment.
+The producer's live counters are the header fields themselves, so a dump
+shows the real state. M4a defines it in `se_core/dump_stream.h`; M4b's probe
+and reader use the same layout (a local copy until integration).
+
+```
+struct DumpStreamHeader {      // 64 bytes
+  uint32_t magic;              // 0x31304553, "SE01"
+  uint16_t version;            // 1
+  uint16_t kind;               // 1 breadcrumbs, 2 log ring, 3 InputFrame
+                               // ring, 4 SessionLog tail, 5 flight recorder
+  uint32_t record_size;
+  uint32_t capacity;
+  uint64_t head;               // records written so far; the newest is
+                               // record (head - 1) % capacity
+  uint64_t dropped;
+  uint64_t os_thread_id;       // the producer, 0 when shared
+  uint8_t  role;               // ThreadRole of the producer
+  char     name[23];           // NUL-padded
+};
+struct BreadcrumbRecord {      // kind 1, one per ThreadRegistry slot, 64
+                               // bytes (one cache line, 64-aligned)
+  uint64_t packed;             // the thread's live Breadcrumb word
+  uint64_t os_thread_id;
+  uint8_t  role;
+  uint8_t  state;              // 0 free, 1 live, 2 exited
+  char     name[46];
+};
+struct LogRecord {             // kind 2, 512 bytes
+  uint64_t timestamp_ns;       // steady clock
+  uint64_t sequence;           // per process, for merging
+  uint32_t tick;
+  uint32_t line;
+  uint8_t  level;
+  uint8_t  role;
+  uint16_t length;             // message bytes used
+  char     file[36];           // basename, NUL-padded
+  char     message[448];       // not NUL-terminated; kLogMaxMessage = 448
+};
+struct InputFrameSlot {        // kind 3
+  uint64_t stamp;              // seqlock: odd while being written
+  InputFrame frame;            // carries its tick
+};
+```
+
+### M4a: threads, rings, the log worker, Tracy (engine/se_core, engine/se_os, engine/se_log)
+
+**New module se_os** (STATIC; not DETERMINISTIC; may include `<windows.h>` and
+POSIX headers; FORBID SDL3::SDL3-static se_imgui miniaudio sentry lz4_static;
+link-graph ALLOW_ONLY se_core). The headless OS layer that threads need on
+every platform, including the SDL-free WSL TSan build (ADR-029). It provides:
+- `thread.h`: `ThreadSpec{ThreadRole role; std::string_view name; Qos qos;
+  CpuSetRequest cpus;}`, `enum class Qos {kDefault, kHigh, kEco}`,
+  `StartThread(const ThreadSpec&, F&& body) -> std::expected<Thread, Error>`
+  (a `std::jthread` whose body runs inside a RoleScope; `Thread` joins in its
+  destructor and exposes `RequestStop()` / `StopToken()`), and `RoleScope`
+  for threads the engine did not start through StartThread (the main thread):
+  - sets the OS thread name (SetThreadDescription; pthread_setname_np, 15
+    characters), the role (SetCurrentRole), the breadcrumb role;
+  - takes a ThreadRegistry slot (below);
+  - applies QoS: on Windows SetThreadInformation(ThreadPowerThrottling):
+    kHigh = throttling explicitly off, kEco = on, kDefault = no override; on
+    Linux kEco lowers the nice value of the thread by 5 only if permitted
+    (failure is logged once, never an error);
+  - applies the CPU set (SetThreadSelectedCpuSets; pthread_setaffinity_np)
+    only when one is requested;
+  - names the thread for Tracy through the profile hook (below);
+  - restores what it changed in its destructor.
+- `cpu_topology.h`: `CpuTopology{logical, physical cores, per core:
+  efficiency class, last-level-cache id, SMT sibling ids}` read with
+  GetSystemCpuSetInformation (Windows) or /sys/devices/system/cpu (Linux), and
+  pure functions over it: `ForkPoolSize(topology)` = physical cores - 2,
+  homogeneous CPUs with 8 or more cores - 1, capped at 15, 0 below 3 physical
+  cores; `PerformanceOnlyCount(topology)` = P-cores on main's LLC - 1; the CPU
+  sets for main, workers and samplers (SMT siblings excluded). Tested with
+  synthetic topologies for the 7700X (8C/16T), a 4-core laptop, 2P+8E and
+  6P+8E: 7/2/8/12 and 7/2/1/5 as in the design's thread table.
+- `unbiased_clock.h`: `UnbiasedNowNs()` on QueryUnbiasedInterruptTimePrecise
+  (Windows) or CLOCK_MONOTONIC (Linux); both exclude system sleep.
+- `debugger.h`: `DebuggerAttached()` (IsDebuggerPresent; TracerPid in
+  /proc/self/status).
+- `process.h`: `ExecutableDir()` (GetModuleFileNameW; /proc/self/exe), needed
+  before SDL is initialised (the crash handler starts first).
+
+**se_core additions** (header-only where possible; std atomics only):
+- `spsc_ring.h`: `SpscRing<T>` for trivially copyable T, capacity a power of
+  two fixed at construction, one producer and one consumer, no allocation
+  after construction. `TryPush` fails when full and the caller counts the
+  drop; `TryPop`/`PopAll`. Cache-line separated head and tail.
+- `thread_registry.h`: a fixed table (64 slots) of per-thread records: role,
+  name (16 chars), OS thread id, breadcrumb, log ring, state (free, live,
+  exited). The table is one kind-1 dump stream, and each slot's Breadcrumb
+  is the `packed` word of its BreadcrumbRecord. A slot is taken at RoleScope
+  construction and released at its end; its log ring is allocated when the
+  slot is first used and never freed, so a crash dump can always read it. Registration takes a
+  mutex (thread start and exit only); readers (the log worker, dump code)
+  read published slots lock-free. The main thread's slot is slot 0.
+- `dump_stream.h`: the layout above.
+- `log_ring.h`: `LogRing`, one thread's SPSC ring of `LogRecord` laid out as
+  a dump stream (header.head is the producer index, header.dropped the drop
+  count). The last records
+  stay in the ring's memory after the worker consumes them (the crash tail).
+  Capacities: 4096 records on main, 1024 on every other thread; one shared
+  mutex-guarded ring for threads the engine did not start (library threads,
+  SDL's log callback), never used by main.
+- `log.cc`: the front end writes each record into the calling thread's ring
+  (thread-local pointer set by RoleScope; the shared library ring
+  otherwise) and wakes the worker if it is parked. Without a running worker
+  (tests, tools, before boot finishes, after shutdown) it writes
+  synchronously as today, so every existing test keeps its behaviour.
+  `SE_LOG_FATAL` writes the record, flushes synchronously to stderr and the
+  file sink, then aborts (the crash handler captures the rings).
+- `input_frame_ring.h`: `InputFrameRing`, a kind-3 dump stream of 7200
+  InputFrameSlots (60 s at 120 Hz) with a seqlock stamp per slot and the
+  header's head as the published head. Written
+  only by the World owner (SimDriver writes every latched frame when a ring
+  is attached; nothing changes when none is); read by the dump code and by a
+  test reader thread. The reader detects torn slots by the stamp.
+- `profile.h`: `SE_PROFILE_ZONE(name)`, `SE_PROFILE_FRAME()`,
+  `SE_PROFILE_FRAME_NAMED(name)`, `SE_PROFILE_PLOT(name, value)`,
+  `SE_PROFILE_MESSAGE(text)`, `SE_PROFILE_THREAD_NAME(name)`. They compile to
+  nothing unless `SE_TRACY` is on. With it on they use Tracy (TracyClient
+  linked from se_core; ADR-029 adds Tracy to se_core's allowed list), and
+  every one is inert until a runtime app starts the profiler (`--profile`):
+  tests, tools and benches never open a socket or start a Tracy thread. Pick
+  the Tracy defines that give this (for example TRACY_DELAYED_INIT and
+  TRACY_MANUAL_LIFETIME with a started flag checked by every macro), keep
+  TRACY_ON_DEMAND, TRACY_ONLY_LOCALHOST, TRACY_NO_BROADCAST, and set
+  TRACY_DBGHELP_LOCK. Instrument: a zone per schedule system and per fork,
+  FrameMarkNamed("tick") per tick in SimDriver, plots of ticks per frame,
+  k_max, debt and dilation in the stepper's caller. `SE_TRACY` is on in
+  msvc-dev, msvc-release and clangcl-dev and off in the debug, sanitizer and
+  Linux presets.
+
+**New module se_log** (STATIC; deps se_core, se_os, spdlog; ALLOW_ONLY those;
+the only module that includes spdlog, enforced by a banned-include rule).
+`LogWorker`:
+- `Start(LogConfig) -> std::expected<LogWorker, Error>` configures the spdlog
+  sinks before any other engine thread exists: a file sink (path from the
+  config; rotating, 5 MB x 3), stderr at a configurable level, and an
+  in-memory panel ring (last 2000 formatted lines, for M10's log panel, read
+  by main with try_lock). The sinks are used synchronously on the worker only.
+- Runs as role kLogWorker, default QoS. Wakes on a binary_semaphore released
+  by the first record pushed after it parks, or every 50 ms.
+- Each wake drains every registered ring and the library ring, merges the
+  records by (timestamp, sequence) and writes them. A full ring drops the new
+  record and counts it; the worker logs "N records dropped on <thread>" once
+  per wake when the count grew. A call site (file, line) that logs more than
+  50 records per second is cut to a summary line per second.
+- `Stop()` drains everything, flushes, and calls spdlog::shutdown() (which on
+  Windows must happen before main returns). The front end falls back to the
+  synchronous path from then on.
+- Line format: time, level, role, tick, file:line, message, for example
+  `12.345678 I main t=1440 schedule.cc:88 loaded 17 entities`.
+
+**Checks** (tools/checks, each with a planted violation and a CTest
+`checks.planted.*`):
+- raw thread creation (`std::thread`, `std::jthread`, `CreateThread`,
+  `_beginthreadex`, `pthread_create`) outside se_os: engine threads come from
+  StartThread;
+- `DebugBreak`, `__debugbreak`, `__builtin_trap` and in-process dump writing
+  (`MiniDumpWriteDump`, `dbghelp.h`) anywhere in engine code;
+- `timeBeginPeriod`/`timeEndPeriod` anywhere;
+- spdlog includes outside se_log; `<windows.h>` outside se_os, se_crash,
+  se_platform and se_render (extend the include scan).
+
+**Tests** (tests/os and tests/kernel additions; label unit unless stated):
+SpscRing property tests (two threads, a million items, each delivered exactly
+once and in order; full ring drops and counts) run under TSan; ThreadRegistry
+(slots reused, rings never freed, names and roles read back through
+GetThreadDescription / pthread_getname_np); RoleScope QoS and CPU-set calls
+succeed or fail softly; LogWorker (records from 4 threads come out in
+timestamp order, drop counts, rate limiting, Stop drains everything, the
+synchronous fallback before Start and after Stop, SE_LOG_FATAL flushes before
+abort as a death test); InputFrameRing (a reader thread never accepts a torn
+slot, under TSan); topology tables; Tracy inert in tests (the started flag
+stays false through the whole test run).
+
+### M4b: crash capture (engine/se_crash, tools/minidump)
+
+**New module se_crash** (STATIC; deps se_core, se_os, and the crashpad client
+from the pinned sentry-native archive built with SENTRY_BACKEND=crashpad and
+SENTRY_TRANSPORT=none; ALLOW_ONLY those). Nothing is ever uploaded: no DSN,
+no URL, uploads disabled in the crashpad database settings. Prefer crashpad's
+client API directly (CrashpadClient, CrashpadInfo,
+CrashReportDatabase) over sentry_init, because registered streams need
+CrashpadInfo::AddUserDataMinidumpStream, and record the choice in an ADR. The
+handler executable (crashpad_handler) is copied next to every executable that
+starts crash capture.
+- `Start(CrashConfig{database dir, handler path, annotations}) ->
+  std::expected<CrashGuard, Error>` starts the out-of-process handler. It is
+  the first boot step, before logging and SDL. Failure is an Error, never
+  fatal: the app runs without crash capture and logs why.
+- `RegisterStream(StreamType, const void* data, std::size_t size)`: a memory
+  region the handler reads at dump time, so dumps show live contents.
+  StreamType values are in a first-party range (0x53450001 and up, "SE").
+  The region must stay valid for the process lifetime (the thread registry's
+  rings and breadcrumbs are never freed for this reason).
+- `DumpWithoutCrash(std::string_view reason)`: callable from any thread; the
+  handler writes the dump out of process (the watchdog's hang dumps and the
+  callbacks' fault path use it). Returns after the handler has the dump.
+- No DbgHelp call in process, no in-process MiniDumpWriteDump, never
+  DebugBreak.
+- Fatal faults (access violation, abort, std::terminate, a stack overflow on
+  Windows) reach crashpad's handler. Install a terminate handler that records
+  the reason in an annotation first.
+- Each stream has a fixed header (magic, version, record size, count, head)
+  so a reader can decode it without the build: breadcrumb table, one log ring
+  per thread slot, the InputFrame ring, the SessionLog tail and the pacing
+  flight recorder (the last two are registered by later milestones; define
+  the stream types now).
+
+**tools/minidump/read_dump.py** (stdlib only): parses MINIDUMP_HEADER and the
+stream directory, lists threads and the exception record, and decodes the
+first-party streams (breadcrumbs with role, phase, system, chunk and tick;
+log records as text; InputFrame ring slots with their stamps). It is both a
+diagnostic tool and the test oracle.
+
+**Tests** (label crash; Windows, and Linux when crashpad runs in WSL; excluded
+from the sanitizer presets if the sanitizer runtime and crashpad's handler
+conflict, recorded in gates.md):
+- a probe executable `se_crash_probe` registers streams with known contents
+  (a breadcrumb table, a log ring with known records, an InputFrame ring with
+  known frames), then `--crash=access-violation|abort|terminate` or
+  `--dump-without-crash` (from a second thread, as the watchdog will);
+- a CTest driver runs it with a fresh database directory, waits for the
+  handler, finds the new dump, runs read_dump.py and checks: the exception
+  record (for crashes), the probe's threads, and every registered stream's
+  decoded contents;
+- the handler failing to start (missing executable) gives an Error and the
+  probe still runs;
+- planted: a file calling MiniDumpWriteDump fails the banned-API check.
+
+### Integration (M4a + M4b + M5)
+
+- Register the real streams: the ThreadRegistry's breadcrumb table and every
+  log ring (at slot allocation), and the InputFrame ring the App attaches to
+  SimDriver.
+- `Watchdog` skeleton (se_crash; role kWatchdog; started by the App in boot
+  order; a binary_semaphore with a 1 s timeout on the unbiased clock; joined
+  last). M4 gives it `RequestDump(reason)` (one dump per request, from the
+  watchdog thread) and reads main's iterate counter and the Suspended, Modal
+  and heartbeat flags into a pure `HangDetector` that M12 finishes (M4 only
+  needs its interface and the boot budget of 30 s; hang declaration stays off
+  until M12).
+- The M4 exit tests run against the real rings: a crash test in the rampage
+  executable (`--crash-test=after-ticks:240`) and a watchdog-requested dump
+  (`--dump-test=after-ticks:240`), both decoded with read_dump.py, show main's
+  breadcrumb at the tick, the log tail including a line logged just before,
+  and the InputFrame ring up to that tick.
+
+### Exit (M4)
+- CI fails on each planted violation (one test per new rule).
+- A crash test and a watchdog-requested hang dump, both written out of
+  process, show breadcrumbs, log rings and the InputFrame ring (Windows; Linux
+  in WSL, or a gates.md entry naming what blocks it).
+- SpscRing, InputFrameRing and LogWorker tests green under TSan.
+- Tracy builds with SE_TRACY on and is inert in every test.
+- Every existing test passes unchanged; no log call site changed.
+
+## M5 Platform loop on SDL main callbacks (design build step 3)
+
+Design sources: docs/design/mt-design.md "Threads" (main), "Data Flow"
+(events, the inbox), "Lifecycle" (Booting, Modal, FocusLost, Idle, Suspended,
+QuitPending, ShuttingDown, Exited), "Shutdown Order", "Failure Handling",
+"Platform", the API sketch (app.cpp) and build step 3; docs/design/
+costfree-end-state.md "Runtime and main loop". The SDL presentation patch
+and the FramePacer are M6; M5 presents with SDL's VSYNC present mode
+("Standard" without the waitable) and plans ticks from SDL's display mode.
+
+**New module se_platform** (STATIC; deps se_core, SDL3::SDL3-static; FORBID
+se_imgui miniaudio sentry lz4_static; may include `<windows.h>`). Every
+wrapper that calls an SDL video, event or window function asserts the main
+thread; `InitPlatform` cross-checks RegisterMainThread() against
+SDL_IsMainThread().
+- `sdl_context.h`: SDL_Init(VIDEO | GAMEPAD) with
+  SDL_HINT_AUTO_UPDATE_JOYSTICKS=0, SDL_SetLogOutputFunction routed to the
+  SE_LOG front end (any thread), RAII SDL_QuitSubSystem.
+- `inbox.h`: the event filter and `Inbox`. The filter runs on the pushing
+  thread before SDL's watchers; off main, the six immediate-dispatch event
+  types (TERMINATING, LOW_MEMORY, WILL_ENTER_BACKGROUND,
+  DID_ENTER_BACKGROUND, WILL_ENTER_FOREGROUND, DID_ENTER_FOREGROUND) are
+  copied into a mutex-guarded vector and dropped (return false), so SDL
+  never drains its queue on that thread. Main swaps the vector at iterate
+  start with try_lock (a failed try_lock leaves it for the next iterate) and
+  dispatches with no lock held, never calling SDL under the inbox lock. Lock
+  order: SDL's watch lock, then the inbox lock. Diverted events are counted.
+- `wake.h`: the real `se::WakeMain()` (replacing the null definition outside
+  tests): pushes one registered SDL user event, coalesced through an atomic
+  flag so at most one is pending. It is the only event engine code pushes.
+- `window.h`: `Window` (create from a WindowConfig: title, size, flags;
+  `activate_when_shown` false for tests so test windows never take focus),
+  its native handle, and on Windows a SetWindowSubclass procedure on main
+  that sets and clears an atomic Modal flag on WM_ENTERSIZEMOVE /
+  WM_EXITSIZEMOVE and WM_ENTERMENULOOP / WM_EXITMENULOOP, calls a session-end
+  hook synchronously on WM_QUERYENDSESSION (and WM_ENDSESSION), and reports
+  WM_POWERBROADCAST suspend and resume. The subclass is removed before the
+  window is destroyed. Linux: no subclass; Modal is never set.
+- `fs.h`: `se::fs` on SDL's filesystem API (no `<filesystem>`): base path
+  (content root), pref path, path join and normalisation, directory listing
+  (SDL_EnumerateDirectory or SDL_GlobDirectory), whole-file read and write
+  through SDL_IOStream, rename (SDL_RenamePath), remove, and
+  `WriteFileAtomic(path, bytes)` (unique temp name in the same directory,
+  flush, rename) for M9's lane and M10's recovery files. Errors are
+  std::expected with the path.
+
+**New module se_render (M5 part: device and the clear-only frame)** (STATIC;
+deps se_core, se_platform, se_render_core, SDL3). M7 grows it into
+Renderer2D.
+- `gpu_device.h`: SDL_CreateGPUDevice with DXIL and SPIR-V shader formats,
+  debug mode in Debug and Dev, driver "direct3d12" on Windows and "vulkan" on
+  Linux by default, `--gpu-driver` / SE_GPU_DRIVER to override; claims the
+  window with SDL_GPU_PRESENTMODE_VSYNC; asserts main in every call.
+- `frame_recorder.h`: the frame transaction, clear-only. Everything that can
+  fail or throw runs before the acquire (`Prepare`); then
+  SDL_WaitForGPUSwapchain and SDL_AcquireGPUSwapchainTexture (noexcept);
+  recording is noexcept (one render pass that clears to a colour); the
+  destructor always submits and never cancels after an acquire. A NULL
+  swapchain texture skips the present and is never a state change. A test
+  hook forces NULL acquires for N frames.
+
+**New module se_runtime** (STATIC; deps se_core, se_sim, se_os, se_log,
+se_crash, se_platform, se_render). The integration step adds the se_os,
+se_log and se_crash parts (RoleScope for main, log worker, crash handler,
+watchdog); the M5 track leaves documented hooks for them.
+- `app.h`: `App::Create(const AppConfig&, GameFactory) ->
+  std::expected<std::unique_ptr<App>, Error>`. Init steps in the design's
+  Booting order (crash handler, logging, SDL, event filter, content root and
+  pref path, window and subclass, GPU device and claim, CPU topology, helper
+  threads, GameModule registration and storages); each step's RAII undoes
+  it. `AppConfig` carries the command line: `--frames N` (exit after N
+  presented frames), `--fixed-frame-dt`, `--gpu-driver`, `--sim-driver`
+  (reserved for M17; only `inline` accepted), `--profile`, and in test
+  builds `--fail-init-step K` and the throw/NULL-acquire injections.
+- `sdl_app.h` and `SE_DEFINE_SDL_APP(factory)`: the four SDL callbacks for an
+  executable that defines SDL_MAIN_USE_CALLBACKS, in a file marked
+  `// se-fault-boundary`. All four are noexcept with a catch-all. AppInit
+  sets *appstate only after a complete init; AppQuit accepts NULL (then only
+  logging shuts down). A fault in a callback requests a dump (hook), shows a
+  message box (suppressed with SE_NO_MESSAGE_BOX=1, which tests set) and runs
+  the quit path; nothing unwinds through SDL's C frames.
+- `lifecycle.h`: a pure state machine, unit-tested without SDL. States:
+  Booting, Running, Modal, FocusLost, Idle, Suspended, QuitPending,
+  ShuttingDown, Exited (Overloaded, HalfRate, DeviceLost, Hung and the Play
+  states arrive with M6, M7, M10 and M12). Inputs: window events, the Modal
+  flag, power messages, input activity, quit requests, provider status.
+  Outputs: the callback rate (`SDL_HINT_MAIN_CALLBACK_RATE` "0" normally,
+  "waitevent" when Idle, "10" when Suspended), whether to render, whether
+  gameplay runs, whether to clear held input, frame-clock resets. Rules from
+  the design: Suspended only on MINIMIZED, HIDDEN or OCCLUDED or a power
+  suspend, never on a NULL acquire; leaving it resets the frame clock (no
+  catch-up); Idle only when the app allows it (the editor, M10) after 1 s
+  without input; FocusLost clears held input; Modal removes waits and is
+  never Overloaded (M6 consumes the flag).
+- `quit.h`: two-phase quit. QUIT, a window close or `App::RequestQuit()` set
+  quit_pending; callbacks keep returning CONTINUE while any QuitProvider
+  reports pending work (M9's Durable jobs and M10's prompt and dialogs plug
+  in here; M5 has a test provider); a provider can cancel the quit;
+  `ReadyToExit()` turns true only after the drain, and the shutdown deadline
+  starts then (the watchdog's, wired at integration). WM_QUERYENDSESSION and
+  TERMINATING call the synchronous recovery hook first.
+- The frame: drain the inbox, plan ticks with the M2 FixedStepper from a
+  FrameClock built from SDL's display mode and SDL_GetTicksNS, tick the
+  running Worlds through SimDriver::TickInline, record the clear-only frame,
+  present. A minimal `BasicInputService` builds InputFrames from held keys
+  per tick (M8 replaces it with timestamped edge placement).
+- Shutdown in the design's order, for the parts that exist: remove the event
+  filter, SDL_WaitForGPUIdle, destroy Worlds, release the device, remove the
+  subclass, destroy the window, SDL_QuitSubSystem, then the integration's
+  log worker stop and watchdog join; release builds terminate the process
+  after the final flush, other builds return.
+
+**rampage executable** (games/rampage/app; links se_runtime and
+game_rampage; no ImGui): runs the sandbox scene through game_rampage's
+GameModule at 120 Hz with the clear-only frame (M7 draws the sprites), the
+window title showing tick and state, `--frames N` for tests.
+
+**Platform on Linux:** the Linux presets build SDL3 without window-system
+development packages (dummy and offscreen video only) so that the inbox,
+wake, quit and lifecycle tests run under TSan and ASan in WSL. Window, GPU and
+desktop tests carry the labels desktop and gpu, already excluded there.
+
+**Tests** (tests/platform; labels unit, or desktop for anything with a
+window; desktop tests never move the real mouse or send real keystrokes, and
+open their windows without taking focus):
+- inbox: LOW_MEMORY and TERMINATING pushed from an engine thread while main
+  iterates reach main through the inbox; an SDL event watcher installed by
+  the test never runs on the pushing thread; regular events keep their order
+  (Windows and Linux, TSan);
+- WakeMain from another thread wakes a main thread blocked in waitevent;
+  coalescing (100 wakes, at most one pending event);
+- lifecycle and quit state machines: every transition above, including a
+  NULL acquire on a visible window (stays Running), a cancelled quit, a
+  provider that keeps the quit pending, and the deadline start;
+- callbacks: AppQuit(NULL); a throw injected in AppIterate and in AppEvent
+  reaches the catch-all and runs the quit path;
+- desktop: ticks continue during a modal move loop with Modal set (enter it
+  programmatically on main, for example WM_SYSCOMMAND SC_MOVE posted to the
+  window, and end it from a helper thread with a posted key or
+  WM_CANCELMODE; at least 100 ticks per second of modal time, the cap still
+  applied);
+- desktop: NULL acquires injected for 30 frames on a visible window never
+  enter Suspended, and presentation resumes within 2 frames after;
+- desktop: minimize gives Suspended at a callback rate of 10 with no frames
+  rendered and gameplay paused; restore resets the frame clock (no burst of
+  catch-up ticks);
+- desktop: WM_QUERYENDSESSION sent on main calls the recovery hook
+  synchronously; power suspend and resume enter and leave Suspended;
+- desktop, msvc-asan: `--fail-init-step K` for every init step exits with
+  SDL_APP_FAILURE, *appstate NULL, no thread left running, ASan clean;
+- desktop: `rampage --frames 300` exits 0 with ticks advancing.
+`scripts/ci.ps1 -Desktop` runs the desktop label on msvc-dev and msvc-asan;
+`-Milestone` includes it. Real-input variants (SendInput drags) are a
+gates.md entry.
+
+### Exit (M5)
+- A worker-pushed LOW_MEMORY reaches main without a queue drain on the
+  worker.
+- Ticks continue during a drag with Modal set.
+- NULL acquires on a visible window never suspend.
+- AppInit failure at each step is clean under ASan.
+- The rampage executable runs the sandbox in a window and quits cleanly
+  through the two-phase quit.
+- Full matrix green, including `-Desktop` and the WSL presets.
