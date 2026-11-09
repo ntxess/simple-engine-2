@@ -94,7 +94,9 @@
 #include "se_core/thread_safety.h"
 #include "se_core/time.h"
 #include "se_core/types.h"
+#include "se_platform/gamepads.h"
 #include "se_platform/inbox.h"
+#include "se_platform/input_sampler.h"
 #include "se_platform/sdl_context.h"
 #include "se_platform/wake.h"
 #include "se_platform/window.h"
@@ -246,6 +248,11 @@ class App final : public WindowListener {
     return stepper_;
   }
   [[nodiscard]] const FramePacer& Pacer() const noexcept { return pacer_; }
+  // The input sampler (from the first iterate to shutdown step 4), or
+  // nullptr.
+  [[nodiscard]] const InputSampler* Sampler() const noexcept {
+    return input_sampler_.get();
+  }
   // The settings file's contents (M8).
   [[nodiscard]] const UserSettings& Settings() const noexcept {
     return settings_;
@@ -329,6 +336,11 @@ class App final : public WindowListener {
   std::expected<void, Error> LoadSettings();
   void WriteReplay() SE_REQUIRES(g_main);
   void RunPushKeys(const FrameReport& report) SE_REQUIRES(g_main);
+  // The input sampler (M8): started at the first iterate, inside ADR-047's
+  // window; parked while Suspended or Idle; its rate from the power source
+  // every 5 s; stopped before shutdown step 4.
+  void StartInputSampler() SE_REQUIRES(g_main);
+  void UpdateInputSampler(std::uint64_t now_ns) SE_REQUIRES(g_main);
 
   AppConfig config_;
   GameSetup setup_;
@@ -352,6 +364,11 @@ class App final : public WindowListener {
   std::optional<integration::HelperThreads> helpers_;
   UserSettings settings_;
   std::unique_ptr<GameRuntime> game_;
+  // M8: gamepads are opened on main as SDL reports them; the sampler
+  // updates them.
+  Gamepads gamepads_;
+  std::unique_ptr<InputSampler> input_sampler_;
+  PowerWatch power_;
 
   Lifecycle lifecycle_;
   QuitController quit_;

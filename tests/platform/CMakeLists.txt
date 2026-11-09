@@ -34,11 +34,14 @@ target_compile_definitions(se_platform_test_support PRIVATE
 se_add_module(se_platform_tests KIND EXECUTABLE
   SOURCES
     app_desktop_test.cc
+    app_input_test.cc
     callbacks_test.cc
     fatal_test.cc
     fs_test.cc
     gpu_test.cc
+    gamepad_desktop_test.cc
     inbox_test.cc
+    input_sampler_test.cc
     input_test.cc
     lifecycle_test.cc
     quit_test.cc

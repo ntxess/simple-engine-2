@@ -36,7 +36,9 @@
 #include "se_platform/display_output.h"
 #include "se_platform/fatal.h"
 #include "se_platform/fs.h"
+#include "se_platform/gamepads.h"
 #include "se_platform/inbox.h"
+#include "se_platform/input_sampler.h"
 #include "se_platform/sdl_context.h"
 #include "se_platform/vblank_sampler.h"
 #include "se_platform/wake.h"
@@ -477,6 +479,35 @@ std::expected<void, Error> App::LoadSettings() {
   return {};
 }
 
+void App::StartInputSampler() {
+  if (input_sampler_ || !sdl_) return;
+  InputSamplerConfig sampler_config;
+  sampler_config.rate_hz = power_.Update(SDL_GetTicksNS())
+                               .value_or(SamplerRateFor(power_.OnBattery()));
+  auto sampler = InputSampler::Start(std::move(sampler_config));
+  if (!sampler) {
+    SE_LOG_WARN("no input sampler, gamepads are not updated: {}",
+                sampler.error().message);
+    return;
+  }
+  input_sampler_ = std::move(*sampler);
+  SE_LOG_INFO("input sampler: SDL_UpdateGamepads at {} Hz ({})",
+              input_sampler_->Stats().rate_hz,
+              power_.OnBattery() ? "on battery" : "on AC power");
+}
+
+void App::UpdateInputSampler(std::uint64_t now_ns) {
+  if (!input_sampler_) return;
+  // Parked while Suspended or Idle (an atomic doorbell; never blocks).
+  input_sampler_->SetParked(lifecycle_.Suspended() || lifecycle_.Idle());
+  // Main reads the power source every 5 s and publishes the rate.
+  if (const std::optional<std::uint32_t> rate = power_.Update(now_ns)) {
+    input_sampler_->SetRate(*rate);
+    SE_LOG_INFO("input sampler: {} Hz ({})", *rate,
+                power_.OnBattery() ? "on battery" : "on AC power");
+  }
+}
+
 void App::WriteReplay() {
   if (!game_ || !game_->recorder.Active()) return;
   game_->recorder.RecordSession(game_->session);
@@ -671,6 +702,15 @@ SDL_AppResult App::HandleEvent(const SDL_Event& event) {
     case SDL_EVENT_MOUSE_WHEEL:
     case SDL_EVENT_TEXT_INPUT:
       lifecycle_.OnInputActivity(now);
+      break;
+    case SDL_EVENT_GAMEPAD_ADDED:
+      // Open, so that SDL reports its buttons and axes (M8).
+      gamepads_.HandleEvent(event);
+      break;
+    case SDL_EVENT_GAMEPAD_REMOVED:
+      // Whatever it held is released first.
+      if (game_) game_->input.HandleEvent(event);
+      gamepads_.HandleEvent(event);
       break;
     default:
       break;
@@ -905,6 +945,8 @@ SDL_AppResult App::Iterate() {
     // SDL_AppInit has returned and SDL has added its own event watcher:
     // other threads may push the wake event from now on (ADR-047).
     if (wake_) wake_->Open();
+    // The input sampler pushes gamepad events: inside the same window.
+    StartInputSampler();
   }
   if (kRuntimeTestHooks && config_.throw_site == ThrowSite::kIterate &&
       static_cast<std::int64_t>(iterates_) == config_.throw_on_call) {
@@ -938,6 +980,7 @@ SDL_AppResult App::Iterate() {
   }
   suspended_flag_.store(lifecycle_.Suspended(), std::memory_order_release);
   modal_flag_.store(lifecycle_.Modal(), std::memory_order_release);
+  UpdateInputSampler(now);
 
   FrameReport report;
   report.iterate = iterates_;
@@ -1184,6 +1227,11 @@ SDL_AppResult App::Shutdown(SDL_AppResult result) {
         delay[0], delay[1], delay[2], delay[3], delay[4], check.offset,
         check.beyond);
   }
+  if (input_sampler_) {
+    const InputSamplerStats sampler = input_sampler_->Stats();
+    SE_LOG_INFO("input sampler at shutdown: {} polls at {} Hz, parked {} times",
+                sampler.polls, sampler.rate_hz, sampler.parks);
+  }
   if (device_recoveries_ > 0) {
     SE_LOG_INFO("device losses recovered: {}", device_recoveries_);
   }
@@ -1207,6 +1255,12 @@ void App::Teardown() {
   // Step 3: normally started when the quit drain ended.
   if (booted_ && !quit_.DeadlineStarted() && helpers_) {
     helpers_->StartShutdownDeadline();
+  }
+  // Before step 4: the input sampler, the other thread that pushes SDL
+  // events (ADR-047), joins within one period.
+  if (input_sampler_) {
+    input_sampler_->Stop();
+    input_sampler_.reset();
   }
   // Step 4: no more wake pushes from other threads (they read the watch
   // list the filter removal changes), no more diverted events; the GPU
@@ -1243,6 +1297,8 @@ void App::Teardown() {
   wake_.reset();
   filter_.reset();
   SDL_ResetHint(SDL_HINT_MAIN_CALLBACK_RATE);
+  // The open gamepads, before their subsystem goes.
+  gamepads_.CloseAll();
   // Step 15: SDL_QuitSubSystem(GAMEPAD | VIDEO).
   sdl_.reset();
   // Step 16: SDL's log output to stderr, then drain and stop the log

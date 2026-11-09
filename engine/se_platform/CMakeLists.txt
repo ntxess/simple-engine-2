@@ -4,6 +4,8 @@
 # include <windows.h>. SDL3 is the pinned static library, unpatched until M6.
 # M6b adds the display outputs (display_output.h) and the vblank sampler, an
 # se_os thread (role kVblankSampler) waiting on the window's DXGI output.
+# M8 adds the input sampler (role kInputSampler: SDL_UpdateGamepads at
+# 1 kHz, parked while the app is Suspended or Idle) and the open gamepads.
 
 se_use_deps(sdl3)
 
@@ -12,7 +14,9 @@ se_add_module(se_platform KIND STATIC
     src/display_output.cc
     src/fatal.cc
     src/fs.cc
+    src/gamepads.cc
     src/inbox.cc
+    src/input_sampler.cc
     src/sdl_context.cc
     src/vblank_sampler.cc
     src/wake.cc

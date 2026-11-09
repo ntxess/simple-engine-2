@@ -2109,3 +2109,48 @@ cleared releases keeps replays honest about where every stamp came from.
 means; failing the boot on an unknown name is the spec's rule, and a
 binding nobody declares is almost always a typo. Pad defaults belong to
 the game because only the game knows its actions.
+
+## ADR-075 The input sampler runs inside ADR-047's window; the App opens gamepads (2026-11-09)
+
+**Decision.**
+- `se::InputSampler` (se_platform/input_sampler.h) is one thread, role
+  kInputSampler, HighQoS, started with StartThread. Each period it calls
+  SDL_UpdateGamepads, then waits with SDL_DelayNS for the next point of a
+  grid of whole periods, early by the timer's measured overshoot (an
+  average of the last waits, at most half a period; measured here: a 1 ms
+  SDL_DelayNS wakes about 0.5 ms late, so a plain 1 ms wait polled at
+  about 670 Hz); it checks its stop token every period. A sampler that
+  fell behind, or one that was parked, restarts the grid. With SDL_HINT_AUTO_UPDATE_JOYSTICKS=0 nothing else
+  updates joysticks, so the sampler is also what makes SDL notice a
+  gamepad being plugged in.
+- Parking is an atomic doorbell: SetParked flips a flag and rings a
+  sequence number that the thread waits on with atomic::wait; the stop
+  callback rings it too, so Stop joins a parked thread at once. Main calls
+  SetParked every iterate with Suspended or Idle (a new
+  `Lifecycle::Idle()`), never blocking.
+- The rate: `PowerWatch` on main reads SDL_GetPowerInfo at most every 5 s
+  and publishes 1000 Hz on AC, 250 Hz on battery (SetRate, a relaxed
+  store; the next period uses it). Both numbers stay the design's
+  assumptions until the gates.md rows measure them.
+- ADR-047: SDL_UpdateGamepads pushes SDL events, so the App starts the
+  sampler in its first iterate, right after WakeEventScope::Open, and
+  stops and joins it at the start of shutdown step 4, before
+  WakeEventScope::Close and the filter's removal. The design's shutdown
+  order puts the input sampler at step 9; ADR-047's rule moves it before
+  step 4 (the spec says so too). It is an App member for now; the
+  integration may move it into integration::HelperThreads. It takes a
+  ThreadRegistry slot through StartThread, so EngineThreadsRunning counts
+  it and dumps show its breadcrumb.
+- SDL reports gamepad buttons and axes only for gamepads that are open, so
+  the App opens each one on SDL_EVENT_GAMEPAD_ADDED and closes it on
+  SDL_EVENT_GAMEPAD_REMOVED (se_platform/gamepads.h, main only), after
+  the InputService released what it held; the rest close before shutdown
+  step 15.
+- Tests: the sampler's loop with a fake poll and wait (park, unpark, stop
+  while parked or running, the rate, the role) runs everywhere, TSan
+  included; a desktop test drives an SDL virtual gamepad from a test
+  thread through the real sampler (gamepad_desktop_test.cc).
+
+**Why.** Starting the thread later than boot step 9 is the only way to keep
+its pushes inside the window ADR-047 found safe; parking with a doorbell
+keeps main from ever waiting on the sampler.
