@@ -9,13 +9,14 @@ Rules (docs/style.md and docs/decisions.md):
     - `catch` only in files marked `// se-fault-boundary`
     - no RTTI: dynamic_cast, typeid
     - no <filesystem>, <ratio>, <cfenv>, <fenv.h> (Google C++ style)
-    - no DebugBreak, __debugbreak or __builtin_trap: a fault aborts and the
-      crash handler writes the dump
+    - no DebugBreak, __debugbreak, __builtin_trap, __builtin_debugtrap or
+      std::breakpoint: a fault aborts and the crash handler writes the dump
     - no in-process dump writing: MiniDumpWriteDump, <dbghelp.h> (crashpad
       writes dumps out of process)
-    - no raw thread creation (std::thread, std::jthread, CreateThread,
-      _beginthreadex, pthread_create) outside se_os: engine threads come
-      from se::StartThread
+    - no raw thread creation (std::thread, std::jthread, std::async,
+      CreateThread, CreateRemoteThread, _beginthreadex, pthread_create, the
+      Win32 thread pool, the standard parallel execution policies) outside
+      se_os: engine threads come from se::StartThread
   deterministic (simulation) modules, additionally
     - no wall clocks: steady_clock, system_clock, high_resolution_clock,
       SDL_GetTicks
@@ -26,13 +27,16 @@ Rules (docs/style.md and docs/decisions.md):
       a non-trivial one is also destroyed at exit (Google C++ style); a
       never-destroyed singleton is `static T* const k = new T`
 
-A line may opt out of one rule with `// se-allow(<rule>): <reason>`.
-Test modules (kind "test") are exempt.
+A line may opt out of one rule with `// se-allow(<rule>): <reason>`, except
+for the rules the M4 spec states without exceptions (NO_OPT_OUT: thread,
+debugbreak, dump, dump_header, timer). Test modules (kind "test") are
+exempt from everything but the timer rule.
 
 usage:
   check_banned_api.py <build>/se_checks.json
   check_banned_api.py --planted <dir> [--expect RULE]
-      succeeds only if a violation (of RULE, when given) is found
+      succeeds only if a violation is found; with RULE, only if every
+      source file under <dir> violates RULE (one planted case per file)
 """
 
 import argparse
@@ -49,7 +53,9 @@ ENGINE_RULES = [
     ("throw", re.compile(r"\bthrow\b")),
     ("rtti", re.compile(r"\b(dynamic_cast|typeid)\b")),
     ("header", re.compile(r"#\s*include\s*<(filesystem|ratio|cfenv|fenv\.h)>")),
-    ("debugbreak", re.compile(r"\b(DebugBreak|__debugbreak|__builtin_trap)\b")),
+    ("debugbreak", re.compile(
+        r"\b(DebugBreak|__debugbreak|__builtin_trap|__builtin_debugtrap)\b"
+        r"|\bstd::breakpoint\w*")),
     ("dump", re.compile(r"\bMiniDumpWriteDump\b")),
     ("dump_header", re.compile(r"#\s*include\s*[<\"](?i:dbghelp\.h)[>\"]")),
 ]
@@ -58,13 +64,22 @@ ALL_RULES = [
     ("timer", re.compile(r"\btime(Begin|End)Period\b")),
 ]
 # Raw thread creation; std::thread::id and std::this_thread are fine.
+# std::async (any launch policy may start a thread), the Win32 thread pool
+# and the parallel execution policies start threads too.
 THREAD_RULE = ("thread", re.compile(
     r"\bstd::j?thread\b(?!\s*::)"
-    r"|\b(CreateThread|_beginthreadex|_beginthread|pthread_create)\s*\("))
+    r"|\bstd::async\b"
+    r"|\bstd::execution::(par|par_unseq)\b"
+    r"|\b(CreateThread|CreateRemoteThread\w*|_beginthreadex|_beginthread"
+    r"|pthread_create|QueueUserWorkItem|CreateThreadpool\w*"
+    r"|TrySubmitThreadpoolCallback)\s*\("))
 # The only module that may create threads (ADR-029).
 THREAD_MODULES = {"se_os"}
 # Rules matched on the raw line: stripping would drop the <...> of an include.
 RAW_RULES = {"header", "dump_header"}
+# Rules a `// se-allow(<rule>)` comment cannot silence: the spec bans these
+# without exceptions (the thread rule's only exception is the se_os module).
+NO_OPT_OUT = {"thread", "debugbreak", "dump", "dump_header", "timer"}
 DETERMINISM_RULES = [
     ("clock", re.compile(
         r"\b(steady_clock|system_clock|high_resolution_clock|SDL_GetTicks\w*)\b")),
@@ -137,13 +152,19 @@ def scan_file(path, rules, check_catch=True):
         code, in_block = strip_code(raw, in_block)
         for name, pattern in rules:
             subject = raw if name in RAW_RULES else code
-            if name not in allowed and pattern.search(subject):
+            opted_out = name in allowed and name not in NO_OPT_OUT
+            if not opted_out and pattern.search(subject):
                 found.append(f"{path}:{number}: banned ({name}): {raw.strip()}")
         if (check_catch and CATCH_RE.search(code) and not fault_boundary
                 and "catch" not in allowed):
             found.append(f"{path}:{number}: catch outside a file marked "
                          f"// {FAULT_BOUNDARY}: {raw.strip()}")
     return found
+
+
+def planted_files(root):
+    return [path for path in sorted(pathlib.Path(root).rglob("*"))
+            if path.suffix in SOURCE_SUFFIXES]
 
 
 def scan(root, rules, check_catch=True, include_planted=False):
@@ -170,15 +191,23 @@ def main():
         # determinism rules on, so every rule applies to it.
         found = scan(args.planted, rules_for("engine", True, "planted"),
                      include_planted=True)
+        missed = []
         if args.expect:
             found = [line for line in found
                      if f"banned ({args.expect})" in line]
+            # Each file is one planted case of the rule: every one must fire.
+            missed = [path for path in planted_files(args.planted)
+                      if not any(line.startswith(f"{path}:")
+                                 for line in found)]
         for line in found:
             print("planted (expected):", line)
+        for path in missed:
+            print(f"FAIL: {path}: the planted {args.expect} violation was "
+                  f"not detected")
         if not found:
             print("FAIL: the planted violation was not detected")
             return 1
-        return 0
+        return 1 if missed else 0
 
     config = json.loads(pathlib.Path(args.config).read_text(encoding="utf-8"))
     violations = []

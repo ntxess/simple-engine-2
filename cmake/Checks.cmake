@@ -188,17 +188,22 @@ function(se_register_checks)
     PROPERTIES LABELS checks)
   set_tests_properties(checks.planted.link_graph PROPERTIES LABELS checks
     PASS_REGULAR_EXPRESSION "Link-graph violations")
-  # M4a: one planted violation per thread, debugging and include rule; each
-  # test passes only if its own rule fires (--expect).
+  # M4a: one planted fixture per thread, debugging and include rule; each
+  # test passes only if its own rule fires in every file of the fixture
+  # (--expect). The dump_write fixture plants both dump rules.
   foreach(_pair raw_thread:thread debug_break:debugbreak dump_write:dump
-          time_period:timer)
+          dump_write:dump_header time_period:timer)
     string(REPLACE ":" ";" _pair "${_pair}")
     list(GET _pair 0 _fixture)
     list(GET _pair 1 _rule)
-    add_test(NAME checks.planted.${_fixture}
+    set(_name checks.planted.${_fixture})
+    if(_rule STREQUAL "dump_header")
+      set(_name checks.planted.dump_header)
+    endif()
+    add_test(NAME ${_name}
       COMMAND Python3::Interpreter "${_tools}/check_banned_api.py"
               --planted "${_planted}/${_fixture}" --expect ${_rule})
-    set_tests_properties(checks.planted.${_fixture} PROPERTIES LABELS checks)
+    set_tests_properties(${_name} PROPERTIES LABELS checks)
   endforeach()
   foreach(_pair spdlog_include:spdlog windows_include:windows)
     string(REPLACE ":" ";" _pair "${_pair}")

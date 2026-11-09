@@ -829,3 +829,24 @@ flush (se::FlushLog, 1 s) and ends the process with TerminateProcess
 and main never waits on it; a queue main fills and a semaphore it releases
 keep both true. Declaring hangs needs M12's GPU and compositor labels, so
 M4 gives the interface and the boot budget only, as the spec asks.
+
+## ADR-048 The M4 bans have no opt-out and cover more forms (2026-11-09)
+
+**Decision.** check_banned_api.py's rules thread, debugbreak, dump,
+dump_header and timer cannot be silenced with `// se-allow(<rule>)` (the
+thread rule's exception remains the se_os module). The thread rule also
+matches `std::async`, `std::execution::par` and `par_unseq`,
+`CreateRemoteThread*`, `QueueUserWorkItem`, `CreateThreadpool*` and
+`TrySubmitThreadpoolCallback`; the debugbreak rule matches
+`__builtin_debugtrap` and `std::breakpoint*`. check_includes.py's windows
+ban matches `<windows.h>` in any letter case and the Win32 headers it
+gathers (winbase.h, processthreadsapi.h, synchapi.h, ... ; the list is
+WIN32_HEADERS) outside se_os, se_crash, se_platform and se_render. With
+`--expect RULE`, a planted fixture passes only if every one of its files
+violates RULE, so each form has its own fixture file; `dump_header` has its
+own test (`checks.planted.dump_header`, on the dump_write fixture).
+
+**Why.** The spec states these bans without exceptions ("anywhere",
+"never DebugBreak"), and each gap the review found (an async launch, a
+debug trap, `<WINDOWS.H>`, an opt-out comment) passed CI; a fixture whose
+first file fires no longer hides a second form that does not.
