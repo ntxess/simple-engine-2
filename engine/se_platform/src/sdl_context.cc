@@ -86,6 +86,9 @@ std::expected<SdlContext, Error> SdlContext::Init(const SdlInitConfig& config) {
   SE_ASSERT_MAIN_THREAD();
   // The M8 input sampler calls SDL_UpdateGamepads itself.
   SDL_SetHint(SDL_HINT_AUTO_UPDATE_JOYSTICKS, "0");
+  // Runtime builds stamp keys on SDL's raw-input thread (M8, ADR-073); the
+  // editor (M10) keeps Win32 message stamps.
+  SDL_SetHint(SDL_HINT_WINDOWS_RAW_KEYBOARD, config.raw_keyboard ? "1" : "0");
   if (!config.video_driver.empty()) {
     SDL_SetHint(SDL_HINT_VIDEO_DRIVER, config.video_driver.c_str());
   }

@@ -26,6 +26,15 @@
 //                          still registered)
 //   --pacing MODE          paced, standard, vrr or auto (the default): the
 //                          FramePacer's mode (frame_pacer.h)
+//   --no-raw-keyboard      Win32 message stamps for keys instead of SDL's
+//                          raw keyboard (the editor's choice, M10; M8)
+//   --record FILE          write a replay of the session (every tick's
+//                          InputFrame with its edges and their sources, the
+//                          per-tick hashes) to FILE at shutdown (M8)
+//   --audio OUTPUT         device, null (miniaudio's null backend: mixed,
+//                          never heard) or none (no audio engine); default:
+//                          the SE_AUDIO environment variable, else device,
+//                          or null with --headless (M8)
 //
 // Test hooks, in builds with SE_RUNTIME_TEST_HOOKS (every build but
 // Release):
@@ -55,6 +64,10 @@
 //   --readback FRAME:FILE  write the composite of the first frame rendered
 //                          at or after frame FRAME to FILE as PNG;
 //                          repeatable
+//   --push-key FRAME:MS:KEY[:up]  at the end of iterate FRAME, push an SDL
+//                          key event for KEY (a key name) stamped MS
+//                          milliseconds after that frame's start, so the
+//                          next frame places it (M8); repeatable
 // Frames are iterates, counted from 1, as for --inject-null-acquire.
 
 #ifndef SE_RUNTIME_APP_CONFIG_H_
@@ -99,6 +112,17 @@ struct ReadbackHook {
   std::string file;
 };
 
+// --push-key FRAME:MS:KEY[:up].
+struct PushKeyHook {
+  std::int64_t frame = 0;
+  double offset_ms = 0.0;
+  std::string key;
+  bool down = true;
+};
+
+// --audio.
+enum class AudioRequest : std::uint8_t { kDefault, kDevice, kNull, kNone };
+
 struct AppConfig {
   std::int64_t frames = 0;
   double fixed_frame_dt_ms = 0.0;
@@ -113,6 +137,10 @@ struct AppConfig {
   LogLevel log_level = LogLevel::kInfo;
   bool crash_capture = true;
   PacingRequest pacing = PacingRequest::kAuto;
+  // M8: key stamps, the session replay, the audio output.
+  bool raw_keyboard = true;
+  std::string record_path;
+  AudioRequest audio = AudioRequest::kDefault;
 
   // Test hooks.
   int fail_init_step = 0;
@@ -128,6 +156,7 @@ struct AppConfig {
   FrameFaultConfig frame_fault;
   std::vector<TextureReloadHook> texture_reloads;
   std::vector<ReadbackHook> readbacks;
+  std::vector<PushKeyHook> push_keys;
 
   // The arguments after "--".
   std::vector<std::string> game_args;

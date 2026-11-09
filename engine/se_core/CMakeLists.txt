@@ -23,9 +23,11 @@ se_add_module(se_core KIND STATIC
     src/core_components.cc
     src/detmath.cc
     src/dump_stream.cc
+    src/edge_placement.cc
     src/fp.cc
     src/guid.cc
     src/hash.cc
+    src/input_buffer.cc
     src/input_frame_ring.cc
     src/jobs.cc
     src/log.cc

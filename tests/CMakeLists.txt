@@ -54,10 +54,12 @@ se_add_module(se_tests KIND EXECUTABLE
     smoke/smoke_test.cc
     kernel/detmath_test.cc
     kernel/determinism_test.cc
+    kernel/edge_placement_test.cc
     kernel/fixed_stepper_test.cc
     kernel/game_state_stack_test.cc
     kernel/guid_test.cc
     kernel/hash_test.cc
+    kernel/input_buffer_test.cc
     kernel/input_frame_ring_test.cc
     kernel/log_test.cc
     kernel/parallel_view_test.cc

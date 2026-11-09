@@ -5,11 +5,14 @@
 #include <SDL3/SDL_events.h>
 #include <SDL3/SDL_hints.h>
 #include <SDL3/SDL_init.h>
+#include <SDL3/SDL_keyboard.h>
 #include <SDL3/SDL_stdinc.h>
 #include <SDL3/SDL_timer.h>
 #include <SDL3/SDL_version.h>
 
 #include <algorithm>
+#include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -23,6 +26,7 @@
 #include <vector>
 
 #include "se_core/error.h"
+#include "se_core/input_frame.h"
 #include "se_core/jobs.h"
 #include "se_core/log.h"
 #include "se_core/profile.h"
@@ -44,14 +48,16 @@
 #include "se_render/texture_table.h"
 #include "se_render_core/render_components.h"
 #include "se_render_core/render_list.h"
+#include "se_runtime/action_map.h"
 #include "se_runtime/app_config.h"
-#include "se_runtime/basic_input.h"
 #include "se_runtime/frame_pacer.h"
+#include "se_runtime/input_service.h"
 #include "se_runtime/integration.h"
 #include "se_runtime/lifecycle.h"
 #include "se_runtime/pacer_policy.h"
 #include "se_runtime/quit.h"
 #include "se_runtime/render_present_port.h"
+#include "se_runtime/user_settings.h"
 #include "se_sim/game_module.h"
 #include "se_sim/game_state.h"
 #include "se_sim/replay.h"
@@ -65,12 +71,13 @@ namespace se {
 // the driver keep pointers into the module instance and the pool.
 struct GameRuntime {
   GameRuntime(const GameModule& module, const StateEnv& env,
-              const jobs::ForkJoinPool::Config& pool_config)
+              const jobs::ForkJoinPool::Config& pool_config, ActionMap map,
+              const InputServiceConfig& input_config)
       : instance(module),
         states(instance.Factory(), WithRegistry(env, instance)),
         pool(pool_config),
         driver(instance.MutableSchedule(), pool),
-        input(module.actions) {}
+        input(std::move(map), input_config) {}
   GameRuntime(const GameRuntime&) = delete;
   GameRuntime& operator=(const GameRuntime&) = delete;
 
@@ -88,7 +95,7 @@ struct GameRuntime {
   SessionLog session;
   ReplayRecorder recorder;
   NullAudioSink audio;
-  BasicInputService input;
+  InputService input;
 };
 
 namespace {
@@ -213,6 +220,7 @@ std::expected<void, Error> App::Boot() {
   }
   SdlInitConfig sdl_config;
   sdl_config.app_name = setup_.title;
+  sdl_config.raw_keyboard = config_.raw_keyboard;
   if (config_.headless) sdl_config.video_driver = "dummy";
   auto sdl = SdlContext::Init(sdl_config);
   if (!sdl) return std::unexpected(std::move(sdl.error()));
@@ -313,9 +321,12 @@ std::expected<void, Error> App::Boot() {
   if (!helpers) return std::unexpected(std::move(helpers.error()));
   helpers_.emplace(std::move(*helpers));
 
-  // 10. The game: registry, storages, states.
+  // 10. The game: the settings file, then registry, storages, states.
   if (auto ok = BootStep(10); !ok) {
     return ok;
+  }
+  if (auto settings = LoadSettings(); !settings) {
+    return settings;
   }
   if (auto game = StartGame(); !game) {
     return game;
@@ -397,12 +408,32 @@ std::expected<void, Error> App::StartGame() {
   env.tick_rate = setup_.tick_rate;
   jobs::ForkJoinPool::Config pool_config;
   pool_config.max_workers = cpu_.fork_pool_size;
-  game_ = std::make_unique<GameRuntime>(*setup_.module, env, pool_config);
+  // The action map: the module's bindings and the settings file's keys;
+  // an unknown key is a boot error naming it (M8).
+  auto map = ActionMap::Build(setup_.module->actions, settings_);
+  if (!map) {
+    Error error = std::move(map.error());
+    error.path = setup_.settings_file.empty()
+                     ? std::string(setup_.module->name)
+                     : fs::Join(paths_.content_root, setup_.settings_file);
+    return std::unexpected(std::move(error));
+  }
+  for (const ActionMap::Binding& binding : map->Bindings()) {
+    SE_LOG_DEBUG("action '{}': key '{}'{}, pad '{}'", binding.action,
+                 binding.key, binding.from_settings ? " (settings)" : "",
+                 binding.pad);
+  }
+  InputServiceConfig input_config;
+#if defined(_WIN32)
+  input_config.key_source =
+      config_.raw_keyboard ? EdgeSource::kRawKeyboard : EdgeSource::kWinMessage;
+#else
+  input_config.key_source = EdgeSource::kWinMessage;
+#endif
+  game_ = std::make_unique<GameRuntime>(*setup_.module, env, pool_config,
+                                        std::move(*map), input_config);
   // Every latched InputFrame goes into the process's ring, a dump stream.
   game_->driver.AttachInputRing(&integration::DumpInputRing());
-  for (const std::string& key : game_->input.UnknownKeys()) {
-    SE_LOG_WARN("binding to unknown key '{}' ignored", key);
-  }
   if (setup_.configure) {
     if (auto configured = setup_.configure(paths_); !configured) {
       return configured;
@@ -420,7 +451,71 @@ std::expected<void, Error> App::StartGame() {
     return Fail(ErrorCode::kInvalidArgument,
                 std::format("the start state '{}' could not be pushed", start));
   }
+  // --record: every tick's InputFrame (edges and their sources included)
+  // and hash, written at shutdown (M8).
+  if (!config_.record_path.empty()) {
+    std::vector<std::byte> start_bytes;
+    if (setup_.replay_start) start_bytes = setup_.replay_start(paths_);
+    game_->recorder.Begin(
+        MakeReplayHeader(start_bytes, setup_.seed, setup_.tick_rate),
+        start_bytes);
+  }
   return {};
+}
+
+std::expected<void, Error> App::LoadSettings() {
+  if (setup_.settings_file.empty()) return {};
+  const std::string path = fs::Join(paths_.content_root, setup_.settings_file);
+  auto settings = LoadUserSettings(path);
+  if (!settings) return std::unexpected(std::move(settings.error()));
+  settings_ = std::move(*settings);
+  SE_LOG_INFO(
+      "settings {}: {} key bindings, music volume {:.0f}, effects volume "
+      "{:.0f}",
+      path, settings_.key_bindings.size(), settings_.music_volume,
+      settings_.effects_volume);
+  return {};
+}
+
+void App::WriteReplay() {
+  if (!game_ || !game_->recorder.Active()) return;
+  game_->recorder.RecordSession(game_->session);
+  const std::size_t frames = game_->recorder.FrameCount();
+  const std::vector<std::byte> bytes = game_->recorder.Finish();
+  if (auto written = fs::WriteFile(config_.record_path, bytes); !written) {
+    SE_LOG_WARN("--record {}: {}", config_.record_path,
+                written.error().message);
+    return;
+  }
+  SE_LOG_INFO("replay of {} ticks written to {}", frames, config_.record_path);
+}
+
+void App::RunPushKeys(const FrameReport& report) {
+  for (const PushKeyHook& hook : config_.push_keys) {
+    if (hook.frame != static_cast<std::int64_t>(iterates_)) continue;
+    const std::uint32_t keycode = KeycodeFromName(hook.key);
+    if (keycode == 0) {
+      SE_LOG_ERROR("--push-key: unknown key '{}'", hook.key);
+      continue;
+    }
+    SDL_Event event{};
+    event.type = hook.down ? SDL_EVENT_KEY_DOWN : SDL_EVENT_KEY_UP;
+    event.key.timestamp =
+        report.clock.frame_start_ns +
+        static_cast<std::uint64_t>(std::llround(hook.offset_ms * 1e6));
+    event.key.windowID = window_ != nullptr ? window_->Id() : 0;
+    event.key.key = keycode;
+    event.key.scancode = SDL_GetScancodeFromKey(keycode, nullptr);
+    event.key.down = hook.down;
+    event.key.repeat = false;
+    if (!SDL_PushEvent(&event)) {
+      SE_LOG_ERROR("--push-key: SDL_PushEvent failed");
+      continue;
+    }
+    SE_LOG_INFO("pushed key '{}' {} stamped {} (frame {} start + {:.3f} ms)",
+                hook.key, hook.down ? "down" : "up", event.key.timestamp,
+                iterates_, hook.offset_ms);
+  }
 }
 
 std::expected<void, Error> App::StartRenderer() {
@@ -563,20 +658,18 @@ SDL_AppResult App::HandleEvent(const SDL_Event& event) {
       break;
     case SDL_EVENT_KEY_DOWN:
     case SDL_EVENT_KEY_UP:
-      if (game_) {
-        game_->input.OnKey(static_cast<std::uint32_t>(event.key.scancode),
-                           event.key.down, event.key.repeat);
-      }
-      lifecycle_.OnInputActivity(now);
-      break;
-    case SDL_EVENT_MOUSE_MOTION:
     case SDL_EVENT_MOUSE_BUTTON_DOWN:
     case SDL_EVENT_MOUSE_BUTTON_UP:
-    case SDL_EVENT_MOUSE_WHEEL:
-    case SDL_EVENT_TEXT_INPUT:
     case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
     case SDL_EVENT_GAMEPAD_BUTTON_UP:
     case SDL_EVENT_GAMEPAD_AXIS_MOTION:
+      // Every input event with its SDL timestamp (M8).
+      if (game_) game_->input.HandleEvent(event);
+      lifecycle_.OnInputActivity(now);
+      break;
+    case SDL_EVENT_MOUSE_MOTION:
+    case SDL_EVENT_MOUSE_WHEEL:
+    case SDL_EVENT_TEXT_INPUT:
       lifecycle_.OnInputActivity(now);
       break;
     default:
@@ -838,7 +931,7 @@ SDL_AppResult App::Iterate() {
     return OnCallbackFault("GPU device recreation", device.error().message);
   }
   ApplyCallbackRate();
-  if (lifecycle_.TakeClearHeldInput()) game_->input.ClearHeld();
+  if (lifecycle_.TakeClearHeldInput()) game_->input.ClearHeld(now);
   if (lifecycle_.TakeFrameClockReset()) {
     pacer_.ResetClock();
     stepper_.ResetAccumulator();
@@ -966,6 +1059,7 @@ SDL_AppResult App::Iterate() {
   pacer_.EndFrame(stepper_.PlanNext(frame_clock, costs_.Current()),
                   costs_.Current(), lifecycle_.Modal());
   report.pacer = pacer_.LastFrame();
+  if (kRuntimeTestHooks && !config_.push_keys.empty()) RunPushKeys(report);
   if (setup_.on_frame) setup_.on_frame(*this, report);
   return SDL_APP_CONTINUE;
 }
@@ -1093,6 +1187,8 @@ SDL_AppResult App::Shutdown(SDL_AppResult result) {
   if (device_recoveries_ > 0) {
     SE_LOG_INFO("device losses recovered: {}", device_recoveries_);
   }
+  // The --record replay, before the Worlds go (M8).
+  if (booted_) WriteReplay();
   // The renderer's totals and leak check, while logging still runs; the
   // teardown below only destroys it.
   if (renderer_) renderer_->Shutdown();

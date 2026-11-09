@@ -36,10 +36,14 @@ InputFrame SampleFrame(Tick tick) {
   frame.released[63] = 1;
   frame.axes[7] = -0.5F;
   frame.platform_live = true;
-  frame.edge_count = 2;
+  frame.edge_count = 4;
   frame.edges[0] =
       InputEdge{3, true, 123456789ULL, 0, EdgeSource::kRawKeyboard};
   frame.edges[1] = InputEdge{3, false, 123456999ULL, 1, EdgeSource::kMouse};
+  // Every source survives a replay (M8), the cleared releases included.
+  frame.edges[2] =
+      InputEdge{5, true, 123457000ULL, 0, EdgeSource::kGamepadSampler};
+  frame.edges[3] = InputEdge{5, false, 123458000ULL, 0, EdgeSource::kCleared};
   return frame;
 }
 

@@ -2013,3 +2013,99 @@ it taken at (ADR-066 recorded one; its count did not separate the two).
 **Why.** The spec asks for the statistics' verdict; this gives it with the
 one correction the composed path needs, measured on the run itself, so
 the exit no longer rests on the change of source alone.
+
+## ADR-073 Input edges are latched by stamp per tick; the rule lives in se_core (2026-11-09)
+
+**Context.** M8 replaces M5's BasicInputService, which counted every press
+and release since the previous latch on the next tick, with timestamped
+edges placed on ticks (docs/design/mt-design.md "Placing edges on ticks").
+The spec asks to check StepPlan::tick_window_end_ns (M2) against the
+design and fix it if needed.
+
+**Decision.**
+- The check: FixedStepper::Plan already computed the design's windows
+  (Locked: k equal splits of [prev_start, start), a stall or the first
+  frame spanning one period; Free: start - remainder - (steps - 1 - i) dt,
+  the remainder including debt). Nothing changed numerically; the
+  formulas moved into `se_core/edge_placement.h` (LockedTickWindows,
+  FreeTickWindows), which Plan now calls, beside the placement rule
+  itself: `PlaceEdge` puts a stamp on the first tick whose window end is
+  after it (windows are half-open, so a stamp equal to a window end
+  belongs to the next tick), stamps after the last window on the last
+  tick, and returns kEdgeWaits in a frame without a tick. It is in
+  se_core, not se_runtime, so that M17's InputFolder can apply the same
+  rule against the sim thread's deadlines. tests/kernel/edge_placement_
+  test.cc pins it at 30, 60, 144 and 165 Hz.
+- `InputService` (se_runtime) keeps physical inputs that are down and the
+  changes not yet latched. Arrival order is not trusted: each Latch takes
+  the changes stamped before its window end (all of them on the frame's
+  last tick), sorts them by (stamp, arrival) and applies them to per-action
+  holder counts; an action whose count goes 0 to 1 or 1 to 0 is an edge.
+  Key repeats and duplicate downs of one physical input are dropped on
+  arrival. A change that arrives after its tick was latched goes to the
+  next latch and is counted (`late_changes`); one that arrives in a frame
+  with no tick waits for the next frame's first tick.
+- `InputEdge::order` is the edge's rank among the frame's edges with the
+  same stamp (one key holding two actions gives orders 0 and 1).
+- Up to kMaxEdgesPerTick (32) edges are stored per frame; pressed,
+  released and held count every edge (`edges_not_stored` counts the rest).
+  While nothing latches (a paused game), more than 1024 waiting changes
+  fold into the held state, oldest first, without edges.
+- Clearing held input (focus loss, the modal loop) releases every physical
+  input that is down with a change stamped at the clear and zeroes the
+  axes. Those releases carry a new `EdgeSource::kCleared`, appended after
+  kReplay (replay files store the value; ReplayReader accepts it,
+  read_dump.py names it "cleared").
+- Keys carry kRawKeyboard when SDL's raw keyboard stamps them (Windows,
+  SDL_HINT_WINDOWS_RAW_KEYBOARD=1, the runtime default; `--no-raw-keyboard`
+  turns it off for the editor, M10), else kWinMessage, which on Linux
+  means the window system's event stamps. Mouse buttons are kMouse,
+  gamepads kGamepadSampler.
+- Axes: SDL gamepad axis i is InputFrame::axes[i] (sticks in [-1, 1],
+  triggers [0, 1]), latched per tick by stamp like edges. A bound half
+  axis ("-lefty") presses at 0.5 and releases below 0.35.
+- `--record FILE` writes the session's replay at shutdown (frames with
+  their edges and sources, per-tick hashes; rampage's start bytes are its
+  scene file), and se_replay gains `--edges-out` to list a replay's edges.
+  The test hook `--push-key FRAME:MS:KEY[:up]` pushes a key event at the
+  end of an iterate, stamped MS after that frame's start.
+
+**Why.** Sorting by stamp at latch time is what makes chord order and the
+8 ms test independent of which thread pushed first; holder counts keep
+several keys and pads on one action consistent; a source of its own for
+cleared releases keeps replays honest about where every stamp came from.
+
+## ADR-074 The ActionMap: legacy key names as keycodes, pad defaults per game, unknown names fail the boot (2026-11-09)
+
+**Decision.**
+- `ActionBinding` (se_sim/game_module.h) gains `config_key` (the user
+  setting that rebinds the key) and `pad` (default gamepad inputs, comma
+  separated); both default to empty, so existing bindings compile.
+  ActionId i is binding i, as before.
+- The runtime reads the game's settings file (`GameSetup::settings_file`,
+  config/config.json for rampage) with a small JSON reader of its own
+  (se_runtime/src/json_reader.h; glaze stays in the component units,
+  ADR-010): control-settings / key-bindings and sound-settings. A missing
+  section means defaults; a section of the wrong type is a boot Error.
+- Key names resolve to SDL keycodes, as the spec says (the key that types
+  the character in the current layout, not the physical position the
+  legacy tree's scancodes named): one letter or digit is that character;
+  the legacy config names esc/escape, enter/return, space, tab, backspace,
+  up, down, left and right are accepted; anything else goes through
+  SDL_GetKeyFromName. "mouse-left", "mouse-middle", "mouse-right",
+  "mouse-x1" and "mouse-x2" bind mouse buttons.
+- A key name SDL does not know, a pad name it does not know, and a user
+  binding that no action declares are boot Errors naming the binding and
+  the key (step 10 fails).
+- Pad names are SDL's (a, b, x, y, back, start, dpup, leftshoulder, ...)
+  plus south, east, west and north, and half axes "+leftx" / "-lefty".
+  The default gamepad bindings are code in the game module. rampage's:
+  d-pad and left stick move (up dpup and -lefty, left dpleft and -leftx,
+  down dpdown and +lefty, right dpright and +leftx); jump south; exit back;
+  enter start; back east; a1-a6 west, north, leftshoulder, rightshoulder,
+  leftstick, rightstick.
+
+**Why.** Keycodes are what the spec names and what a user who writes "w"
+means; failing the boot on an unknown name is the spec's rule, and a
+binding nobody declares is almost always a typo. Pad defaults belong to
+the game because only the game knows its actions.
