@@ -180,8 +180,11 @@ add_subdirectory(render)
 add_subdirectory(crash)
 if(SE_BUILD_PLATFORM)
   add_subdirectory(platform)
-  # M7: Renderer2D and GpuResources.
+  # M7: Renderer2D and GpuResources, then render_shot (which links their
+  # support library).
   add_subdirectory(render_gpu)
+  add_subdirectory("${CMAKE_SOURCE_DIR}/tools/render_shot"
+                   "${CMAKE_BINARY_DIR}/tools/render_shot")
 endif()
 
 # tools/se_replay links the kernel test module from tests/support, so it is

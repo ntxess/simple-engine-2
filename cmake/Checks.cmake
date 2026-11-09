@@ -227,6 +227,16 @@ function(se_register_checks)
       "headless_render links extra_dep, which is not in its ALLOW_ONLY list"
     FAIL_REGULAR_EXPRESSION "headless_control")
 
+  # M7: no SDL_GPUTexture* member outside se_render (resolve handles every
+  # frame instead), with its planted fixture.
+  add_test(NAME checks.gpu_texture_members
+    COMMAND Python3::Interpreter "${_tools}/check_gpu_members.py" "${_json}")
+  add_test(NAME checks.planted.gpu_texture_member
+    COMMAND Python3::Interpreter "${_tools}/check_gpu_members.py"
+            --planted "${_planted}/gpu_texture_member")
+  set_tests_properties(checks.gpu_texture_members
+    checks.planted.gpu_texture_member PROPERTIES LABELS checks)
+
   # Linters.
   find_program(SE_CLANG_FORMAT clang-format)
   find_program(SE_CLANG_TIDY clang-tidy)

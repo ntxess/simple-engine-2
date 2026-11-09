@@ -703,7 +703,9 @@ wait for a swapchain image.
 
 **Why.** Counted as CPU time, the VSYNC wait makes R about one period, k_95
 falls below k_rt and the stepper enters Overloaded after a second, running
-one tick per frame: at 60 Hz the game would run at half speed.
+one tick per frame: at 60 Hz the game would run at half speed. *(Since
+M7 R leaves out only the swapchain wait: the render build, recording and
+submit are CPU work and count; ADR-064.)*
 
 **Decision (frame clock).** The FrameClock's period is SDL's display mode
 unless a moving average of the frame deltas (weight 0.1, stalls over
@@ -960,3 +962,232 @@ start (ADR-029): the log worker starts at boot step 2, before the profiler.
 
 **Why.** Tracy names a thread only through that thread's own events, and
 neither helper had any, so the "named threads" gate could not pass.
+
+## ADR-059 One HLSL source for DXIL and SPIR-V; SPIR-V committed, DXIL built (2026-11-09)
+
+**Decision.** The renderer's shaders are HLSL in engine/se_render/shaders/
+(`<name>.<vert|frag>.hlsl`). Vertex inputs and interstage values carry both
+`TEXCOORD<n>` semantics (SDL's D3D12 backend binds attribute location n to
+TEXCOORD n) and `[[vk::location(n)]]`; resources follow SDL's sets and
+spaces (vertex uniforms b0/space1, fragment textures t0+s0/space2).
+- SPIR-V: `tools/shaders/build_shaders.py spirv` runs glslangValidator
+  `-D -V -S <stage> -e main --auto-sampled-textures` (through wsl.exe on
+  Windows) and commits one lint-clean header per shader under
+  shaders/generated/. `--auto-sampled-textures` is added to the spec's
+  command: SDL_GPU's Vulkan backend binds sampled textures as combined
+  image samplers, and without it glslang emits a separate image and
+  sampler. The WSL presets run `checks.shaders.spirv_fresh` (regenerate,
+  fail on any difference, a missing header or one without a shader) and
+  `checks.planted.spirv_stale` (a header with one byte changed must be
+  reported).
+- DXIL: se_render's build runs the Windows SDK's dxc.exe (`-T vs_6_0|ps_6_0
+  -E main -Wno-ignored-attributes`; dxc ignores the vk attributes) into
+  build-tree headers; configure fails with the searched paths when dxc is
+  missing. Linux builds have SPIR-V only (`kHasDxil`).
+- `se_render/shaders.h` lists every shader with the resource counts given to
+  SDL_CreateGPUShader; `render_gpu.Every SPIR-V blob ...` and `... DXIL
+  blob ...` reflect the blobs (SPIR-V DescriptorSet decorations, the DXIL
+  container's PSV0 resource table) and compare, and a planted mismatch
+  must be caught.
+
+**Why.** One source keeps the two backends from drifting; glslang's output
+does not depend on the source path and was checked to be deterministic, so
+the committed bytes can be checked exactly.
+
+## ADR-060 stb in se_render: PNG decoding at boot, PNG writing for tests and tools (2026-11-09)
+
+**Decision.** `se::stb` is an INTERFACE target over the pinned archive's
+headers (SYSTEM, so its warnings stay out). se_render defines each
+implementation macro in exactly one translation unit: image_decode.cc
+(stb_image, `STBI_ONLY_PNG`, `STBI_NO_STDIO`: files are read through
+se::fs) and png_write.cc (stb_image_write, `STB_IMAGE_WRITE_STATIC`). Only
+the readback test hook, tests and tools call the writer; executables that
+do not leave its object file out of the link. The texture table
+(config/texture.json, ADR-026) is read by a small parser for its one shape,
+an object of strings (`ParseTextureTable`), so glaze stays confined. At
+boot step 7 the App decodes every texture of `GameSetup::texture_table` on
+main and flushes the uploads before the first frame (no magenta flash); a
+missing or undecodable file is an Error naming the path in the load report,
+logged as an error, and its sprites draw magenta.
+
+**Why.** SFML decodes PNGs with stb_image too, so the engine samples the
+same texels as the legacy reference; the comparison and goldens need PNG
+output in tests and tools only.
+
+## ADR-061 The sprite pipeline matches SFML's sprites: straight alpha, nearest texels (2026-11-09)
+
+**Decision.**
+- Straight (not premultiplied) alpha, blended as SFML's BlendAlpha:
+  colour = src.a * src + (1 - src.a) * dst, alpha = src.a + (1 - src.a) *
+  dst.a. Textures are uploaded as decoded; the tint multiplies the texel as
+  sf::Sprite's vertex colour does.
+- Nearest sampling, clamp to edge, no mipmaps; no culling (flips reverse
+  the winding).
+- Vertices stay in canvas pixels with texel coordinates (ADR-022): 20 bytes
+  (position, texel, tint as UBYTE4_NORM). A per-draw uniform block carries
+  the canvas-to-clip transform and 1/texture size, so a texture reloaded at
+  another size needs no new vertices. Indices are 32-bit, the same two
+  triangles per quad, written once per growth.
+- One vertex/index buffer pair and one transfer buffer, grown by doubling in
+  the build phase (logged); vertices go through the transfer buffer mapped
+  with cycle and are uploaded with cycle. One draw per QuadBatch.
+- The camera's canvas maps into a target with `FitCanvas`: letterboxed,
+  centred on whole pixels, Camera2D::integer_scale honoured when the
+  canvas fits at least once. Targets (the composite, viewports) are
+  R8G8B8A8_UNORM; their passes clear with cycle. The composite follows the
+  window's pixel size at each frame start (a minimized window keeps the
+  last size); the blit draws it with a full-target triangle and nearest
+  sampling, or clears the swapchain while the composite has never been
+  drawn.
+
+**Why.** The legacy textures are pixel art drawn by SFML with smoothing off
+and BlendAlpha; matching both keeps the legacy comparison within tolerance
+(99.994% of the stress scenario's pixels within 8/255 at tick 600) and the
+goldens identical across D3D12 and Vulkan on this machine.
+
+## ADR-062 The frame transaction's fault boundary and each step's policy (2026-11-09)
+
+**Decision.** engine/se_render/src/frame_recorder.cc is the
+`// se-fault-boundary` file ADR-006 means by "the FrameRecorder
+transaction": `FrameRecorder::RunBuildPhase` runs the build phase and
+returns a throw as an Error (text copied into a fixed buffer first,
+ADR-038). Policies, which `--inject-frame-fault STEP[:EVERY[:UNTIL]]`
+exercises (frames are iterates, as for --inject-null-acquire; UNTIL, the
+last faulting frame, is an addition to the spec's syntax so a test can see
+drawing resume):
+- build, vertices: nothing was acquired; in the game build this is a fault
+  like any other callback fault: the App requests a dump, shows the
+  message box (suppressed in tests) and returns SDL_APP_FAILURE, so the
+  shutdown order runs (M10's editor will enter Play.Faulted instead).
+- prepare (the frame command buffer): the frame is skipped and logged
+  (first, then every 120th); the uploads still go out through
+  PumpUploads.
+- upload (the upload command buffer): the uploads stay queued.
+- copy_pass: no new vertices, so no target is drawn; each keeps its last
+  image and the blit still presents the last composite.
+- viewport_pass: that target keeps its last image.
+- acquire: a NULL swapchain texture, never a state change (the lifecycle
+  counts it as M5 does).
+- swapchain_pass: no blit; the acquired texture is still submitted and
+  presented.
+- submit: SDL_SubmitGPUCommandBufferAndAcquireFence runs (a buffer that
+  holds a swapchain texture cannot be cancelled) and the failure is
+  reported as SDL would: no fence is kept, the frame is not counted as
+  presented.
+Prepare acquires the frame command buffer first and the upload command
+buffer second (the spec lists them the other way round), so a failed frame
+buffer never leaves an upload buffer to cancel. The only cancel left is of
+an upload buffer on which nothing was recorded; it goes through
+`CancelUnacquired`, which asserts that no swapchain texture was acquired.
+The guard submits the uploads (with their own fence) and the frame,
+keeps the frame's fence (`TakeFence`; Renderer2D keeps the last three for
+the pacer's N-L wait) and runs the retire queue. The INTEGRATION(M6) marks
+are in frame_recorder.cc.
+
+**Why.** The design's game build treats every exception as fatal, the
+editor isolates Play; containing the throw in the renderer leaves that
+choice to the caller. The other steps are SDL calls that report failure by
+value, and a frame that cannot draw must not stop the game.
+
+## ADR-063 GpuResources: handles survive reloads; lifetimes are counted (2026-11-09)
+
+**Decision.**
+- `Handle<Texture>{index, generation}`: the generation changes only when a
+  slot is removed, so a handle stays valid across reloads and device loss.
+  The spec's "generation flip" at residency is the slot's content
+  generation (`ContentGeneration`), which M10's ImGui ids can key on.
+- Resolve never returns null: null, unknown and removed handles
+  (`stale_resolves`) and valid handles with nothing resident yet
+  (`unresident_resolves`) get the built-in 1x1 magenta.
+- QueueUpload creates the slot's next texture at once and keeps the payload
+  (for RecreateAll). PlanUploads takes whole rows, oldest upload first, at
+  512-byte-aligned offsets into one 8 MB transfer buffer; an upload becomes
+  resident only after the fence of the batch with its last rows signalled,
+  and a newer upload of the slot supersedes older ones (retired, counted).
+  Allocation happens in PlanUploads (build phase); RecordUploads and
+  UploadsSubmitted are noexcept.
+- The retire queue runs after every submit: the frame's, an upload-only
+  iterate's, a readback's.
+- Every SDL_GPU object the renderer creates goes through counting helpers;
+  ~GpuResources releases what is left and logs "GPU objects: N created, N
+  released, 0 alive", or an error naming the counts per kind. The
+  fault-injection tests check that line: MSVC's AddressSanitizer has no
+  leak detection.
+- Device loss: ReleaseAll retires everything and keeps slots and payloads;
+  after the old device is idle and the queue has run, RecreateAll creates
+  render targets again (empty) and queues every payload, so handles and
+  ViewportTargets keep working (`render_gpu.*.Device loss ...` recreates
+  the device and matches the image before).
+
+**Why.** Panels and sprites name textures by handle every frame; a reload
+that invalidated handles would force every holder to look them up again,
+and SDL's D3D12 backend frees a released texture's container at once (red
+team C2), so releases must wait for the submit.
+
+## ADR-064 The App draws its render sources; R includes the frame's CPU work (2026-11-09)
+
+**Decision.**
+- GameSetup gains `texture_table` (relative to the content root; empty: no
+  textures) and `camera` (the Camera2D a World is drawn with; default its
+  primary camera). Boot step 7 creates Renderer2D after the device claims
+  the window and loads the table (ADR-060); no boot step was added, so
+  --fail-init-step keeps its numbering.
+- Each rendering iterate draws `GameStateStack::RenderSources(plan)` as
+  layers, bottom first; iterates that do not render (Suspended) call
+  PumpUploads, so uploads finish while the window is minimized.
+- FrameCosts' R is the iterate minus its ticks minus the swapchain wait;
+  the render build, recording and submit count. This replaces ADR-039's
+  "minus the whole frame transaction", which predates any CPU work in the
+  frame.
+- Test hooks: `--reload-texture NAME@FRAME[=FILE]` (FILE relative to the
+  content root) and `--readback FRAME:FILE` (the first rendered frame at or
+  after FRAME), both repeatable, frames being iterates.
+- The minimized-reload desktop test minimizes and restores its own window
+  with ShowWindow(SW_SHOWMINNOACTIVE / SW_SHOWNOACTIVATE), as M5's
+  Suspended test does, not with SDL_MinimizeWindow and SDL_RestoreWindow,
+  which activate the next window and ours (SW_MINIMIZE, SW_RESTORE) and so
+  take the focus from whoever uses the machine. The window events and
+  states are the same.
+
+**Why.** The runtime stays game-agnostic (the camera and the table are the
+game's); the swapchain wait is not CPU cost, while building and recording
+are, and the pacer's B needs them.
+
+## ADR-065 The legacy image comparison runs headless; goldens per driver (2026-11-09)
+
+**Decision.**
+- `legacy_replay --image-out TICK:FILE` (legacy tree, app/headless only)
+  runs to TICK (it replaces --ticks), then draws the registry's Sprites in
+  Sandbox::render's order into a fresh sf::RenderTexture of the configured
+  resolution cleared to opaque black, created before the run while the
+  headless engine's hidden 64x64 window provides the OpenGL context. No
+  visible window is needed, so the gates.md fallback is not used; the
+  comparison is a gpu and legacy test.
+- tools/render_shot runs the same scenario, input and tick headless
+  (rampage_test_support, one tick per frame) and draws the RenderList at
+  alpha 1 into a composite of the camera's canvas size cleared to opaque
+  black. `--compare` applies the tolerance in C++ (stb decoding): Python's
+  stdlib decodes a 1920x1080 PNG in seconds; tools/render_shot/
+  compare_images.py is the same rule as a stdlib tool with its own test.
+- The engine presets register `render.legacy_image.<driver>` when this
+  checkout has a legacy build tree (out/build/legacy-msvc-release or
+  -debug) or SE_LEGACY_REPLAY names one; the legacy presets register
+  `legacy.image_compare.stress` when an engine build has render_shot.
+  Configure-time discovery, so a tree built later needs a reconfigure.
+- The legacy Sandbox draws in EnTT's view order (newest first), the engine
+  by (layer, texture, z, spawn serial); overlapping sprites can differ, and
+  the tolerance absorbs it.
+- Golden images (tests/golden/render/d3d12, vulkan) are compared in C++
+  with the same rule; on this machine both drivers produce identical
+  files.
+- `checks.gpu_texture_members` (tools/checks/check_gpu_members.py) scans
+  every module but se_render, tests and tools included, for an
+  SDL_GPUTexture* stored in a class, struct or union (a pointer member or a
+  container of them), following braces through each file;
+  `checks.planted.gpu_texture_member` must catch a struct member, a class
+  member with a brace initializer and a vector of pointers.
+
+**Why.** Rendering the reference headless keeps the comparison in the
+commit gate instead of a desktop-only test; a separate checker keeps the
+member scan (which needs brace tracking) out of the line-based banned-API
+scan.

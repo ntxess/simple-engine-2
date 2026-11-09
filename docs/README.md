@@ -34,10 +34,13 @@ behaviour reference until every rule and editor operation is ported.
 | se_crash | engine/se_crash | Out-of-process crash capture on crashpad: Start/CrashGuard, RegisterStream, DumpWithoutCrash, the terminate annotation; nothing uploaded; a stub on Linux and in msvc-asan (M4, ADR-033, ADR-034). The watchdog skeleton: role kWatchdog, the HangDetector (boot budget; hangs declared from M12), RequestDump, the shutdown deadline (M4 integration, ADR-043) |
 | game_rampage | games/rampage | The legacy Sandbox's gameplay on the kernel: components, systems, scenes and prefabs (assets/), legacy scenarios, projections (M3) |
 | se_platform | engine/se_platform | SDL3 on the main thread: SDL's initialisation, the event filter and Inbox, WakeMain, the window and its Win32 subclass (Modal, session end, power), se::fs on SDL's filesystem API (M5) |
-| se_render | engine/se_render | The SDL_GPU device (D3D12 on Windows, Vulkan on Linux) and the frame transaction, clear-only until M7 (M5) |
+| se_render | engine/se_render | The SDL_GPU device (D3D12 on Windows, Vulkan on Linux) (M5); Renderer2D on main: the frame transaction (FrameRecorder, its fault boundary and the --inject-frame-fault hook), GpuResources (texture handles with a magenta fallback, the retire queue, the 8 MB upload queue, device-loss release and recreation), the sprite and blit pipelines, the composite and ViewportTargets, the texture table and PNGs through stb; HLSL shaders in shaders/, SPIR-V committed in shaders/generated/, DXIL built with the SDK's dxc (M7, ADR-059 to ADR-063) |
 | se_runtime | engine/se_runtime | The App on SDL's main callbacks: boot steps, the frame, the lifecycle and two-phase quit state machines, BasicInputService, the noexcept callbacks (`SE_DEFINE_SDL_APP`) (M5); the main thread's RoleScope, crash capture and its dump streams, the log worker and the watchdog in boot order (integration.h; ADR-042) |
-| rampage | games/rampage/app | The rampage executable: the sandbox scene at 120 Hz in a window, clear-only until M7 (M5); crashpad_handler is copied next to it |
+| rampage | games/rampage/app | The rampage executable: the sandbox scene at 120 Hz in a window (M5), drawn textured by Renderer2D (M7); crashpad_handler is copied next to it |
 | se_replay | tools/se_replay | Headless runs of a game module: per-tick hashes, replays, projections |
+| render_shot | tools/render_shot | A rampage scenario at one tick rendered offscreen by se_render into a PNG, and the image comparison (`--compare`, the golden tolerance); drives the legacy image comparison and the rampage fault-injection tests (M7, ADR-065) |
+| build_shaders | tools/shaders/build_shaders.py | Compiles the renderer's HLSL: SPIR-V headers through glslang (committed; `--check` is the WSL freshness test), DXIL headers through dxc at build time (Python 3, stdlib only) |
+| compare_images | tools/render_shot/compare_images.py | Compares two PNGs with the renderer's tolerance and writes a diff image (Python 3, stdlib only) |
 | refcmp | tools/refcmp/refcmp.py | Compares two `.seproj` projections within the M3 tolerances (Python 3, stdlib only) |
 | read_dump | tools/minidump/read_dump.py | Decodes a crash dump: threads, exception, annotations and the first-party streams (breadcrumbs, log rings, InputFrame ring), and lists every record that does not fit its index (a stale or torn InputFrame slot, log sequence numbers out of order) under "problems", apart from the one a running writer was overwriting (ADR-046); the crash tests' oracle (Python 3, stdlib only) |
 | se_crash_probe | tests/crash | Registers dump streams with known contents, then crashes or requests dumps; the `crash.*` tests (label crash) check its dumps with read_dump. `crash.rampage_*` (labels desktop and crash) check the M4 exit dumps of the rampage executable |
@@ -85,14 +88,33 @@ out\build\msvc-release\bin\se_bench --suite rampage_tick_5k --json rampage_tick_
 The `bench.*` tests run only in the msvc-release preset, against
 bench/thresholds.json; run them on an otherwise idle machine.
 
-The rampage executable runs the sandbox scene in a window (clear-only
-until M7; the title shows the tick and the lifecycle state). `--frames N`
+The rampage executable runs the sandbox scene in a window, drawn by
+Renderer2D with the textures of config/texture.json (the title shows the
+tick and the lifecycle state). `--frames N`
 quits after N presented frames; the runtime's options are listed in
 engine/se_runtime/include/se_runtime/app_config.h:
 
 ```bat
 out\build\msvc-dev\bin\rampage --frames 600
 ```
+
+The renderer's test hooks (every build but Release) write the composite
+as PNG (`--readback FRAME:FILE`), reload a texture (`--reload-texture
+NAME@FRAME[=FILE]`) and make one step of the frame transaction fail
+(`--inject-frame-fault STEP[:EVERY[:UNTIL]]`); frames count iterates.
+render_shot draws a scenario offscreen at one tick, and with the legacy
+build (`legacy-msvc-release`) the two can be compared by hand; from the
+repository root:
+
+```bat
+out\build\legacy-msvc-release\app\legacy_replay --scenario tests/fixtures/reference/stress.scenario.json --inputs tests/fixtures/reference/stress.seinput --image-out 600:legacy.png
+out\build\msvc-dev\bin\render_shot --legacy-scenario tests/fixtures/reference/stress.scenario.json --inputs tests/fixtures/reference/stress.seinput --tick 600 --out engine.png --compare legacy.png
+```
+
+The shaders' SPIR-V is regenerated with `python
+tools/shaders/build_shaders.py spirv` (glslang in WSL) and committed; the
+golden images (tests/golden/render/<driver>/) with `SE_UPDATE_GOLDENS=1
+ctest --test-dir out\build\msvc-dev -R Golden`.
 
 Every run of an engine executable writes its log through the log worker to
 `<pref>/logs/<app>.log` (rotated at 5 MB, 3 kept) and to stderr, and keeps
