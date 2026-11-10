@@ -25,4 +25,6 @@ if(SE_BUILD_PLATFORM)
   # M8: the key stamp probe (needs a person; docs/gates.md).
   add_subdirectory("${CMAKE_SOURCE_DIR}/tools/input_probe"
                    "${CMAKE_BINARY_DIR}/tools/input_probe")
+  # M10b: the editor's panels (over se_editor and game_rampage).
+  add_subdirectory(se_editor/panels)
 endif()
