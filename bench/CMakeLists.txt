@@ -3,3 +3,8 @@
 # bench.<suite> (label bench), which only the Release test presets include.
 
 add_subdirectory(se_bench)
+
+# M9: the background lane's steps (se_assets, se::fs: platform builds).
+if(SE_BUILD_PLATFORM)
+  add_subdirectory(lane_steps)
+endif()

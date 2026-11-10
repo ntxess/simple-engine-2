@@ -88,6 +88,30 @@ TEST_CASE("Test hooks parse where they are built in", "[app_config]") {
   REQUIRE(InitStepNames().back() == "game");
 }
 
+TEST_CASE("The M9 options parse", "[app_config]") {
+  auto config = Parse({"--cooked-root", "pages", "--hot-reload", "off"});
+  REQUIRE(config);
+  REQUIRE(config->cooked_root == "pages");
+  CHECK_FALSE(config->hot_reload);
+  auto defaults = Parse({});
+  REQUIRE(defaults);
+  CHECK(defaults->cooked_root.empty());
+  CHECK(defaults->hot_reload == !kReleaseBuild);
+  CHECK_FALSE(Parse({"--hot-reload", "maybe"}));
+  auto hooks = Parse({"--lane-step-trace", "trace.txt", "--readback-tick",
+                      "130:t.png", "--readback", "5:f.png"});
+  if (!kRuntimeTestHooks) {
+    CHECK_FALSE(hooks);
+    return;
+  }
+  REQUIRE(hooks);
+  REQUIRE(hooks->lane_step_trace == "trace.txt");
+  REQUIRE(hooks->readbacks.size() == 2);
+  CHECK(hooks->readbacks[0].by_tick);
+  REQUIRE(hooks->readbacks[0].frame == 130);
+  CHECK_FALSE(hooks->readbacks[1].by_tick);
+}
+
 TEST_CASE("The frame clock follows SDL's clock and the display period",
           "[frame_clock]") {
   FrameClockSource source;

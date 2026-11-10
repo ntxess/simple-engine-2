@@ -191,6 +191,16 @@ template <class F>
 // The calling thread's OS thread id (GetCurrentThreadId; gettid).
 [[nodiscard]] std::uint64_t CurrentOsThreadIdFromOs() noexcept;
 
+// Switches the calling thread's QoS for the work that follows, as often as
+// needed (the background lane switches per step: Urgent steps kHigh,
+// Background steps kEco; ADR-079). On Windows it sets the power throttling
+// as RoleScope does (kDefault: no override). On Linux kEco is SCHED_BATCH
+// and kHigh and kDefault are SCHED_OTHER: an unprivileged thread may move
+// between the two in either direction, which a raised nice value would not
+// allow back. Returns whether the change took effect; a failure is logged
+// once.
+bool SetCurrentThreadQos(Qos qos);
+
 // The OS name of the calling thread (GetThreadDescription;
 // pthread_getname_np), UTF-8.
 [[nodiscard]] std::expected<std::string, Error> CurrentOsThreadName();

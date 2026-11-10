@@ -2013,3 +2013,213 @@ it taken at (ADR-066 recorded one; its count did not separate the two).
 **Why.** The spec asks for the statistics' verdict; this gives it with the
 one correction the composed path needs, measured on the run itself, so
 the exit no longer rests on the change of source alone.
+
+## ADR-078 Cooked atlas pages: one texture per page, cooked at build time, re-cooked on the lane in dev builds (2026-11-09)
+
+**Decision.**
+- `.seatlas` (se_assets/atlas_page.h): a 64-byte little-endian header
+  (magic, version 1, size, RGBA8 straight alpha, the nominal 256 KB block
+  size, block and region counts, the source's size and hash, a hash of the
+  pixels), a region table (name and rectangle) and a block table (offset,
+  compressed and raw bytes), then independent LZ4 HC blocks. The decoder
+  checks every offset and size, decodes one block per lane step and checks
+  the pixel hash at the end, so a damaged page is an Error, never a wrong
+  image.
+- tools/asset_cook writes one page per texture of config/texture.json, with
+  one region (the texture's name) covering it, at the PNG's path relative
+  to the content root with `.seatlas` for its extension. CMake runs it
+  (`se_cooked_textures`, a dependency of rampage and of the render tests)
+  into `<build>/bin/cooked`, next to the executables, where the runtime
+  looks by default (`--cooked-root` overrides it). A page whose recorded
+  source hash and size match its PNG is left alone.
+- The runtime reads pages only in Release. Dev builds read the source PNG
+  too (in 1 MB steps) and compare its hash with the page's: a page that is
+  missing, damaged or stale is re-cooked on the lane, in memory (stb_image
+  in se_assets' cook.cc, one unsplittable step, as the design allows for
+  import); nothing is written back. Hot reload re-cooks a changed PNG the
+  same way (Urgent).
+- se_render's PNG decoding (image_io.h, LoadTextureTable) stays for tests
+  and tools (render_shot, the golden images, the M7 tests); the App no
+  longer calls it.
+
+**Why.** Packing several textures into a page needs M10's atlas packer; one
+texture per page keeps every sprite's texture key and region as M3 and M7
+made them, so the golden images and the legacy image comparison do not
+move, while the region table means packing changes no format. Re-cooking
+stale pages in dev builds keeps any content root (tests copy theirs)
+working without a build step, and keeps "stb_image only at import": a dev
+build's re-cook is an import.
+
+## ADR-079 The background lane's contract (2026-11-09)
+
+**Decision.**
+- The request and completion rings are se_core's SpscRing of owned
+  pointers (a `Request*` with its job, a `LaneCompletion*`): the ring stays
+  trivially copyable and the payload moves with the pointer; the
+  release/acquire of the ring's index publishes it. A full request ring
+  keeps the job in a main-side queue pushed at the next Submit or drain; a
+  full completion ring keeps the completion on the lane, retried every
+  1 ms; neither side waits.
+- The binary_semaphore has at most one release outstanding: main (and the
+  stop_callback) release only when an atomic flag goes from false to true,
+  and the lane clears it with an exchange after a successful acquire, which
+  also synchronizes with the release that set it. The wait's timeout is
+  the next scan (500 ms) or the earliest retry.
+- Scheduling: after every step the lane picks again: the oldest ready
+  Urgent step, else the oldest ready Background step. Only a strand's
+  oldest job is eligible, and it runs Urgent when an Urgent job of the
+  strand waits behind it (first in, first out wins over class within a
+  strand). The scan is a Background step. A job that asks to retry (a
+  sharing violation) is not ready until its time; the strand behind it
+  waits.
+- QoS per step: `se::SetCurrentThreadQos` (se_os): Windows' power
+  throttling (kHigh off, kEco on); on Linux SCHED_OTHER and SCHED_BATCH,
+  which an unprivileged thread can switch between in both directions (a
+  nice value it raised could not come back). The lane switches only when
+  the class changes.
+- Stop() (shutdown step 8): queued and running jobs that are not Durable
+  end at the next step boundary (the running step finishes), Durable jobs
+  run to the end, then the thread joins; a Durable job pushed just before
+  the stop is still found (the stop synchronizes with the pull that
+  follows it). Completions left on the lane at exit are dropped (main is
+  shutting down); a Durable one's file is already in place.
+- `DurablePending()` counts Durable jobs from Submit until the lane has
+  finished them; `DurableFailures()` counts the ones that ended with an
+  Error. se_runtime's LaneQuitProvider reports kPending while any is
+  pending and kCancel when one failed since its polls began.
+- The lane calls WakeMain after pushing completions; WakeMain pushes only
+  inside the ADR-047 window, so the lane may call it at any time.
+- ADR-006's list of `// se-fault-boundary` files gains
+  engine/se_assets/src/lane_fault_boundary.cc: each step and each
+  TakeResult runs inside one try; a throw (bad_alloc, glaze's) ends the job
+  with an Error (kIo, "lane job '<kind>' threw: ...") and the lane runs on,
+  as the design's failure handling says for background jobs.
+- `--lane-step-trace FILE` (test builds) records every step (ticket, kind,
+  job class, the class it ran at, Durable, strand, Urgent steps ready
+  besides it, start, duration); the App writes it after the teardown.
+
+**Why.** Pointer rings reuse the ring the engine already has and verified
+under TSan, without a second, move-only ring type. The flag makes the
+semaphore's precondition (count at most 1) hold by construction. Boosting
+a strand's head keeps per-path order without letting a Background save
+hold up an Urgent one.
+
+## ADR-080 se::fs for the lane: shared-delete reads, POSIX replaces, the sharing-violation retry, the fault injector (2026-11-09)
+
+**Decision.**
+- se_platform/file_stream.h: `FileReader` (stepwise reads) opens with
+  `FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE` through
+  CreateFileW on Windows (SDL's IOStream shares reading only), an
+  SDL_IOStream elsewhere; `FileWriter` writes in steps and flushes to the
+  device (FlushFileBuffers; SDL_FlushIO).
+- `TryReplace` renames with POSIX semantics on Windows
+  (SetFileInformationByHandle, FileRenameInfoEx with REPLACE_IF_EXISTS |
+  POSIX_SEMANTICS): it replaces a file that readers which allowed
+  FILE_SHARE_DELETE have open (they keep the old contents), so an engine
+  read never blocks a save. A volume without it falls back to MoveFileExW
+  (REPLACE_EXISTING | WRITE_THROUGH). ERROR_SHARING_VIOLATION,
+  ERROR_ACCESS_DENIED and ERROR_LOCK_VIOLATION are `kBusy` (another process
+  holds the file without FILE_SHARE_DELETE); SDL_RenamePath elsewhere.
+- The save job (SaveRequest{path, bytes, revision, durable}) writes a
+  unique temporary file in the destination's directory (1 MB per step),
+  flushes it, and renames; kBusy retries every 20 ms for up to 2 s, then
+  the job fails, removes its temporary file and reports the Error naming
+  the sharing violation (the document stays dirty).
+- Revisions: the lane keeps, per strand, the newest revision renamed into
+  place, for its lifetime; a save older than it removes its temporary file
+  and completes with `SaveOutcome::superseded`. Revisions are not stored in
+  the files (each document type would need a format of its own for it); a
+  new process starts with an empty table.
+- Flushes (replays, SessionLogs, flight recorder) are Background saves on
+  the path's strand with a process-wide increasing revision
+  (`SubmitFlush`).
+- se_platform/fs_faults.h, in every build but Release (SE_FS_TEST_HOOKS):
+  `SetFsFaults{write_step_delay_ms, read_step_delay_ms, rename_busy_ms}`
+  (atomics, set from a test thread while the lane runs): a throttled disk,
+  and a sharing violation on every replace until rename_busy_ms after the
+  first one it refused.
+- `fs::PathInfo` gains `modify_time_ns` (SDL_PathInfo's), which the scan
+  compares with the size.
+
+**Why.** The spec asks for FILE_SHARE_DELETE reads and a 2 s retry; without
+POSIX semantics the engine's own saves would still fail over a file it is
+reading. Keeping revisions in the lane is enough for the order the spec
+tests (one lane writes every file) without changing any file format.
+
+## ADR-081 AssetRegistry, scopes and the hold (2026-11-09)
+
+**Decision.**
+- `Handle<T>{index, generation}` moves to se_core/handle.h (with the
+  `Texture` tag and `TextureHandle`), so se_render's GpuResources and the
+  registry share it; se_assets cannot include GPU headers.
+- The registry's stores: Texture (with its Atlas, the page's regions,
+  which shares the texture's slot and generation), Sound (shared_ptr<const
+  PcmPayload>), Prefab and SceneChunk (shared_ptr to the payloads). An
+  entry is keyed by the texture's name or the file's normalised path, lives
+  while a scope references it, and is removed (its GPU slot retired through
+  GpuResources) when the last scope is released; its handles go stale.
+- The GPU is behind `TextureUploadPort`; se_runtime implements it over
+  GpuResources (AddTexture, QueueUpload, IsResident, ContentGeneration,
+  Remove), so an upload becomes resident when its fence signals (M7) and a
+  reload swaps at a frame start. Headless runs have no port: textures
+  settle without a GPU texture.
+- A load that fails settles (the sprite draws GpuResources' magenta, the
+  Error with path, line and column is logged and kept): it does not hold
+  the scope, as M7's boot did not fail on a missing texture. A reload that
+  fails keeps the old asset.
+- The AssetScope per GameState is se_runtime's (asset_runtime.h): game
+  modules are deterministic and may not link se_assets, so a game declares
+  what a state needs through `GameSetup::state_assets(state_id)`
+  (StateAssets: every texture of the table by default, or named ones,
+  prefabs, scene chunks, sounds). The runtime keeps one scope per state on
+  the stack (GameStateStack::Entries, new) and releases it when the state
+  leaves.
+- The hold: no ticks are planned while the top state's scope is not
+  resident (logged when it starts and ends), and SimDriver's new
+  `TickGate` (se_sim) is asked before each tick of TickInline after the
+  stack's pending changes are applied, so a state pushed by one tick of a
+  frame stops the rest of that frame until its scope is resident. A held
+  tick is not dropped: it runs in a later frame with the same InputFrame
+  sequence, so the per-tick hashes are those of an ungated run
+  (tests/kernel/tick_gate_test.cc). A state whose scope is not resident is
+  not drawn (its textures are not there yet). Frames and ticks therefore
+  drift by the hold: `--readback-tick TICK:FILE` (test builds) reads back
+  the first frame after a tick ran, and M7's fault-injection test
+  (tools/render_shot/fault_test.py) compares the frame after tick 130 of
+  each run instead of frame 140 (a fault on the uploads for 100 frames now
+  holds the sim that long).
+- Sounds: the lane reads the file and decodes it through `SoundDecoder`
+  (se_assets/sound_decoder.h), which M8's se_audio implements with
+  miniaudio's decoder at the integration; miniaudio stays confined to
+  se_audio. Without a decoder a sound fails with kUnsupported.
+- Completions the registry did not submit (saves, flushes) go to a foreign
+  handler; the App's logs failures.
+- se_runtime's FORBID list drops lz4_static: se_runtime links se_assets,
+  whose closure has it; se_assets alone includes lz4.h (every other module
+  bans it).
+
+**Why.** The port keeps the asset module headless (its tests and TSan run
+without a GPU) and the GPU rules in se_render. Holding at the tick gate
+rather than inside RunTick keeps RunTick, which replays and the M17
+threaded driver call, unchanged.
+
+## ADR-082 glaze parses prefabs and scene chunks on the lane, in one translation unit (2026-11-09)
+
+**Decision.** se_assets' payloads_glaze.cc reads prefabs into glaze's
+`generic_u64` (64-bit integers exact, object members in file order) and
+writes each member back as compact JSON, the text the ComponentRegistry's
+JSON hooks take on main. Scene chunks are checked whole by glaze's validator,
+then read by reflection into a struct whose entities are `glz::raw_json`
+(each entity's text kept as written; skipping a raw value checks nothing,
+hence the validator): the generic value and its writing back cost more
+than ten times as much (a 256-entity chunk: median 1.2 ms against about
+0.1 ms in Release), which put the chunk's step near the 2 ms bound under
+load. A scene chunk is
+`{"format": "se-scene-chunk-v1", "chunk": N, "entities": [ {...} ]}`
+(M10's importer splits scenes into chunks, one lane step each). A parse
+error carries the line and column glaze's validator reports.
+tools/checks/check_glaze.py allows glaze headers in a translation unit
+named `*_glaze.cc` besides reflect_glaze.h.
+
+**Why.** The design gives the lane glaze parsing; one named unit per module
+keeps glaze's compile cost (ADR-010) contained and visible to the check.

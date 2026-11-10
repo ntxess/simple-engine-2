@@ -59,26 +59,15 @@
 #include <vector>
 
 #include "se_core/error.h"
+#include "se_core/handle.h"
 #include "se_core/thread_role.h"
 #include "se_core/thread_safety.h"
 #include "se_render/gpu_device.h"
 
 namespace se {
 
-// Tag types for Handle.
-struct Texture {};
-
-template <class T>
-struct Handle {
-  // Slot index + 1; 0 is the null handle.
-  std::uint32_t index = 0;
-  std::uint32_t generation = 0;
-
-  [[nodiscard]] constexpr bool IsNull() const noexcept { return index == 0; }
-  friend constexpr bool operator==(const Handle&, const Handle&) = default;
-};
-
-using TextureHandle = Handle<Texture>;
+// Handle<Texture> (TextureHandle) is se_core's Handle (se_core/handle.h),
+// which the asset registry shares (M9).
 
 // A decoded texture: RGBA8, straight alpha, rows top to bottom.
 struct TexturePayload {

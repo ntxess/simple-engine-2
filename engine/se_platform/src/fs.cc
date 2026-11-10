@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "se_core/error.h"
+#include "se_platform/file_stream.h"
 
 namespace se::fs {
 namespace {
@@ -199,6 +200,7 @@ std::expected<PathInfo, Error> Stat(std::string_view path) {
       break;
   }
   result.size = info.size;
+  result.modify_time_ns = info.modify_time;
   return result;
 }
 
@@ -235,16 +237,26 @@ std::expected<void, Error> CreateDirectories(std::string_view directory) {
 }
 
 std::expected<std::vector<std::byte>, Error> ReadFile(std::string_view path) {
-  const std::string text(path);
-  std::size_t size = 0;
-  void* data = SDL_LoadFile(text.c_str(), &size);
-  if (data == nullptr) {
-    const ErrorCode code = Exists(text) ? ErrorCode::kIo : ErrorCode::kNotFound;
-    return IoError("cannot read file", text, code);
+  // Through FileReader: on Windows the file is opened with
+  // FILE_SHARE_DELETE, as every engine read is (ADR-080).
+  auto reader = FileReader::Open(path);
+  if (!reader) {
+    Error error = std::move(reader.error());
+    error.message = "cannot read file: " + error.message;
+    if (error.path.empty()) error.path = std::string(path);
+    return std::unexpected(std::move(error));
   }
-  const SdlFree release(data);
-  std::vector<std::byte> bytes(size);
-  if (size > 0) std::memcpy(bytes.data(), data, size);
+  std::vector<std::byte> bytes(static_cast<std::size_t>(reader->Size()));
+  std::size_t filled = 0;
+  while (filled < bytes.size()) {
+    auto got = reader->ReadUnthrottled(
+        std::span<std::byte>(bytes.data() + filled, bytes.size() - filled));
+    if (!got) return std::unexpected(std::move(got.error()));
+    if (*got == 0) break;
+    filled += *got;
+  }
+  // A file that shrank while it was read ends where it ended.
+  bytes.resize(filled);
   return bytes;
 }
 

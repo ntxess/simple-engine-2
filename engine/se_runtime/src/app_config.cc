@@ -415,7 +415,7 @@ std::expected<AppConfig, Error> ParseAppConfig(
       auto reload = ParseReload(*value);
       if (!reload) return std::unexpected(reload.error());
       config.texture_reloads.push_back(std::move(*reload));
-    } else if (option == "--readback") {
+    } else if (option == "--readback" || option == "--readback-tick") {
       if (auto ok = NeedTestHooks(option); !ok) {
         return std::unexpected(ok.error());
       }
@@ -423,7 +423,27 @@ std::expected<AppConfig, Error> ParseAppConfig(
       if (!value) return std::unexpected(value.error());
       auto readback = ParseReadback(*value);
       if (!readback) return std::unexpected(readback.error());
+      readback->by_tick = option == "--readback-tick";
       config.readbacks.push_back(std::move(*readback));
+    } else if (option == "--cooked-root") {
+      auto value = reader.Value(option);
+      if (!value) return std::unexpected(value.error());
+      config.cooked_root = std::string(*value);
+    } else if (option == "--hot-reload") {
+      auto value = reader.Value(option);
+      if (!value) return std::unexpected(value.error());
+      if (*value != "on" && *value != "off") {
+        return Bad(
+            std::format("--hot-reload: bad value '{}' (on or off)", *value));
+      }
+      config.hot_reload = *value == "on";
+    } else if (option == "--lane-step-trace") {
+      if (auto ok = NeedTestHooks(option); !ok) {
+        return std::unexpected(ok.error());
+      }
+      auto value = reader.Value(option);
+      if (!value) return std::unexpected(value.error());
+      config.lane_step_trace = std::string(*value);
     } else {
       return Bad(std::format("unknown option '{}'", option));
     }

@@ -187,6 +187,15 @@ WorldHash GameStateStack::Hash() const {
   return combined;
 }
 
+std::vector<StackEntry> GameStateStack::Entries() const {
+  std::vector<StackEntry> entries;
+  entries.reserve(stack_.size());
+  for (const Entry& entry : stack_) {
+    entries.push_back({entry.id, entry.state.get()});
+  }
+  return entries;
+}
+
 std::string_view GameStateStack::TopId() const noexcept {
   return stack_.empty() ? std::string_view() : stack_.back().id;
 }
