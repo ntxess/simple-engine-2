@@ -11,11 +11,13 @@
 #include <SDL3/SDL_version.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <expected>
 #include <format>
 #include <limits>
@@ -25,6 +27,8 @@
 #include <utility>
 #include <vector>
 
+#include "se_assets/background_lane.h"
+#include "se_assets/lane_jobs.h"
 #include "se_audio/audio_engine.h"
 #include "se_audio/pcm.h"
 #include "se_core/error.h"
@@ -38,6 +42,7 @@
 #include "se_platform/display_output.h"
 #include "se_platform/fatal.h"
 #include "se_platform/fs.h"
+#include "se_platform/fs_faults.h"
 #include "se_platform/gamepads.h"
 #include "se_platform/inbox.h"
 #include "se_platform/input_sampler.h"
@@ -62,6 +67,7 @@
 #include "se_runtime/pacer_policy.h"
 #include "se_runtime/quit.h"
 #include "se_runtime/render_present_port.h"
+#include "se_runtime/sound_assets.h"
 #include "se_runtime/user_settings.h"
 #include "se_sim/audio_events.h"
 #include "se_sim/game_module.h"
@@ -528,6 +534,21 @@ std::expected<void, Error> App::StartAssets() {
     assets.trace_capacity = 1U << 18;
   }
   assets.state_assets = setup_.state_assets;
+  // The sound table: its files are every state's default sounds, decoded
+  // on the lane (ADR-087). Without it the game runs silent, as in M8; with
+  // --audio none no sound is requested, decoded or waited for.
+  if (!setup_.sound_table.empty() && AudioOutputFor(config_).has_value()) {
+    auto table = LoadSoundTable(paths_.content_root, setup_.sound_table);
+    if (table) {
+      sound_table_ = std::move(*table);
+    } else {
+      SE_LOG_ERROR("sound table: {} ({})", table.error().message,
+                   table.error().path);
+    }
+  }
+  for (const SoundTableEntry& sound : sound_table_) {
+    assets.sounds.push_back(sound.file);
+  }
   auto runtime = AssetRuntime::Start(assets, renderer_.get());
   if (!runtime) return std::unexpected(std::move(runtime.error()));
   assets_ = std::move(*runtime);
@@ -551,8 +572,9 @@ std::expected<void, Error> App::LoadSettings() {
 void App::StartInputSampler() {
   if (input_sampler_ || !sdl_) return;
   InputSamplerConfig sampler_config;
-  sampler_config.rate_hz = power_.Update(SDL_GetTicksNS())
-                               .value_or(SamplerRateFor(power_.OnBattery()));
+  static_cast<void>(power_.Update(SDL_GetTicksNS()));
+  sampler_rate_ = SamplerRateFor(power_.OnBattery(), gamepads_.Count());
+  sampler_config.rate_hz = sampler_rate_;
   auto sampler = InputSampler::Start(std::move(sampler_config));
   if (!sampler) {
     SE_LOG_WARN("no input sampler, gamepads are not updated: {}",
@@ -560,84 +582,98 @@ void App::StartInputSampler() {
     return;
   }
   input_sampler_ = std::move(*sampler);
-  SE_LOG_INFO("input sampler: SDL_UpdateGamepads at {} Hz ({})",
+  SE_LOG_INFO("input sampler: SDL_UpdateGamepads at {} Hz ({}, {} gamepads)",
               input_sampler_->Stats().rate_hz,
-              power_.OnBattery() ? "on battery" : "on AC power");
+              power_.OnBattery() ? "on battery" : "on AC power",
+              gamepads_.Count());
 }
 
 void App::UpdateInputSampler(std::uint64_t now_ns) {
   if (!input_sampler_) return;
   // Parked while Suspended or Idle (an atomic doorbell; never blocks).
   input_sampler_->SetParked(lifecycle_.Suspended() || lifecycle_.Idle());
-  // Main reads the power source every 5 s and publishes the rate.
-  if (const std::optional<std::uint32_t> rate = power_.Update(now_ns)) {
-    input_sampler_->SetRate(*rate);
-    SE_LOG_INFO("input sampler: {} Hz ({})", *rate,
-                power_.OnBattery() ? "on battery" : "on AC power");
+  // Main reads the power source every 5 s; the rate follows it and the
+  // open gamepads (20 Hz without one, ADR-090).
+  static_cast<void>(power_.Update(now_ns));
+  const std::uint32_t rate =
+      SamplerRateFor(power_.OnBattery(), gamepads_.Count());
+  if (rate != sampler_rate_) {
+    sampler_rate_ = rate;
+    input_sampler_->SetRate(rate);
+    SE_LOG_INFO("input sampler: {} Hz ({}, {} gamepads)", rate,
+                power_.OnBattery() ? "on battery" : "on AC power",
+                gamepads_.Count());
   }
 }
 
 void App::StartAudio() {
+  audio::EngineConfig audio_config;
   const std::optional<audio::Output> output = AudioOutputFor(config_);
   if (!output) {
     SE_LOG_INFO("audio: none (--audio none)");
-    return;
+  } else {
+    audio_config.output = *output;
+    audio_config.group_volume = {
+        static_cast<float>(settings_.music_volume / 100.0),
+        static_cast<float>(settings_.effects_volume / 100.0)};
+    auto engine = audio::AudioEngine::Create(audio_config);
+    if (engine) {
+      audio_ = std::move(*engine);
+    } else {
+      SE_LOG_WARN("audio: no engine, the game runs silent: {}",
+                  engine.error().message);
+    }
   }
-  audio::EngineConfig audio_config;
-  audio_config.output = *output;
-  audio_config.group_volume = {
-      static_cast<float>(settings_.music_volume / 100.0),
-      static_cast<float>(settings_.effects_volume / 100.0)};
-  auto engine = audio::AudioEngine::Create(audio_config);
-  if (!engine) {
-    SE_LOG_WARN("audio: no engine, the game runs silent: {}",
-                engine.error().message);
-    return;
+  // The sounds decode on the background lane at the engine's format (its
+  // default when the engine did not start); the registry hands each one to
+  // the engine (ADR-087).
+  const std::uint32_t rate =
+      audio_ ? audio_->SampleRate() : audio_config.sample_rate;
+  const std::uint32_t channels =
+      audio_ ? audio_->Channels() : audio_config.channels;
+  sound_decoder_ = std::make_unique<LaneSoundDecoder>(rate, channels);
+  if (!assets_) return;
+  assets_->Registry().SetSoundDecoder(sound_decoder_.get());
+  assets_->SetSoundListener(
+      [this](std::string_view path, std::shared_ptr<const Pcm> pcm) {
+        AssertMainThread();
+        OnSound(path, std::move(pcm));
+      });
+  if (!sound_table_.empty()) {
+    SE_LOG_INFO(
+        "audio: {} sounds in {}, decoded on the background lane at {} Hz, "
+        "{} channels",
+        sound_table_.size(), setup_.sound_table, rate, channels);
   }
-  audio_ = std::move(*engine);
-  LoadSounds();
 }
 
-void App::LoadSounds() {
-  if (setup_.sound_table.empty() || audio_ == nullptr) return;
-  const std::string table_path =
-      fs::Join(paths_.content_root, setup_.sound_table);
-  auto text = fs::ReadTextFile(table_path);
-  if (!text) {
-    SE_LOG_ERROR("sound table: {} ({})", text.error().message, table_path);
+void App::OnSound(std::string_view path, std::shared_ptr<const Pcm> pcm) {
+  const auto entry =
+      std::ranges::find_if(sound_table_, [&](const SoundTableEntry& sound) {
+        return fs::Join(paths_.content_root, sound.file) == path;
+      });
+  // A state's own sound outside the table has no key to play it by.
+  if (entry == sound_table_.end()) return;
+  if (pcm == nullptr) {
+    SE_LOG_DEBUG("sound '{}' released", entry->name);
+    if (audio_) audio_->SetSound(entry->key, nullptr);
     return;
   }
-  auto table = ParseNameTable(*text, table_path);
-  if (!table) {
-    SE_LOG_ERROR("sound table: {} ({})", table.error().message,
-                 table.error().path);
-    return;
-  }
-  std::size_t loaded = 0;
-  for (const auto& [name, file] : *table) {
-    const std::string path = fs::Join(paths_.content_root, file);
-    auto bytes = fs::ReadFile(path);
-    if (!bytes) {
-      SE_LOG_ERROR("sound '{}': {} ({})", name, bytes.error().message, path);
-      continue;
-    }
-    // Decoded on main at boot for now; M9's lane decodes off main.
-    auto pcm = audio::DecodeSound(*bytes, audio_->SampleRate(),
-                                  audio_->Channels(), path);
-    if (!pcm) {
-      SE_LOG_ERROR("sound '{}': {} ({})", name, pcm.error().message, path);
-      continue;
-    }
-    audio_->SetSound(SoundKeyOf(name), std::move(*pcm));
-    ++loaded;
-  }
-  SE_LOG_INFO("audio: {} of {} sounds from {}", loaded, table->size(),
-              setup_.sound_table);
+  const bool reload = audio_ && audio_->Sound(entry->key) != nullptr;
+  SE_LOG_INFO("sound '{}' {}: {} frames at {} Hz, decoded on the lane",
+              entry->name, reload ? "reloaded" : "resident", pcm->frames,
+              pcm->sample_rate);
+  // New voices get the new PCM; playing ones keep theirs until they end.
+  if (audio_) audio_->SetSound(entry->key, std::move(pcm));
+}
+
+std::uint64_t App::AudioDelay() const noexcept {
+  return game_ ? game_->audio.DelayNs() : 0;
 }
 
 void App::BeginAudioFrame(const StepPlan& plan, const FrameClock& clock) {
-  // D = B + T/2: the plan's budget and the display's vblank period (the
-  // FramePacer's).
+  // D = B + T/2: the plan's budget and the display's vblank period of this
+  // frame, which FramePacer::BeginFrame has just set.
   double vblank_sec = pacer_.LastFrame().vblank_period_sec;
   if (!(vblank_sec > 0.0)) {
     vblank_sec = clock.period_sec / std::max(1, pacer_.PresentInterval());
@@ -659,13 +695,71 @@ void App::WriteReplay() {
   if (!game_ || !game_->recorder.Active()) return;
   game_->recorder.RecordSession(game_->session);
   const std::size_t frames = game_->recorder.FrameCount();
-  const std::vector<std::byte> bytes = game_->recorder.Finish();
-  if (auto written = fs::WriteFile(config_.record_path, bytes); !written) {
-    SE_LOG_WARN("--record {}: {}", config_.record_path,
-                written.error().message);
+  std::vector<std::byte> bytes = game_->recorder.Finish();
+  if (!assets_) {
+    if (auto written = fs::WriteFile(config_.record_path, bytes); !written) {
+      SE_LOG_WARN("--record {}: {}", config_.record_path,
+                  written.error().message);
+      return;
+    }
+    SE_LOG_INFO("replay of {} ticks written to {}", frames,
+                config_.record_path);
     return;
   }
-  SE_LOG_INFO("replay of {} ticks written to {}", frames, config_.record_path);
+  // Through the lane (ADR-089): a Background save marked Durable, which
+  // shutdown step 8 runs to the end before it joins the lane.
+  const std::size_t size = bytes.size();
+  SaveRequest save;
+  save.path = config_.record_path;
+  save.bytes = std::move(bytes);
+  save.revision = 1;
+  save.durable = true;
+  replay_failures_before_ = assets_->Lane().DurableFailures();
+  SubmitSave(assets_->Lane(), std::move(save), JobClass::kBackground);
+  replay_submitted_ = true;
+  replay_ticks_ = frames;
+  SE_LOG_INFO("replay of {} ticks ({} bytes) to {} through the background lane",
+              frames, size, config_.record_path);
+}
+
+void App::RunDurableSaveTest() {
+  const DurableSaveTestHook& test = config_.durable_save_test;
+  if (durable_save_test_done_ || !assets_ ||
+      static_cast<std::int64_t>(iterates_) != test.frame) {
+    return;
+  }
+  durable_save_test_done_ = true;
+  if constexpr (!fs::kFsFaultHooks) {
+    SE_LOG_ERROR("--durable-save-test: the se::fs injector is compiled out");
+    return;
+  }
+  // A throttled disk: every write step of the lane waits first.
+  fs::SetFsFaults(fs::FsFaults{.write_step_delay_ms = test.step_ms});
+  const std::size_t size = std::size_t{test.kib} * 1024;
+  std::string text = R"({"format": "se-durable-save-test-v1", "padding": ")";
+  const std::string_view tail = "\"}\n";
+  if (size > text.size() + tail.size()) {
+    text.append(size - text.size() - tail.size(), 'x');
+  }
+  text += tail;
+  SaveRequest save;
+  save.path = fs::Join(paths_.pref, "durable_save_test.json");
+  durable_save_test_path_ = save.path;
+  save.bytes.resize(text.size());
+  std::memcpy(save.bytes.data(), text.data(), text.size());
+  save.revision = 1;
+  save.durable = true;
+  SE_LOG_INFO(
+      "durable save test: {} bytes to {} at frame {}, {} ms per write step",
+      save.bytes.size(), save.path, iterates_, test.step_ms);
+  SubmitSave(assets_->Lane(), std::move(save), JobClass::kBackground);
+  RequestQuit();
+}
+
+void App::NoteTeardown(std::string_view step) noexcept {
+  if (teardown_count_ < teardown_steps_.size()) {
+    teardown_steps_[teardown_count_++] = step;
+  }
 }
 
 void App::RunPushKeys(const FrameReport& report) {
@@ -746,6 +840,7 @@ void App::RequestQuit() {
 void App::SyncQuitState() {
   if (quit_.Pending() && !quit_pending_seen_) {
     quit_pending_seen_ = true;
+    quit_requested_ns_ = SDL_GetTicksNS();
     lifecycle_.OnQuitPending();
     SE_LOG_INFO("quit pending ({})", QuitReasonName(quit_.Reason()));
   } else if (!quit_.Pending() && quit_pending_seen_ && !quit_.ReadyToExit()) {
@@ -1107,6 +1202,11 @@ SDL_AppResult App::Iterate() {
   SyncQuitState();
   if (quit_.ReadyToExit()) {
     lifecycle_.OnShutdownStarted();
+    if (quit_requested_ns_ != 0) {
+      SE_LOG_INFO(
+          "quit ready after {:.1f} ms",
+          static_cast<double>(SDL_GetTicksNS() - quit_requested_ns_) * 1e-6);
+    }
     SE_LOG_INFO("quit ({}): exiting after {} iterates",
                 QuitReasonName(quit_.Reason()), iterates_);
     return SDL_APP_SUCCESS;
@@ -1260,6 +1360,9 @@ SDL_AppResult App::Iterate() {
                   costs_.Current(), lifecycle_.Modal());
   report.pacer = pacer_.LastFrame();
   if (kRuntimeTestHooks && !config_.push_keys.empty()) RunPushKeys(report);
+  if (kRuntimeTestHooks && config_.durable_save_test.frame > 0) {
+    RunDurableSaveTest();
+  }
   if (setup_.on_frame) setup_.on_frame(*this, report);
   return SDL_APP_CONTINUE;
 }
@@ -1401,13 +1504,36 @@ SDL_AppResult App::Shutdown(SDL_AppResult result) {
         sound.events, sound.played, sound.late, sound.cosmetic_dropped,
         sound.failed, sound.no_engine);
   }
-  // The --record replay, before the Worlds go (M8).
+  if (kRuntimeTestHooks && !durable_save_test_path_.empty()) {
+    // Before shutdown step 8 joins the lane: the quit waited for it.
+    const auto info = fs::Stat(durable_save_test_path_);
+    SE_LOG_INFO("durable save test: {} bytes in place at shutdown",
+                info ? info->size : 0);
+  }
+  // The --record replay, after the last tick, through the lane (ADR-089).
   if (booted_) WriteReplay();
   // The renderer's totals and leak check, while logging still runs; the
   // teardown below only destroys it.
   if (renderer_) renderer_->Shutdown();
   Teardown();
   if (lane_stats_) AssetRuntime::LogLaneStopped(*lane_stats_);
+  if (replay_submitted_) {
+    if (lane_durable_failures_ > replay_failures_before_) {
+      SE_LOG_WARN("--record {}: the background lane could not write it",
+                  config_.record_path);
+    } else {
+      SE_LOG_INFO("replay of {} ticks written to {} by the background lane",
+                  replay_ticks_, config_.record_path);
+    }
+  }
+  {
+    std::string order;
+    for (std::size_t i = 0; i < teardown_count_; ++i) {
+      if (i > 0) order += ", ";
+      order += teardown_steps_[i];
+    }
+    SE_LOG_INFO("shutdown order: {}", order);
+  }
   if (kRuntimeTestHooks && !config_.lane_step_trace.empty()) {
     if (auto written = WriteLaneStepTrace(lane_trace_, config_.lane_step_trace);
         !written) {
@@ -1437,6 +1563,7 @@ void App::Teardown() {
   if (input_sampler_) {
     input_sampler_->Stop();
     input_sampler_.reset();
+    NoteTeardown("input-sampler");
   }
   // Step 4: no more wake pushes from other threads (they read the watch
   // list the filter removal changes), no more diverted events; the GPU
@@ -1444,6 +1571,7 @@ void App::Teardown() {
   if (wake_) wake_->Close();
   if (filter_) filter_->Remove();
   if (gpu_) gpu_->WaitForIdle();
+  NoteTeardown("event-filter (4)");
   // Steps 5-6: every World, on main. A throwing OnExit leaves its state
   // and the ones below it on the stack; destroying the GameRuntime destroys
   // them (and their Worlds) without another OnExit.
@@ -1455,21 +1583,30 @@ void App::Teardown() {
     };
     if (!RunGameHook("GameState::OnExit", clear)) shutdown_faulted_ = true;
     game_.reset();
+    NoteTeardown("worlds (6)");
   }
   // Step 7: the audio engine: every voice stopped and uninitialised, then
   // ma_engine_uninit (joins miniaudio's device thread), then the PCM.
-  audio_.reset();
+  if (audio_) {
+    audio_.reset();
+    NoteTeardown("audio (7)");
+  }
   // Step 8: the background lane (queued jobs that are not Durable are
   // cancelled, a running step finishes, Durable jobs run to the end).
   if (assets_) {
     assets_->StopLane();
     lane_stats_ = assets_->Lane().Stats();
     lane_trace_ = assets_->Lane().TakeStepTrace();
+    lane_durable_failures_ = assets_->Lane().DurableFailures();
+    NoteTeardown("bg-lane (8)");
   }
   // Step 9: the vblank sampler (the pacer lets go of it first).
   pacer_.Detach();
-  if (helpers_ && helpers_->StopSamplers() == VblankStop::kDetached) {
-    vblank_detached_ = true;
+  if (helpers_) {
+    if (helpers_->StopSamplers() == VblankStop::kDetached) {
+      vblank_detached_ = true;
+    }
+    NoteTeardown("vblank-sampler (9)");
   }
   // Step 10: every AssetScope (the GPU slots go through the retire queue
   // while the renderer still exists).
@@ -1485,7 +1622,10 @@ void App::Teardown() {
       shutdown_faulted_ = true;
     }
     assets_.reset();
+    NoteTeardown("asset-scopes (10)");
   }
+  // The lane's sound decoder, after every job that held it.
+  sound_decoder_.reset();
   // Step 12: the present port's fences, the renderer's objects (the GPU
   // is idle), then release the window from the device and destroy the
   // device.
@@ -1504,9 +1644,15 @@ void App::Teardown() {
   sdl_.reset();
   // Step 16: SDL's log output to stderr, then drain and stop the log
   // worker (spdlog::shutdown); SE_LOG_* is synchronous from here on.
-  if (logging_) logging_->Stop();
+  if (logging_) {
+    logging_->Stop();
+    NoteTeardown("log-worker (16)");
+  }
   // Step 17: the watchdog, the last engine thread.
-  if (helpers_) helpers_->Stop();
+  if (helpers_) {
+    helpers_->Stop();
+    NoteTeardown("watchdog (17)");
+  }
   helpers_.reset();
   logging_.reset();
   // Every profiled engine thread has been joined.

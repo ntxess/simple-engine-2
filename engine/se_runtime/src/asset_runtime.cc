@@ -155,8 +155,39 @@ void AssetRuntime::RequestStateAssets(StateScope& entry) {
     registry_->RequestSceneChunk(entry.scope,
                                  fs::Join(config_.content_root, path));
   }
-  for (const std::string& path : wanted.sounds) {
-    registry_->RequestSound(entry.scope, fs::Join(config_.content_root, path));
+  // The sound table's sounds, then the state's own (ADR-087).
+  if (wanted.all_sounds) {
+    for (const std::string& path : config_.sounds) RequestSound(entry, path);
+  }
+  for (const std::string& path : wanted.sounds) RequestSound(entry, path);
+}
+
+void AssetRuntime::RequestSound(const StateScope& entry,
+                                const std::string& path) {
+  const std::string joined = fs::Join(config_.content_root, path);
+  const Handle<SoundAsset> handle =
+      registry_->RequestSound(entry.scope, joined);
+  const bool tracked = std::ranges::any_of(
+      sounds_,
+      [&handle](const TrackedSound& sound) { return sound.handle == handle; });
+  if (!tracked) sounds_.push_back({joined, handle, 0});
+}
+
+void AssetRuntime::NotifySounds() {
+  // Sounds whose last scope released them: the listener drops them.
+  std::erase_if(sounds_, [this](const TrackedSound& sound) {
+    if (registry_->State(sound.handle) != AssetState::kNone) return false;
+    if (sound_listener_) sound_listener_(sound.path, nullptr);
+    return true;
+  });
+  for (TrackedSound& sound : sounds_) {
+    if (registry_->State(sound.handle) != AssetState::kResident) continue;
+    const std::uint32_t version = registry_->Version(sound.handle);
+    if (version == sound.version) continue;
+    sound.version = version;
+    if (sound_listener_) {
+      sound_listener_(sound.path, registry_->Sound(sound.handle));
+    }
   }
 }
 
@@ -201,6 +232,7 @@ void AssetRuntime::BeginFrame(const GameStateStack& states) {
   SE_ASSERT_MAIN_THREAD();
   SyncScopes(states);
   registry_->BeginFrame();
+  NotifySounds();
 }
 
 bool AssetRuntime::TopResident(const GameStateStack& states,
@@ -297,6 +329,7 @@ void AssetRuntime::ReleaseScopes() {
   SE_ASSERT_MAIN_THREAD();
   if (!registry_) return;
   scopes_.clear();
+  sounds_.clear();
   registry_->ReleaseAll();
 }
 

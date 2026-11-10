@@ -73,6 +73,11 @@
 //                          tick TICK has run (M9)
 //   --lane-step-trace FILE  write every background lane step (job, class,
 //                          QoS, duration) to FILE at shutdown (M9)
+//   --durable-save-test FRAME:KB:MS  at the end of iterate FRAME, set the
+//                          se::fs injector to MS ms per write step, submit
+//                          a Durable save of KB KiB of JSON through the
+//                          background lane to <pref>/durable_save_test.json
+//                          and request the quit (ADR-089)
 //   --push-key FRAME:MS:KEY[:up]  at the end of iterate FRAME, push an SDL
 //                          key event for KEY (a key name) stamped MS
 //                          milliseconds after that frame's start, so the
@@ -132,6 +137,13 @@ struct PushKeyHook {
   bool down = true;
 };
 
+// --durable-save-test FRAME:KB:MS (frame 0: off).
+struct DurableSaveTestHook {
+  std::int64_t frame = 0;
+  std::uint32_t kib = 0;
+  std::uint32_t step_ms = 0;
+};
+
 // --audio.
 enum class AudioRequest : std::uint8_t { kDefault, kDevice, kNull, kNone };
 
@@ -172,6 +184,7 @@ struct AppConfig {
   std::vector<ReadbackHook> readbacks;
   std::string lane_step_trace;
   std::vector<PushKeyHook> push_keys;
+  DurableSaveTestHook durable_save_test;
 
   // The arguments after "--".
   std::vector<std::string> game_args;

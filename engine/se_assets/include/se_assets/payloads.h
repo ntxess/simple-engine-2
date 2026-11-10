@@ -6,8 +6,9 @@
 // result into the completion ring, and main owns it from then on.
 //
 //   AtlasPage          a cooked atlas page (atlas_page.h), RGBA8
-//   PcmPayload         a decoded sound (M8's audio plays it; the decoder
-//                      comes from se_audio through SoundDecoder)
+//   PcmPayload         a decoded sound: se_core's Pcm, the object M8's
+//                      voices play in place (the decoder comes from
+//                      se_audio through SoundDecoder; ADR-087)
 //   PrefabPayload      a prefab file's top-level members
 //   SceneChunkPayload  one chunk of a scene's entities
 //   SaveOutcome        a SaveRequest renamed into place (or superseded)
@@ -30,6 +31,7 @@
 #include <vector>
 
 #include "se_core/error.h"
+#include "se_core/pcm.h"
 
 namespace se {
 
@@ -62,13 +64,8 @@ struct AtlasPage {
   }
 };
 
-// Interleaved 32-bit float samples.
-struct PcmPayload {
-  std::uint32_t channels = 0;
-  std::uint32_t sample_rate = 0;
-  std::uint64_t frames = 0;
-  std::vector<float> samples;
-};
+// Interleaved 32-bit float samples (se_core/pcm.h).
+using PcmPayload = Pcm;
 
 struct JsonMember {
   std::string key;

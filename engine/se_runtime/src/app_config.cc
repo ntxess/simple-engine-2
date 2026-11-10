@@ -259,6 +259,26 @@ std::expected<PushKeyHook, Error> ParsePushKey(std::string_view text) {
   return hook;
 }
 
+// FRAME:KB:MS.
+std::expected<DurableSaveTestHook, Error> ParseDurableSaveTest(
+    std::string_view text) {
+  const auto bad = [text] {
+    return Bad(
+        std::format("--durable-save-test {}: expected FRAME:KB:MS", text));
+  };
+  const std::size_t first = text.find(':');
+  const std::size_t second = first == std::string_view::npos
+                                 ? std::string_view::npos
+                                 : text.find(':', first + 1);
+  if (second == std::string_view::npos) return bad();
+  const auto frame = ParseNumber<std::int64_t>(text.substr(0, first));
+  const auto kib =
+      ParseNumber<std::uint32_t>(text.substr(first + 1, second - first - 1));
+  const auto ms = ParseNumber<std::uint32_t>(text.substr(second + 1));
+  if (!frame || *frame < 1 || !kib || *kib < 1 || !ms) return bad();
+  return DurableSaveTestHook{*frame, *kib, *ms};
+}
+
 std::optional<AudioRequest> ParseAudio(std::string_view text) {
   if (text == "device") return AudioRequest::kDevice;
   if (text == "null") return AudioRequest::kNull;
@@ -498,6 +518,15 @@ std::expected<AppConfig, Error> ParseAppConfig(
                                *value));
       }
       config.audio = *audio;
+    } else if (option == "--durable-save-test") {
+      if (auto ok = NeedTestHooks(option); !ok) {
+        return std::unexpected(ok.error());
+      }
+      auto value = reader.Value(option);
+      if (!value) return std::unexpected(value.error());
+      auto hook = ParseDurableSaveTest(*value);
+      if (!hook) return std::unexpected(hook.error());
+      config.durable_save_test = *hook;
     } else if (option == "--push-key") {
       if (auto ok = NeedTestHooks(option); !ok) {
         return std::unexpected(ok.error());

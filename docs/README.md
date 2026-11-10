@@ -58,6 +58,31 @@ behaviour reference until every rule and editor operation is ported.
 | se_lane_bench | bench/lane_steps | `bench.lane_steps`: the background lane's steps (a 1 MB read, a 256 KB LZ4 block decode, a scene chunk parse), each gated on its p99 (M9) |
 | legacy tree | core/, app/ | The SFML reference (`SE_BUILD_LEGACY`, legacy presets) |
 
+## Threads
+
+Every engine thread is a named role started through `se::StartThread`
+(se_os), with a ThreadRegistry slot that carries its breadcrumb and log
+ring into crash dumps; `integration::EngineThreadsRunning()` counts the
+live ones besides main. The App starts and stops them in this order
+(docs/design/mt-design.md "Shutdown Order"; ADR-047, ADR-075, ADR-088), and
+logs the teardown as "shutdown order: ...":
+
+| Thread (OS name) | Role | Module | Started | Stopped | What it does |
+|---|---|---|---|---|---|
+| main | kMain | se_runtime | SDL's main thread, from SDL_AppInit | the end of SDL_AppQuit | window, events, GPU, every World in inline mode, the audio engine's calls, the AssetRegistry |
+| log-worker | kLogWorker | se_log | boot step 2 | shutdown step 16 | drains the per-thread log rings into the file, stderr and the panel ring |
+| vblank-sampler | kVblankSampler | se_platform | boot step 9 (Windows, with a window) | shutdown step 9 (or detached in its wait) | stamps the window's output's vblanks for the FramePacer |
+| watchdog | kWatchdog | se_crash | boot step 9 | shutdown step 17 (the last) | the boot budget, hangs, requested dumps, the 5 s shutdown deadline |
+| bg-lane | kBackground | se_assets | boot step 9, after the watchdog | shutdown step 8 (Durable jobs finish) | the background lane: reads, cooked pages, sound decoding, saves, the hot-reload scan; calls WakeMain only inside ADR-047's window |
+| input-sampler | kInputSampler | se_platform | the first iterate, after the wake scope opens (ADR-047) | before shutdown step 4 | SDL_UpdateGamepads at 1 kHz (250 Hz on battery), parked while Suspended or Idle |
+| sim | kSim | se_sim | `SimThread::Start` (tests; the App wires it in M17b) | Quit, `SimThread::Stop` | the dedicated sim driver: owns its session's Worlds and runs SimDriver::RunTick on PacedClock deadlines (M17a) |
+| fork workers | kForkWorker | se_core | (W = 0: none start) | | deterministic fork-join chunks (M14) |
+
+Library threads (role kLibrary, no slot): miniaudio's device thread (or
+the null backend's mixing thread), SDL's HID, joystick and raw-input
+threads, Tracy's listener with `--profile`; crashpad's handler is a
+separate process.
+
 ## Building
 
 Windows, from the repository root (needs Visual Studio 18 with MSVC 14.51):
@@ -107,7 +132,8 @@ time (`--cooked-root DIR` elsewhere); in dev builds a page whose PNG
 changed is re-cooked on the lane, and `--hot-reload on` (the default
 except in Release) reloads a PNG changed while the game runs within about
 half a second. The sim holds (no ticks) until the start state's textures
-are resident; the log says when it starts and stops holding.
+and sounds are resident; the log says when it starts and stops holding
+("state 'sandbox': its 5 assets are resident after ... ms").
 `--lane-step-trace FILE` (test builds) writes every lane step at shutdown. `--frames N`
 quits after N presented frames; the runtime's options are listed in
 engine/se_runtime/include/se_runtime/app_config.h:
@@ -117,7 +143,14 @@ out\build\msvc-dev\bin\rampage --frames 600
 ```
 
 rampage reads its key bindings and sound volumes from config/config.json
-and its sounds from config/sound.json (M8). `--audio null` mixes on
+and its sounds from config/sound.json (M8). The sounds load like the
+textures: the start state's AssetScope requests every file of the sound
+table, the background lane reads each one in 1 MB steps and decodes it with
+miniaudio's decoder in steps of about 1 ms (data only; ma_engine stays on
+main), and the registry hands the PCM to the audio engine when it is
+resident; a sound file changed while the game runs is decoded again and new
+voices play the new PCM while the playing ones finish the old (ADR-087).
+`--audio null` mixes on
 miniaudio's null backend and plays nothing (scripts/ci.ps1 sets
 `SE_AUDIO=null` for every test), `--audio none` runs without an audio
 engine, `--record FILE` writes the session's replay, which `se_replay
@@ -125,6 +158,14 @@ engine, `--record FILE` writes the session's replay, which `se_replay
 its edges and their sources), and `--no-raw-keyboard` stamps keys from
 Win32 messages instead of SDL's raw keyboard. Gamepads work through the
 input sampler (1 kHz); a plugged-in pad is opened when SDL reports it.
+`--record`'s replay is written through the background lane as a Durable
+save at shutdown, and any Durable lane job keeps a quit pending until it is
+renamed into place ("quit waits for N Durable lane job(s)", "quit ready
+after X ms"; ADR-089). `tools/input_probe` shows the key stamps' resolution
+with a person at the keyboard (docs/gates.md). Test builds add
+`--push-key FRAME:MS:KEY[:up]` (a stamped key event) and
+`--durable-save-test FRAME:KB:MS` (a Durable save on a throttled disk, then
+the quit).
 
 `--pacing paced|standard|vrr|auto` chooses the FramePacer's mode:
 

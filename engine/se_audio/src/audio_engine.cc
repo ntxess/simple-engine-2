@@ -437,6 +437,12 @@ bool AudioEngine::Playing(VoiceId voice) const {
   return impl_->Find(voice) != nullptr;
 }
 
+PcmRef AudioEngine::VoicePcm(VoiceId voice) const {
+  SE_ASSERT_MAIN_THREAD();
+  const Voice* found = impl_->Find(voice);
+  return found != nullptr ? found->pcm : nullptr;
+}
+
 std::uint32_t AudioEngine::ActiveVoices(Group group) const {
   SE_ASSERT_MAIN_THREAD();
   return impl_->Active(group);

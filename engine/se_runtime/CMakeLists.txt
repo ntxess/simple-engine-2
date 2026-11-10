@@ -11,7 +11,9 @@
 # ActionMap from the game's settings file, stamped edges placed on ticks).
 # M9 adds the background lane and the AssetRegistry (asset_runtime.h: a
 # scope per GameState, the hold until it is resident, GpuResources behind
-# the registry's upload port) and the lane's QuitProvider (lane_quit.h).
+# the registry's upload port) and the lane's QuitProvider (lane_quit.h). The
+# M8/M9 integration decodes the sounds on the lane (sound_assets.h, over
+# se_audio's PcmDecoder; ADR-087).
 
 se_add_module(se_runtime KIND STATIC
   SOURCES
@@ -31,6 +33,7 @@ se_add_module(se_runtime KIND STATIC
     src/quit.cc
     src/render_present_port.cc
     src/sdl_app.cc
+    src/sound_assets.cc
     src/user_settings.cc
   PUBLIC_DEPS
     se_core

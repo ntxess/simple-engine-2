@@ -21,15 +21,17 @@
 //    9 helper-threads  the vblank sampler (Windows, a window), then the
 //                      watchdog (boot budget until the first iterate), then
 //                      the background lane and the AssetRegistry (M9,
-//                      asset_runtime.h)
+//                      asset_runtime.h); the sound table is read (its
+//                      files are every state's default sounds)
 //   10 game            the settings file; the audio engine (M8: miniaudio,
 //                      the null backend when no device opens, --audio) and
-//                      the sound table's sounds, decoded on main; the
-//                      GameModule's registry and storages, the
+//                      the lane's sound decoder at its format (ADR-087);
+//                      the GameModule's registry and storages, the
 //                      GameStateStack with the start state pushed (its
-//                      AssetScope requests its assets), the SimDriver
-//                      writing the process's InputFrame ring and asking the
-//                      assets' TickGate before each tick
+//                      AssetScope requests its textures and sounds, which
+//                      the lane loads and decodes), the SimDriver writing
+//                      the process's InputFrame ring and asking the assets'
+//                      TickGate before each tick
 // The main thread runs inside its RoleScope from SDL_AppInit to the end of
 // SDL_AppQuit (integration::EnterMainThread).
 // --headless skips the window and the GPU device (steps 6 and 7 do
@@ -66,18 +68,24 @@
 // retried every second, and the fifth failure takes the fault path.
 //
 // Shutdown follows the design's order for the parts that exist: the
-// watchdog's deadline starts when the quit drain ends; remove the event
-// filter, SDL_WaitForGPUIdle, destroy the Worlds, stop the background lane
-// (step 8), stop the vblank sampler (step 9), release every AssetScope
-// (step 10), release the present port and the device,
+// watchdog's deadline starts when the quit drain ends; stop the input
+// sampler (before step 4, ADR-047), remove the event filter,
+// SDL_WaitForGPUIdle, destroy the Worlds, stop the audio engine (step 7),
+// stop the background lane (step 8: Durable jobs, the --record replay
+// among them, run to the end), stop the vblank sampler (step 9), release
+// every AssetScope (step 10), release the present port and the device,
 // remove the subclass and destroy the window, SDL_QuitSubSystem, stop the
 // log worker (step 16), join the watchdog (step 17), stop the profiler.
 // M8: the audio engine goes at step 7, right after the Worlds (their voice
 // scopes end with them): every voice stopped and uninitialised, then
 // ma_engine_uninit, then the PCM. The input sampler stops before step 4.
 //
+// The steps run are logged after the teardown ("shutdown order: ...",
+// ADR-088).
+//
 // Audio (M8): each frame the AudioBridge recalibrates its PCM clock and
-// takes D = B + T/2 from the plan's budget and the pacer's vblank period;
+// takes D = B + T/2 from the plan's budget and the FramePacer's vblank
+// period of the frame (PacerFrame::vblank_period_sec, set by BeginFrame);
 // the World's audio events start after each tick at max(now, anchor + D);
 // the engine's end ring and finished voices are swept every iterate.
 // Game code that runs during shutdown (GameSetup::on_shutdown and every
@@ -96,6 +104,7 @@
 #include <SDL3/SDL_events.h>
 #include <SDL3/SDL_init.h>
 
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -131,6 +140,7 @@
 #include "se_runtime/lifecycle.h"
 #include "se_runtime/quit.h"
 #include "se_runtime/render_present_port.h"
+#include "se_runtime/sound_assets.h"
 #include "se_runtime/user_settings.h"
 #include "se_sim/game_module.h"
 
@@ -201,8 +211,9 @@ struct GameSetup {
   // module's default bindings and full volumes.
   std::string settings_file;
   // The sound table (config/sound.json: name to file, like the texture
-  // table) relative to the content root; empty: no sounds. Decoded on main
-  // at boot (M8; M9's lane takes this over).
+  // table) relative to the content root; empty: no sounds. Its files are
+  // every state's default sounds, decoded on the background lane and handed
+  // to the audio engine when resident (ADR-087).
   std::string sound_table;
   // The start bytes of a --record replay (rampage: its scene file); empty:
   // none.
@@ -295,6 +306,12 @@ class App final : public WindowListener {
   [[nodiscard]] const UserSettings& Settings() const noexcept {
     return settings_;
   }
+  // The lane's sound decoding so far (ADR-087).
+  [[nodiscard]] SoundDecodeStats SoundDecodes() const noexcept {
+    return sound_decoder_ ? sound_decoder_->Stats() : SoundDecodeStats{};
+  }
+  // The AudioBridge's D of the last frame, in nanoseconds (0: none yet).
+  [[nodiscard]] std::uint64_t AudioDelay() const noexcept;
   // The audio engine, or nullptr (--audio none, or it could not start).
   [[nodiscard]] audio::AudioEngine* Audio() const noexcept {
     return audio_.get();
@@ -381,11 +398,19 @@ class App final : public WindowListener {
   // Boot step 10: the audio engine and the sound table (M8). Never fails
   // the boot: without an engine the game runs silent.
   void StartAudio() SE_REQUIRES(g_main);
-  void LoadSounds() SE_REQUIRES(g_main);
+  // The AssetRuntime's sound listener: a sound of the table landed, was
+  // reloaded, or (null) was released (ADR-087).
+  void OnSound(std::string_view path, std::shared_ptr<const Pcm> pcm)
+      SE_REQUIRES(g_main);
   // Before the frame's ticks: D, the PCM clock, the listener.
   void BeginAudioFrame(const StepPlan& plan, const FrameClock& clock)
       SE_REQUIRES(g_main);
+  // The --record replay, through the lane as a Durable save (ADR-089).
   void WriteReplay() SE_REQUIRES(g_main);
+  // --durable-save-test (ADR-089).
+  void RunDurableSaveTest() SE_REQUIRES(g_main);
+  // Records a teardown step for the shutdown-order log (ADR-088).
+  void NoteTeardown(std::string_view step) noexcept;
   void RunPushKeys(const FrameReport& report) SE_REQUIRES(g_main);
   // The input sampler (M8): started at the first iterate, inside ADR-047's
   // window; parked while Suspended or Idle; its rate from the power source
@@ -415,11 +440,29 @@ class App final : public WindowListener {
   std::vector<bool> readbacks_done_;
   integration::CpuInfo cpu_;
   std::optional<integration::HelperThreads> helpers_;
+  // The sound table (boot step 9) and the lane's decoder (boot step 10);
+  // the decoder outlives the lane's jobs and the registry (ADR-087).
+  std::vector<SoundTableEntry> sound_table_;
+  std::unique_ptr<LaneSoundDecoder> sound_decoder_;
   std::unique_ptr<AssetRuntime> assets_;
   // Taken at shutdown step 8, logged (and the step trace written) after
   // the teardown.
   std::optional<LaneStats> lane_stats_;
   std::vector<LaneStepRecord> lane_trace_;
+  std::uint64_t lane_durable_failures_ = 0;
+  // The --record replay submitted to the lane, and the lane's Durable
+  // failures before it (ADR-089).
+  bool replay_submitted_ = false;
+  std::uint64_t replay_failures_before_ = 0;
+  std::size_t replay_ticks_ = 0;
+  // --durable-save-test.
+  bool durable_save_test_done_ = false;
+  std::string durable_save_test_path_;
+  // When the quit was first seen pending (the "quit ready after" log).
+  std::uint64_t quit_requested_ns_ = 0;
+  // The teardown steps run, in order (ADR-088).
+  std::array<std::string_view, 24> teardown_steps_{};
+  std::size_t teardown_count_ = 0;
   UserSettings settings_;
   std::unique_ptr<audio::AudioEngine> audio_;
   std::unique_ptr<GameRuntime> game_;
@@ -427,6 +470,8 @@ class App final : public WindowListener {
   // updates them.
   Gamepads gamepads_;
   std::unique_ptr<InputSampler> input_sampler_;
+  // The rate the sampler was last given (ADR-090).
+  std::uint32_t sampler_rate_ = 0;
   PowerWatch power_;
 
   Lifecycle lifecycle_;

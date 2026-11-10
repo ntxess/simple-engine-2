@@ -5,7 +5,9 @@
 // kInputSampler, HighQoS, started with se::StartThread. It calls
 // SDL_UpdateGamepads (documented safe from any thread) every period:
 // 1000 Hz on AC power, 250 Hz on battery (main reads SDL_GetPowerInfo
-// every 5 s through PowerWatch and publishes the rate with SetRate). With
+// every 5 s through PowerWatch and publishes the rate with SetRate), and
+// 20 Hz while no gamepad is open (device detection only: SDL finds new pads
+// through the same update; ADR-090). With
 // SDL_HINT_AUTO_UPDATE_JOYSTICKS=0 (SdlContext sets it) nothing else
 // updates gamepads, so pad events carry stamps of about one period. It
 // waits with SDL_DelayNS (a high-resolution waitable timer on Windows) and
@@ -27,6 +29,7 @@
 #define SE_PLATFORM_INPUT_SAMPLER_H_
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <functional>
@@ -40,6 +43,10 @@ namespace se {
 
 inline constexpr std::uint32_t kSamplerHzOnAc = 1000;
 inline constexpr std::uint32_t kSamplerHzOnBattery = 250;
+// While no gamepad is open: the 1 kHz updates stamp nothing then, and they
+// cost main's VRR deadline about 0.2 ms at p99 on the development machine
+// (ADR-090).
+inline constexpr std::uint32_t kSamplerHzIdle = 20;
 
 struct InputSamplerConfig {
   std::uint32_t rate_hz = kSamplerHzOnAc;
@@ -97,6 +104,12 @@ class InputSampler {
 // The polling rate for the power source.
 [[nodiscard]] constexpr std::uint32_t SamplerRateFor(bool on_battery) noexcept {
   return on_battery ? kSamplerHzOnBattery : kSamplerHzOnAc;
+}
+
+// The polling rate for the power source and the gamepads the App has open.
+[[nodiscard]] constexpr std::uint32_t SamplerRateFor(
+    bool on_battery, std::size_t open_gamepads) noexcept {
+  return open_gamepads == 0 ? kSamplerHzIdle : SamplerRateFor(on_battery);
 }
 
 // Reads SDL_GetPowerInfo at most every |interval_ns| (main): Update returns

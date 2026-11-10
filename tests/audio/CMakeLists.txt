@@ -11,6 +11,7 @@ se_add_module(se_audio_tests KIND EXECUTABLE
   SOURCES
     audio_test.cc
     audio_desktop_test.cc
+    sound_assets_test.cc
     ../support/no_dialogs_listener.cc
     ../support/tracy_inert_listener.cc
   PRIVATE_DEPS
@@ -21,6 +22,11 @@ se_add_module(se_audio_tests KIND EXECUTABLE
     Catch2::Catch2WithMain
   TEST)
 target_include_directories(se_audio_tests PRIVATE "${CMAKE_SOURCE_DIR}/tests")
+# The integration's lane tests write their WAV files here.
+set(_se_audio_out "${CMAKE_CURRENT_BINARY_DIR}/out")
+file(MAKE_DIRECTORY "${_se_audio_out}")
+target_compile_definitions(se_audio_tests PRIVATE
+  SE_TEST_OUT_DIR="${_se_audio_out}")
 
 catch_discover_tests(se_audio_tests
   TEST_SPEC "~[desktop]"

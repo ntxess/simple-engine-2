@@ -5,7 +5,8 @@
 // never cancelled and quit waits for them. LaneQuitProvider reports
 // kPending while the lane has Durable jobs running or queued, and kCancel
 // when a Durable job failed during this quit (a failed save keeps its
-// document dirty, and the quit is called off). Main thread.
+// document dirty, and the quit is called off). It logs when a quit starts
+// to wait for Durable jobs and when they are done (ADR-089). Main thread.
 
 #ifndef SE_RUNTIME_LANE_QUIT_H_
 #define SE_RUNTIME_LANE_QUIT_H_
@@ -31,6 +32,7 @@ class LaneQuitProvider final : public QuitProvider {
   const BackgroundLane* lane_;
   // The lane's Durable failures when this quit's polls began.
   bool polling_ = false;
+  bool waiting_logged_ = false;
   std::uint64_t failures_at_start_ = 0;
 };
 

@@ -2471,3 +2471,143 @@ named `*_glaze.cc` besides reflect_glaze.h.
 
 **Why.** The design gives the lane glaze parsing; one named unit per module
 keeps glaze's compile cost (ADR-010) contained and visible to the check.
+
+## ADR-087 Sounds decode on the background lane into one shared PCM type; the state's scope holds them (2026-11-09)
+
+**Context.** M8 decoded the sound table on main at boot (`App::LoadSounds`,
+ADR-077 said "M9's lane will decode them"); M9 gave the lane a SoundDecoder
+port (se_assets/sound_decoder.h, ADR-081) that se_assets could not
+implement, since miniaudio is confined to se_audio (ADR-076) and se_audio
+may not see se_assets (ALLOW_ONLY se_core). The two modules also each had a
+PCM struct (se_audio's `Pcm`, se_assets' `PcmPayload`), so handing a
+decoded sound from the registry to a voice would have copied it.
+
+**Decision.**
+- `se_core/pcm.h` holds the one PCM type (`se::Pcm`: interleaved f32
+  samples, channels, rate, frames). `se::PcmPayload` (se_assets) and
+  `se::audio::Pcm` (se_audio) are aliases of it, so the lane's payload, the
+  AssetRegistry's `std::shared_ptr<const Pcm>`, the engine's sound table
+  and each voice share one object; no copy is made between the lane and
+  the mixer.
+- se_audio adds `PcmDecoder`: miniaudio's ma_decoder over the file's
+  bytes (it owns them), decoding to the engine's rate and channel count in
+  calls of at most N frames. It touches no engine state.
+- se_runtime's `LaneSoundDecoder` (se_runtime/sound_assets.h) implements
+  se_assets' SoundDecoder over it: each lane step decodes 4096-frame chunks
+  until 1 ms has passed (the lane's steps stay near M9's 2 ms), and counts
+  the steps, the longest one and the role of the thread that ran the last
+  one (kBackground on the lane, which the integration tests check).
+- Boot: the sound table is read at boot step 9 with the texture table
+  (`LoadSoundTable`; a missing or bad table is logged and the game runs
+  silent, as M8 did); its files are every state's default sounds
+  (`StateAssets::all_sounds`, like `all_textures`). At step 10 the App
+  creates the audio engine, then the LaneSoundDecoder at the engine's
+  format (48 kHz stereo when the engine did not start: the sounds still
+  load and are dropped) and gives it to the registry before the start
+  state is pushed. With `--audio none` the sound table is not read: no
+  sound is requested, decoded or waited for, so a headless run without
+  audio ticks from its first frame as before.
+- `AssetRuntime::SetSoundListener`: at iterate start, after the registry
+  drained the lane's completions, every sound whose PCM landed (version
+  changed and resident) is handed to the listener, and a sound whose
+  entry went away (its last scope released) is handed over as null. The
+  App's listener calls `AudioEngine::SetSound(key, pcm)` (null removes it:
+  Play then fails and is counted). So a state's sounds are in the engine
+  before its first tick (the hold of ADR-081 covers them), and a hot
+  reload gives new voices the new PCM while playing voices keep the old
+  object until their ma_sound_uninit has returned.
+- `AudioEngine::VoicePcm(voice)` returns a voice's PCM (tests).
+- Shutdown: the engine goes at step 7, the lane at step 8 (a sound job in
+  flight finishes its step or is cancelled), the scopes at step 10; the
+  decoder outlives them all.
+
+**Why.** One type is what makes "the lane decodes, the voices play it in
+place" true without a copy; the adapter in se_runtime is the only module
+that may see both se_assets and se_audio. Feeding the engine from the
+registry's version counter, at the same point where textures become
+resident, keeps the hold's guarantee (asset timing never changes a tick)
+for sounds too.
+
+## ADR-088 The helper threads' order at the integration; the shutdown trace (2026-11-09)
+
+**Decision.**
+- Boot: the log worker (step 2), the vblank sampler and the watchdog
+  (step 9, `StartHelperThreads`), the background lane right after them
+  (step 9, `AssetRuntime::Start`), then at the first iterate, after
+  `WakeEventScope::Open`, the input sampler (ADR-075). The lane pushes no
+  SDL event itself: it calls WakeMain, which pushes only inside ADR-047's
+  window, so it may start at step 9.
+- Shutdown: the input sampler before step 4 (it calls SDL_UpdateGamepads,
+  which pushes events; ADR-047, ADR-075) and the wake scope closes at step
+  4; the Worlds (step 6); the audio engine (step 7); the lane (step 8,
+  Durable jobs finish); the vblank sampler (step 9); the AssetScopes (step
+  10); then the renderer, the window, SDL, the log worker (16) and the
+  watchdog (17), as before. The design's step 9 joins the input sampler
+  there; ADR-047 moves it before step 4 and this record keeps it there.
+- Every one of them is a named role started through se::StartThread, so
+  the ThreadRegistry has a live slot for each (`bg-lane`, role
+  kBackground; `input-sampler`, role kInputSampler), the dump streams carry
+  their breadcrumbs, and `integration::EngineThreadsRunning()` counts them;
+  `crash.rampage_*` now require the lane's slot and OS thread name in the
+  dumps as well as the input sampler's.
+- App::Teardown records each step it runs in a fixed array (no
+  allocation), and Shutdown logs it after the teardown: "shutdown order:
+  input-sampler, event-filter (4), worlds (6), audio (7), bg-lane (8),
+  vblank-sampler (9), asset-scopes (10), log-worker (16), watchdog (17)"
+  (a step that had nothing to stop is left out). `rampage.frames_300`
+  checks it, and the run reports read the order from it.
+
+**Why.** The order is a contract between four milestones' threads; logging
+it once makes it checkable without hooks in every step.
+
+## ADR-089 Replays go through the lane; the quit's wait is logged; the Durable-save quit test (2026-11-09)
+
+**Decision.**
+- `--record`'s replay is written through the background lane (M9: "replay
+  and SessionLog flushes go through the lane as Background jobs") as a
+  Background-class SaveRequest marked Durable: it is submitted at the
+  start of the shutdown, after the last tick, and shutdown step 8 runs it
+  to the end before joining the lane (a non-Durable flush would be
+  cancelled there). The temp-file-then-rename and the sharing-violation
+  retry of ADR-080 apply. The App logs the lane's Durable failures after
+  the teardown.
+- The two-phase quit logs its wait: LaneQuitProvider says "quit waits for
+  N Durable lane job(s)" when it first answers kPending and "the lane's
+  Durable jobs are done" when it answers kReady; the App logs "quit ready
+  after X ms" (from the request to the exit).
+- Test builds add `--durable-save-test FRAME:KB:MS`: at iterate FRAME the
+  App sets the se::fs injector to MS ms per write step, submits a Durable
+  save of KB KiB of JSON to `<pref>/durable_save_test.json` and requests
+  the quit. `platform.rampage_durable_quit` (label desktop) runs rampage
+  with it (4 MiB at 100 ms per 1 MiB step) and checks the order of the
+  log lines, that the quit waited at least the throttled steps, and that
+  the file is complete, parses and left no temporary file.
+
+**Why.** A replay written by main at shutdown bypassed the lane the design
+gives every write; a Durable save at shutdown is the one form the lane's
+stop is guaranteed to finish. The rampage test proves the quit's wait in
+the real executable, with its window, its helpers and its shutdown order.
+
+## ADR-090 The input sampler idles at 20 Hz while no gamepad is open (2026-11-09)
+
+**Context.** M8's sampler calls SDL_UpdateGamepads at 1000 Hz on AC power
+and 250 Hz on battery (ADR-075). The integration's desktop run found
+`pacing.vrr_deadline` (M6: the self-paced 120 Hz deadline's p99 at most
+0.5 ms) failing about one run in two: p99 0.49 to 0.52 ms. Measured on
+this machine with nothing else changed (no gamepad connected, CPU load
+13-26%): with the sampler at 1000 Hz p99 0.31 to 0.52 ms; at 250 Hz 0.26
+to 0.28 ms; at 20 Hz 0.27 to 0.31 ms; without the sampler 0.26 to 0.31
+ms. The 1 kHz updates stamp nothing while no pad is open.
+
+**Decision.** The App gives the sampler `SamplerRateFor(on_battery,
+open_gamepads)`: `kSamplerHzIdle` (20 Hz) while the App has no gamepad
+open, otherwise 1000 Hz on AC and 250 Hz on battery as before. SDL finds
+new pads through the same update, so a pad plugged in is opened within
+about 50 ms, and the next iterate raises the rate (logged: "input sampler:
+1000 Hz (on AC power, 1 gamepads)"). A virtual joystick is reported at
+once, so the virtual-gamepad tests are unchanged.
+
+**Why.** The spec's rates exist to stamp pad edges about a millisecond
+apart; with no pad open they only cost main's pacing precision. With a pad
+open the cost returns: the real-gamepad row of docs/gates.md now also asks
+for `pacing.vrr_deadline` with a pad connected.

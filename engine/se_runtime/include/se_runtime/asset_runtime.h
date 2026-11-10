@@ -13,7 +13,9 @@
 //   each iterate    BeginFrame at iterate start: the completion ring is
 //                   drained (pages to the upload queue, the 8 MB budget is
 //                   GpuResources'), changed files start reloads, scopes
-//                   follow the stack; Hold() before the stepper plans: no
+//                   follow the stack, and every sound whose PCM landed or
+//                   changed goes to the sound listener (the audio engine;
+//                   ADR-087); Hold() before the stepper plans: no
 //                   ticks while the top state's scope is not resident
 //                   (logged when it starts and ends), and the TickGate
 //                   stops a frame's ticks when a tick pushes a state whose
@@ -28,7 +30,9 @@
 // source changed or is missing is re-cooked on the lane, and the 500 ms
 // scan hot-reloads changed sources and pages; Release builds read pages
 // only. A state's assets are GameSetup::state_assets(id), by default every
-// texture of the game's table.
+// texture of the game's table and every sound of its sound table. Sounds
+// are decoded on the lane by the SoundDecoder the App gives the registry
+// (se_runtime/sound_assets.h).
 
 #ifndef SE_RUNTIME_ASSET_RUNTIME_H_
 #define SE_RUNTIME_ASSET_RUNTIME_H_
@@ -39,12 +43,14 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "se_assets/asset_registry.h"
 #include "se_assets/atlas_page.h"
 #include "se_assets/background_lane.h"
 #include "se_core/error.h"
+#include "se_core/pcm.h"
 #include "se_core/thread_role.h"
 #include "se_core/thread_safety.h"
 #include "se_core/types.h"
@@ -63,10 +69,13 @@ struct StateAssets {
   bool all_textures = true;
   // Names of the table, when all_textures is false.
   std::vector<std::string> textures;
+  // Every sound of the sound table (AssetRuntimeConfig::sounds), besides
+  // |sounds|.
   // Files relative to the content root.
   std::vector<std::string> prefabs;
   std::vector<std::string> scene_chunks;
   std::vector<std::string> sounds;
+  bool all_sounds = true;
 };
 
 struct AssetRuntimeConfig {
@@ -75,6 +84,8 @@ struct AssetRuntimeConfig {
   std::string cooked_root;
   // The texture table, paths as written (relative to the content root).
   std::vector<TextureTableEntry> textures;
+  // The sound table's files, relative to the content root (ADR-087).
+  std::vector<std::string> sounds;
   AtlasRequest::Mode page_mode = AtlasRequest::Mode::kPageIfFresh;
   bool hot_reload = true;
   // Step trace records kept (--lane-step-trace).
@@ -112,6 +123,15 @@ class AssetRuntime final : public TickGate {
   // BeforeRender, for the stack it saw.
   [[nodiscard]] bool Drawable(const World* world) const;
 
+  // Called at iterate start (BeginFrame) for every sound whose PCM landed
+  // or was reloaded, with the file's path (joined to the content root),
+  // and with null once the sound's last scope released it (ADR-087).
+  using SoundListener =
+      std::function<void(std::string_view path, std::shared_ptr<const Pcm>)>;
+  void SetSoundListener(SoundListener listener) {
+    sound_listener_ = std::move(listener);
+  }
+
   // --reload-texture: re-cooks |name| (from |file| instead when given) on
   // the lane. False when the table has no such texture.
   bool ReloadTexture(std::string_view name, std::string_view file)
@@ -144,7 +164,17 @@ class AssetRuntime final : public TickGate {
     bool resident_logged = false;
   };
 
+  // A sound a scope requested, and the version the listener saw.
+  struct TrackedSound {
+    std::string path;
+    Handle<SoundAsset> handle;
+    std::uint32_t version = 0;
+  };
+
   explicit AssetRuntime(AssetRuntimeConfig config);
+  void RequestSound(const StateScope& entry, const std::string& path)
+      SE_REQUIRES(g_main);
+  void NotifySounds() SE_REQUIRES(g_main);
   void SyncScopes(const GameStateStack& states) SE_REQUIRES(g_main);
   void RequestStateAssets(StateScope& entry) SE_REQUIRES(g_main);
   [[nodiscard]] TextureSource SourceOf(const TextureTableEntry& entry) const;
@@ -158,6 +188,8 @@ class AssetRuntime final : public TickGate {
   std::unique_ptr<AssetRegistry> registry_;
   std::unique_ptr<LaneQuitProvider> quit_;
   std::vector<StateScope> scopes_;
+  std::vector<TrackedSound> sounds_;
+  SoundListener sound_listener_;
   bool holding_ = false;
   std::uint64_t held_frames_ = 0;
 };

@@ -41,10 +41,12 @@ se_add_module(se_platform_tests KIND EXECUTABLE
     fs_test.cc
     gpu_test.cc
     gamepad_desktop_test.cc
+    helper_threads_test.cc
     inbox_test.cc
     input_sampler_test.cc
     input_test.cc
     lifecycle_test.cc
+    sound_assets_desktop_test.cc
     quit_test.cc
     runtime_test.cc
     sdl_context_test.cc
@@ -112,11 +114,28 @@ if(TARGET rampage)
             --expect "booted 'rampage'"
             --expect "shutdown [(]success[)]: [0-9]+ iterates, 300 presented frames, ran [1-9][0-9][0-9]+ ticks"
             --expect "log file .*rampage_pref/logs/rampage[.]log"
+            --expect "audio: 2 sounds in config/sound[.]json, decoded on the background lane"
+            --expect "sound 'hit' resident: [0-9]+ frames"
+            --expect "sound 'death' resident: [0-9]+ frames"
+            --expect "state 'sandbox': its 5 assets are resident after"
+            --expect "shutdown order: input-sampler, event-filter [(]4[)], worlds [(]6[)], audio [(]7[)], bg-lane [(]8[)], vblank-sampler [(]9[)], asset-scopes [(]10[)]"
             --reject "SE_ASSERT failed|ERROR|E t=[0-9]+ | [EF] [a-z-]+ t=[0-9]+ "
             -- $<TARGET_FILE:rampage> --frames 300 --no-activate
             --pref-dir "${_se_rampage_pref}")
   set_tests_properties(rampage.frames_300 PROPERTIES
     LABELS "desktop;gpu;rampage" TIMEOUT 120)
+  # The integration (ADR-089): rampage quits with a Durable save in flight
+  # through the lane on the throttled-disk injector, and the quit waits for
+  # the rename (durable_quit_test.py). A test hook, so not in Release.
+  if(NOT CMAKE_BUILD_TYPE STREQUAL "Release")
+    add_test(NAME platform.rampage_durable_quit
+      COMMAND Python3::Interpreter
+              "${CMAKE_CURRENT_SOURCE_DIR}/durable_quit_test.py"
+              --rampage $<TARGET_FILE:rampage>
+              --work "${_se_platform_out}/rampage_durable_quit")
+    set_tests_properties(platform.rampage_durable_quit PROPERTIES
+      LABELS "desktop;rampage" TIMEOUT 120)
+  endif()
   # M8: key events pushed with explicit timestamps 8 ms apart land on the
   # two ticks of a 60 Hz Locked frame, the recorded session replays
   # headless through se_replay with identical per-tick hashes, and the

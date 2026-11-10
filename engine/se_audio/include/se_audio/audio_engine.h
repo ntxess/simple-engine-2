@@ -34,7 +34,9 @@
 //   - ReleaseScope stops and uninitialises the scope's voices first; Stop
 //     does one voice.
 //   - SetSound replaces a sound's PCM: new voices get the new PCM, voices
-//     already playing keep the old one until they end.
+//     already playing keep the old one until they end. The App's sounds
+//     arrive from the background lane through the AssetRegistry (ADR-087);
+//     null removes a sound.
 // Destruction (shutdown step 7): every voice stopped and uninitialised,
 // ma_engine_uninit (which joins miniaudio's device thread), then the PCM.
 //
@@ -153,6 +155,9 @@ class AudioEngine {
   // iterate).
   void Sweep() SE_REQUIRES(g_main);
   [[nodiscard]] bool Playing(VoiceId voice) const SE_REQUIRES(g_main);
+  // The PCM a playing voice reads (null when it has ended): the sound's
+  // PCM when the voice started, even after a reload (tests; ADR-087).
+  [[nodiscard]] PcmRef VoicePcm(VoiceId voice) const SE_REQUIRES(g_main);
   [[nodiscard]] std::uint32_t ActiveVoices(Group group) const
       SE_REQUIRES(g_main);
 

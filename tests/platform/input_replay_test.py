@@ -65,9 +65,14 @@ def main():
         if stale.exists():
             stale.unlink()
 
+    # Headless iterates do not wait for frames, so the 60 of them pass in
+    # less time than the lane takes to decode rampage's sounds, and the sim
+    # holds until the start state's scope is resident (ADR-081, ADR-087):
+    # without audio no sound is loaded and the ticks start at once.
+    audio = "none" if args.headless else "null"
     command = [args.rampage, "--frames", "60", "--fixed-frame-dt", "16.6667",
                "--return-on-quit", "--no-crash-capture", "--pref-dir",
-               out / "pref", "--record", replay, "--audio", "null"]
+               out / "pref", "--record", replay, "--audio", audio]
     command += ["--headless"] if args.headless else ["--no-activate"]
     command += ["--push-key", f"{PUSH_FRAME}:2:d",
                 "--push-key", f"{PUSH_FRAME}:10:s",
