@@ -3026,3 +3026,92 @@ recorded in gates.md for M15.
 settles` appends to a watched file every 25 ms for 400 ms under a 100 ms
 scan: the old rule reported once per scan during the writes, the new one
 reports the finished size once (twice at most on a stalled writer).
+
+## ADR-095 se_imgui and the panel interface's details (2026-11-10)
+
+**Decision.** The M10 panel interface (docs/milestone-specs.md "The panel
+interface") is engine/se_editor/include/se_editor/panel.h, namespace
+`se::editor`, with the spec's PanelContext fields, Panel and
+EditorCommands as written, and these details the spec leaves open:
+- PanelContext gains three fields after the spec's: `paused` (Play.Paused
+  or Stepping), `play_edits` (a `PlayEdits*`, non-null while playing and
+  not faulted) and `viewports` (an `EditorViewports*`, null without a
+  renderer). `commands` stays null while playing or faulted, as the spec
+  says; edits of the play World (the inspector during Play, the stress
+  generator's spawns) go through `PlayEdits::Submit(command, tick)`, which
+  turns the command into SessionLog entries (EditorCommand::ToSession)
+  against a tick (0: the next), applied at once while paused and
+  discarded at Stop. `EditorViewports::Viewport(name)` hands a panel an M7
+  ViewportTarget that the editor draws the context's World into before
+  the ImGui pass (created on first use, destroyed at the next frame start
+  when a frame did not ask for it); the panel shows its TargetTexture()
+  through TextureIds.
+- `EditorCommand` (commands.h): `Kind()` (a CommandKind enum, because RTTI
+  is banned and coalescing needs to compare kinds), `Label()`, `Target()`,
+  `Apply(World&)` and `Revert(World&)` returning `std::expected<void,
+  Error>`, `ToSession(registry, tick)` and `Absorb(next)` for coalescing.
+  The kinds are SetComponentCommand (before and after JSON; an empty
+  before adds and its revert removes), AddComponentCommand,
+  RemoveComponentCommand (its value captured when it applies),
+  CreateEntityCommand and DestroyEntityCommand (the entity stored as
+  every registered component it holds except IdComponent and
+  DestroyRequest, Spawned and PrevTransform included, so an undone
+  destroy hashes the same), PathPointCommand (Insert, Move, Delete of one
+  point of a path component's "points" array; before and after JSON
+  computed when it is made from the World the panel sees) and
+  CommandGroup (one undo step of several). All work through the
+  ComponentRegistry's JSON hooks; the editor's small JSON model
+  (src/json_value.h) edits path points without glaze.
+- `TextureIds` is an abstract class (`Id(handle)` and `Size(handle)`):
+  the editor's implementation resolves through GpuResources and the
+  SDL_GPU backend, M10b's tests give a fake. `EditorStats` is a struct of
+  values and frame-valid pointers (the pacer's frame and totals, the
+  plan, the stepper's stats, the Schedule's SystemStats, Renderer2D's
+  stats, ForkSiteStats for M14). `LogView` is a fixed ring of formatted
+  lines with their levels and the log rings' drop and rate-limit counts.
+  `Selection` holds Guids.
+- se_imgui builds ImGui's sources, imgui_stdlib and the SDL3 and SDL_GPU
+  backends from the pinned archive as an OBJECT library folded into
+  se_imgui, without the engine's warning set and outside lint. Its
+  IMGUI_USER_CONFIG, se_imgui/imconfig_se.h, makes GImGui a
+  `thread_local` (`g_se_imgui_context`), keeps IM_ASSERT on in every
+  build through se::AssertFailed, turns IM_DEBUG_BREAK into the same
+  failure (no debugger break in the process), and disables ImGui's own
+  Win32 and shell calls (the SDL3 backend provides them) and the obsolete
+  API. `se::imgui::Context` creates the one context on main with docking
+  and gamepad navigation on, multi-viewports opt-in, ImGui's default font
+  in the dynamic atlas and no ini file (settings to and from memory);
+  `HeadlessFrames` runs frames without a window or GPU, answering the
+  atlas's texture requests, for the editor's and M10b's tests.
+- check_gpu_members.py treats `ImTextureID` and `ImTextureRef` as texture
+  types (every module but se_render), with the planted fixture
+  tools/checks/planted/imtexture_member (`checks.planted.imtexture_member`)
+  and allowed forms in gpu_texture_member_allowed.
+
+**Why.** The spec's PanelContext names commands as null while Playing, yet
+the design queues edits during Play in the SessionLog and M10b's stress
+generator spawns through it in Play: a separate interface keeps the
+spec's field meaning and gives Play edits their own path. The viewport
+panel needs targets the editor owns (Renderer2D creates them on main and
+the frame draws them), which nothing in the spec's context provides. The
+headers are what M10b builds against, so later changes to them are
+additive only.
+
+## ADR-096 Document Worlds are closed outside commands (2026-11-10)
+
+**Decision.** World::Reg() and MutableClock() assert an open MutationGate
+for `WorldKind::kEditDocument` Worlds as they already do for kPlay
+(se_core/src/world.cc; "document World mutated outside an editor
+command"). The editor opens a kLoad gate to load a document and a
+kEditorCommand gate around each command's Apply or Revert; nothing else
+may change a document. `death.document_mutation_outside_command` checks
+the assert. A path-point command that changes the point count restarts the
+path's progress (segment, u, done) when its segment no longer exists, so
+a SessionLog edit during Play never leaves a path pointing past its
+points.
+
+**Why.** The spec's "a headless test fails on any Edit-mode mutation made
+outside commands (the World's mutation gate, M2, closed while in Edit
+mode outside command application)". Using M2's gate means every path into
+the registry is covered (Reg(), Create, RequestDestroy, the clock), with
+no second mechanism.
