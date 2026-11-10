@@ -108,6 +108,7 @@ void GameStateStack::Apply(const StateCommand& command) {
     }
     stack_.back().state->OnExit();
     stack_.pop_back();
+    ++revision_;
     if (!stack_.empty()) stack_.back().state->OnResume();
     return;
   }
@@ -126,11 +127,13 @@ void GameStateStack::Apply(const StateCommand& command) {
     }
   }
   stack_.push_back(Entry{command.state_id, std::move(state)});
+  ++revision_;
   stack_.back().state->OnEnter();
 }
 
 void GameStateStack::Clear() {
   queue_.clear();
+  if (!stack_.empty()) ++revision_;
   while (!stack_.empty()) {
     stack_.back().state->OnExit();
     stack_.pop_back();

@@ -2508,7 +2508,8 @@ it before M17b; M17a proves it headless.
   (session, tick, hash, Worlds stepped); session events (started, paused,
   resumed, stepped, suspended, dilated, faulted, ended, start failed) are
   added as they happen. A burst of catch-up ticks publishes the render part
-  only for its last tick. With no free slot the sim skips the publish
+  only for its last tick. (Amended by ADR-086: its last 2 ticks, as the
+  design says.) With no free slot the sim skips the publish
   (counted in the header's dropped publishes) and keeps the deltas; when
   it goes idle (paused, suspended, no session) with deltas pending it
   publishes a reliable-only slot first, looking again every 1 ms while no
@@ -2535,7 +2536,7 @@ it before M17b; M17a proves it headless.
   interpolation, starvation and hard cuts), the extraction of a World into
   a slot's render part (`SimSession::FillRender` is its seam) and
   bench.snapshot_publish_10k. M17b needs all three before the App can use
-  the threaded driver.
+  the threaded driver. (Built since: ADR-086.)
 
 **Why.** A factory run on the sim thread is the simplest way to keep
 "Worlds are created and destroyed by their owner" true without a handover
@@ -2566,7 +2567,8 @@ integration.)
 - `se_sim/input_folder.h`: the InputEvent ring (4096, an SpscQueue of
   trivially copyable events stamped on the engine's monotonic clock at
   pump time) is folded per tick: every event stamped at or before L_k
-  (M8's placement rule with the sim's own deadlines as window ends),
+  (M8's placement rule with the sim's own deadlines as window ends; amended
+  by ADR-086: before L_k, M8's half-open windows),
   press and release counts saturating at 255 so a tap shorter than a tick
   is never lost, edges with their sources, axes (the latest wins),
   ReleaseAll and heartbeats.
@@ -2607,6 +2609,98 @@ integration.)
 **Why.** Index rings over a fixed pool give exactly one owner per slot at
 any time with no read-modify-write on shared indices, which the property
 tests (randomized schedules) check.
+
+## ADR-086 SnapshotRenderSource and the World-to-slot fill; the M17a review fixes (2026-11-09)
+
+**Context.** ADR-083 left M17a's platform side unbuilt: the extraction of
+a World into a slot's render part, se_render_core's SnapshotRenderSource
+with its tests, and bench.snapshot_publish_10k (docs/milestone-specs.md
+M17a). The review of M8 + M9 + M17a also found that the InputFolder put a
+stamp equal to a deadline on that tick (M8's windows are half-open), kept
+one held bit per action (M8's InputService counts holders), that a burst
+rendered only its last tick (the design says its last 2), and that the
+PacedClock's spin margin had no upper bound.
+
+**Decision.**
+- `se_render_core/snapshot_fill.h`: `AppendRenderView(world, options,
+  slot)` appends one view per drawn World, on the sim thread after
+  Cleanup (the session's `FillRender`): a RenderItem per entity with a
+  SpriteRenderer, a Transform and a Spawned record (full EnTT id, spawn
+  serial, the Transform's pose, the SpriteRenderer's look, kItemVisible and
+  the flips), the sparse index sized to the largest live index, and the
+  view's camera, cut flag and stepped flag. kItemTeleported marks exactly
+  the entities BuildRenderList would not interpolate at that tick
+  (teleport_tick is the tick, no PrevTransform, or one not from the tick
+  before) plus a move longer than `teleport_distance` (the design's 64 px
+  per tick; 0 turns it off). Nothing is culled or sorted on the sim side.
+- `se_render_core/snapshot_render_source.h`:
+  `BuildSnapshotRenderList(a, b, view, alpha, list)` and
+  `SnapshotRenderSource` (the spec's rules, listed in the header): Receive
+  hands each slot's reliable section to the caller in tick order, returns
+  reliable-only slots at once, keeps the newest 3 render slots, and
+  returns an ended or faulted session's slots when its end arrives; Pick
+  takes tau = F - D' and the pair around it, alpha from the anchors; a
+  pair across a session or generation is a hard cut (S_b alone, the older
+  slots returned, no starvation counted); tau past the newest anchor of a
+  running session holds the newest pair at alpha 1 and raises D' by the
+  gap (tau stays at the anchor), and the raise then shrinks by 5% per
+  frame (to 0 below 1 us); a paused or suspended session holds without a
+  raise; tau before the oldest anchor draws the oldest pair at alpha 0.
+  Per entity: same id and serial without the teleport flag lerps position,
+  scale, rotation (shorter arc) and tint, with the discrete state from S_a
+  below alpha 0.5; a teleport switches at the half-tick; an entity only in
+  S_b (a spawn, a recycled index, a new serial) appears there and one only
+  in S_a disappears there. The camera lerps (centre, zoom) unless S_b's is
+  cut; a view whose World did not step draws at alpha 1. The source reads
+  no clock (the frame start is the caller's) and allocates nothing warm.
+- Both builders share `src/quad_builder.h` (EmitQuad, FinishList: the
+  quad, the cull, the sort key, the radix sort and the batches, moved out
+  of render_list.cc unchanged), so the snapshot list equals
+  `BuildRenderList(World at k, camera, alpha)` bit for bit for slots of
+  ticks k - 1 and k whenever the state matches (the same entities, no
+  teleports, unchanged discrete state and tint, a camera that did not
+  move), and at alpha 1 always. Where the state does not match the two
+  differ by design: the inline builder draws a spawn, a teleport and a new
+  look at once, the snapshot one at the half-tick, and it smooths tint and
+  the camera. EmitQuad is force-inlined (MSVC's own budget left a call per
+  sprite, about 5% of renderlist_10k).
+- The SimThread bumps the header's generation (and posts
+  kGenerationChanged) after any tick that changed the GameStateStack:
+  `GameStateStack::Revision()` counts pushes, pops, replaces and Clear.
+- Bursts render their last 2 ticks (ADR-083 amended), so a burst leaves a
+  pair to interpolate.
+- The InputFolder applies `EdgeBelongsToTick(stamp, L_k, false)`: a stamp
+  equal to a deadline belongs to the next tick (ADR-084 amended), and it
+  keeps a holder count per action like InputService: only the first press
+  and the last release are edges; a release of an action nobody holds is
+  counted (stray_releases) and ignored; ReleaseAll drops every count. The
+  M17b router sends one press and one release per physical input.
+  tests/support/StampedInput uses the same half-open rule (its stamps never
+  fall on a window end, so no golden changes).
+- PacedClock caps the spin margin at max(spin floor, min(max_margin_ns =
+  2 ms, P / 4)) and counts the waits the cap cut (capped_waits); the
+  SimThread logs the first one (PacedClock does not log: its waits are
+  noexcept).
+- Tests: tests/render/snapshot_render_test.cc (label render: equality with
+  BuildRenderList over 300 moving sprites at 12 alphas, the half-tick
+  cases with a recycled index, a new serial on the same id, camera cut and
+  unstepped views, the source's retention, pairing, hard cut, starvation
+  and decay, pause, an ended session, no allocation warm);
+  tests/sim/sim_thread_test.cc "Threaded snapshots draw the inline
+  driver's RenderLists" (the sim thread fills slots for rampage's four
+  scenarios over 3600 ticks, stepped one deadline at a time on a blocking
+  ManualClock; every list at alpha 0.5, 0.75 and 1 equals the inline
+  driver's) and "A catch-up burst publishes render state for its last 2
+  ticks"; tests/sim/input_folder_test.cc (stamps at deadlines against
+  PlaceEdge, chords); tests/sim/paced_clock_test.cc (the cap).
+- `bench.snapshot_publish_10k` (se_bench, msvc-release): fill and publish
+  one warm slot of 10k sprites and take it back; the threshold is the
+  measured p95 with 2x headroom (bench/thresholds.json).
+
+**Why.** Sharing the quad code is what makes "the same RenderList as the
+inline builder" a property the tests can check bit for bit, rather than a
+second implementation kept in step by hand. Flagging on the sim side,
+where PrevTransform is known, keeps the platform's rule a lookup.
 
 ## ADR-087 Sounds decode on the background lane into one shared PCM type; the state's scope holds them (2026-11-09)
 

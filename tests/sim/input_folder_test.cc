@@ -1,17 +1,22 @@
 // Copyright 2026 The simple-engine-2 Authors.
 //
-// InputFolder: InputFrame k holds every event stamped at or before the
-// sim's deadline L_k, which is the inline driver's placement rule with the
-// deadlines as tick windows (the frames equal StampedInput's, latched by the
-// same window ends); later events wait at the ring's front; the fold keeps
-// held state, counts every press and release, keeps axes, and releases all.
+// InputFolder: InputFrame k holds every event stamped before the sim's
+// deadline L_k, which is the inline driver's placement rule with the
+// deadlines as tick windows (half-open: a stamp equal to L_k is tick k + 1's,
+// as PlaceEdge places it; the frames equal StampedInput's, latched by the
+// same window ends); later events wait at the ring's front; the fold counts
+// the inputs holding each action as InputService does, counts every edge,
+// keeps axes, and releases all.
 
 #include "se_sim/input_folder.h"
 
+#include <array>
 #include <catch2/catch_test_macros.hpp>
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 
+#include "se_core/edge_placement.h"
 #include "se_core/input_frame.h"
 #include "se_sim/paced_clock.h"
 #include "support/stamped_input.h"
@@ -30,16 +35,16 @@ InputEvent Event(std::uint64_t stamp, ActionId action, InputKind kind,
   return event;
 }
 
-TEST_CASE("InputFolder places each event on the first deadline at or after it",
+TEST_CASE("InputFolder places each event on the first deadline after it",
           "[input_folder]") {
   InputEventRing ring(64);
   InputFolder folder;
   REQUIRE(ring.TryPush(Event(100, 1, InputKind::kPress)));
-  REQUIRE(ring.TryPush(Event(200, 1, InputKind::kRelease)));
-  REQUIRE(ring.TryPush(Event(201, 2, InputKind::kPress)));
+  REQUIRE(ring.TryPush(Event(199, 1, InputKind::kRelease)));
+  REQUIRE(ring.TryPush(Event(200, 2, InputKind::kPress)));
   REQUIRE(ring.TryPush(Event(450, 3, InputKind::kPress)));
 
-  // L_1 = 200: the tap at 100..200 counts, held clear again.
+  // L_1 = 200: the tap at 100..199 counts, held clear again.
   const InputFrame one = folder.Latch(1, 200, ring);
   REQUIRE(one.tick == 1);
   REQUIRE(one.pressed[1] == 1);
@@ -47,9 +52,9 @@ TEST_CASE("InputFolder places each event on the first deadline at or after it",
   CHECK_FALSE(one.Held(1));
   REQUIRE(one.edge_count == 2);
   CHECK(one.platform_live);
-  // 201 waits at the front.
+  // 200, at the deadline itself, waits at the front (half-open windows).
   REQUIRE(ring.Front() != nullptr);
-  REQUIRE(ring.Front()->stamp_ns == 201);
+  REQUIRE(ring.Front()->stamp_ns == 200);
 
   const InputFrame two = folder.Latch(2, 400, ring);
   REQUIRE(two.pressed[2] == 1);
@@ -60,8 +65,88 @@ TEST_CASE("InputFolder places each event on the first deadline at or after it",
   CHECK(three.Held(2));
   REQUIRE(three.edge_count == 0);
   const InputFrame four = folder.Latch(4, 450, ring);
-  CHECK(four.Held(3));
+  CHECK_FALSE(four.Held(3));
+  REQUIRE(four.edge_count == 0);
+  const InputFrame five = folder.Latch(5, 451, ring);
+  CHECK(five.Held(3));
   CHECK(ring.Front() == nullptr);
+}
+
+TEST_CASE("InputFolder puts a stamp at a deadline where PlaceEdge puts it",
+          "[input_folder]") {
+  // A burst's deadlines as one frame's window ends.
+  const std::array<std::uint64_t, 4> deadlines{1000, 2000, 3000, 4000};
+  // Stamps on, just before and just after each boundary; the last window's
+  // end is excluded (PlaceEdge gives later stamps to the frame's last tick,
+  // which the folder has not: they wait).
+  const std::vector<std::uint64_t> stamps{0,    999,  1000, 1001, 1999, 2000,
+                                          2001, 2999, 3000, 3001, 3998, 3999};
+  InputEventRing ring(64);
+  for (std::size_t i = 0; i < stamps.size(); ++i) {
+    REQUIRE(ring.TryPush(
+        Event(stamps[i], static_cast<ActionId>(i), InputKind::kPress)));
+  }
+  REQUIRE(ring.TryPush(Event(4000, 40, InputKind::kPress)));
+  InputFolder folder;
+  // The tick (1-based) each action's press landed on.
+  std::array<int, kMaxActions> landed{};
+  for (std::size_t k = 0; k < deadlines.size(); ++k) {
+    const InputFrame frame =
+        folder.Latch(static_cast<Tick>(k + 1), deadlines[k], ring);
+    for (std::uint8_t e = 0; e < frame.edge_count; ++e) {
+      landed[frame.edges[e].action] = static_cast<int>(k + 1);
+    }
+  }
+  for (std::size_t i = 0; i < stamps.size(); ++i) {
+    INFO("stamp " << stamps[i]);
+    CHECK(landed[i] == PlaceEdge(stamps[i], deadlines) + 1);
+  }
+  // The stamp at the last deadline is the next tick's.
+  REQUIRE(landed[40] == 0);
+  REQUIRE(ring.Front() != nullptr);
+  REQUIRE(ring.Front()->stamp_ns == 4000);
+}
+
+TEST_CASE("InputFolder counts the inputs holding an action, like InputService",
+          "[input_folder]") {
+  // Two keys bound to action 4 (a chord): the second press and the first
+  // release change nothing; the last release is the edge.
+  InputEventRing ring(64);
+  InputFolder folder;
+  REQUIRE(ring.TryPush(Event(10, 4, InputKind::kPress)));
+  REQUIRE(ring.TryPush(Event(20, 4, InputKind::kPress)));
+  InputFrame frame = folder.Latch(1, 100, ring);
+  REQUIRE(frame.pressed[4] == 1);
+  REQUIRE(frame.edge_count == 1);
+  CHECK(frame.Held(4));
+
+  REQUIRE(ring.TryPush(Event(110, 4, InputKind::kRelease)));
+  frame = folder.Latch(2, 200, ring);
+  CHECK(frame.Held(4));
+  REQUIRE(frame.released[4] == 0);
+  REQUIRE(frame.edge_count == 0);
+
+  REQUIRE(ring.TryPush(Event(210, 4, InputKind::kRelease)));
+  // A release of an action nobody holds is ignored.
+  REQUIRE(ring.TryPush(Event(220, 4, InputKind::kRelease)));
+  frame = folder.Latch(3, 300, ring);
+  CHECK_FALSE(frame.Held(4));
+  REQUIRE(frame.released[4] == 1);
+  REQUIRE(frame.edge_count == 1);
+  REQUIRE(folder.Stats().stray_releases == 1);
+
+  // ReleaseAll drops every count: the next press is an edge again.
+  REQUIRE(ring.TryPush(Event(310, 4, InputKind::kPress)));
+  REQUIRE(ring.TryPush(Event(311, 4, InputKind::kPress)));
+  REQUIRE(ring.TryPush(Event(320, 0, InputKind::kReleaseAll)));
+  REQUIRE(ring.TryPush(Event(330, 4, InputKind::kPress)));
+  frame = folder.Latch(4, 400, ring);
+  REQUIRE(frame.pressed[4] == 2);
+  REQUIRE(frame.released[4] == 1);
+  CHECK(frame.Held(4));
+  REQUIRE(ring.TryPush(Event(410, 4, InputKind::kRelease)));
+  frame = folder.Latch(5, 500, ring);
+  CHECK_FALSE(frame.Held(4));
 }
 
 TEST_CASE("InputFolder frames equal the inline placement on the same windows",
@@ -143,7 +228,7 @@ TEST_CASE("InputFolder folds axes, release-all, counts and edge overflow",
   REQUIRE(folder.Stats().heartbeats == 1);
 
   REQUIRE(ring.TryPush(Event(20, 0, InputKind::kReleaseAll)));
-  frame = folder.Latch(2, 20, ring);
+  frame = folder.Latch(2, 21, ring);
   REQUIRE(frame.held == 0);
   REQUIRE(frame.released[5] == 1);
   REQUIRE(frame.released[6] == 1);
@@ -159,10 +244,12 @@ TEST_CASE("InputFolder folds axes, release-all, counts and edge overflow",
   CHECK(frame.edge_count == kMaxEdgesPerTick);
   CHECK(folder.Stats().edges_dropped == 300 - kMaxEdgesPerTick);
   for (std::uint64_t i = 0; i < 300; ++i) {
-    REQUIRE(ring.TryPush(Event(2000 + i, 2, InputKind::kPress)));
+    REQUIRE(ring.TryPush(Event(2000 + 2 * i, 2, InputKind::kPress)));
+    REQUIRE(ring.TryPush(Event(2001 + 2 * i, 2, InputKind::kRelease)));
   }
   frame = folder.Latch(4, 5000, ring);
   REQUIRE(frame.pressed[2] == 255);
+  REQUIRE(frame.released[2] == 255);
 
   folder.Reset();
   REQUIRE(folder.Held() == 0);

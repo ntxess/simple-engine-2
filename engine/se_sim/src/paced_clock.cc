@@ -127,8 +127,14 @@ std::uint64_t PacedClock::PeriodNs() const noexcept {
                    (static_cast<double>(rate_) * scale_)));
 }
 
+std::uint64_t PacedClock::MarginCapNs() const noexcept {
+  return std::max(config_.spin_floor_ns,
+                  std::min(config_.max_margin_ns, PeriodNs() / 4));
+}
+
 std::uint64_t PacedClock::MarginNs() const noexcept {
-  return std::max(config_.spin_floor_ns, overshoot_p99_);
+  return std::min(std::max(config_.spin_floor_ns, overshoot_p99_),
+                  MarginCapNs());
 }
 
 std::uint64_t PacedClock::WakeErrorP99Ns() const noexcept {
@@ -152,6 +158,7 @@ std::uint64_t PacedClock::WaitForDeadline(
     ++stats_.late_waits;
   } else {
     const std::uint64_t margin = MarginNs();
+    if (overshoot_p99_ > margin) ++stats_.capped_waits;
     if (deadline - now > margin) {
       const std::uint64_t target = deadline - margin;
       clock_->SleepUntil(target, stop);

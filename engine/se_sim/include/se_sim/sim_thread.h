@@ -23,8 +23,12 @@
 //              the reliable section) and never waits; with no free slot it
 //              skips the render part and keeps the reliable deltas (tick
 //              records, audio cues, session events) for the next publish.
-//              In a catch-up burst only the last tick publishes its render
-//              part.
+//              In a catch-up burst only the last 2 ticks publish their
+//              render part (a pair to interpolate). The header's generation
+//              changes when a session starts and after any tick that
+//              changed its GameStateStack (GameStateStack::Revision; a
+//              kGenerationChanged event), so the platform never blends
+//              across a scene or state change.
 //   faults     a FaultBox: a throw out of a tick (sim_fault_boundary.cc,
 //              the one catch, ADR-006) tears the session down on the sim
 //              thread, posts the fault and an ended event, and the thread

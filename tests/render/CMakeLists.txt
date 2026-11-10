@@ -1,7 +1,8 @@
 # RenderList tests (label render): interpolation, culling, sorting, batching,
 # quads and the no-allocation contract of se_render_core
 # (docs/milestone-specs.md, M3c); the sprite vertices and the canvas
-# transform (M7). The GPU side is tests/render_gpu.
+# transform (M7); the dedicated sim driver's snapshot fill and
+# SnapshotRenderSource (M17a). The GPU side is tests/render_gpu.
 #
 # se_render_tests replaces the global operator new to count allocations
 # (alloc_counter.cc), so it is its own executable. Sanitizer builds keep
@@ -22,6 +23,7 @@ se_add_module(se_render_tests KIND EXECUTABLE
     quad_test.cc
     render_components_test.cc
     render_fixture.cc
+    snapshot_render_test.cc
     sort_batch_test.cc
     sprite_vertices_test.cc
     ../support/tracy_inert_listener.cc

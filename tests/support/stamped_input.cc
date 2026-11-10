@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "se_core/edge_placement.h"
 #include "se_core/guid.h"
 #include "se_core/input_frame.h"
 #include "se_core/rng.h"
@@ -53,7 +54,10 @@ InputFrame StampedInput::Latch(Tick tick, std::uint64_t tick_window_end_ns,
                                bool /*last_tick_of_frame*/) {
   InputFrame frame;
   frame.tick = tick;
-  while (next_.stamp_ns <= tick_window_end_ns) {
+  // M8's half-open windows (EdgeBelongsToTick, without the last tick's
+  // catch-all: see the header).
+  while (EdgeBelongsToTick(next_.stamp_ns, tick_window_end_ns,
+                           /*last_tick=*/false)) {
     const std::uint64_t bit = 1ULL << next_.action;
     const auto action = static_cast<std::size_t>(next_.action);
     if (next_.down) {

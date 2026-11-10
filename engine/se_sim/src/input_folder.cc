@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "se_core/edge_placement.h"
 #include "se_core/input_frame.h"
 
 namespace se {
@@ -14,8 +15,12 @@ InputFrame InputFolder::Latch(Tick tick, std::uint64_t latch_ns,
   InputFrame frame;
   frame.tick = tick;
   frame.platform_live = true;
+  // M8's rule with the deadline as the window end: half-open, and no tick
+  // takes the events after its window (there is no frame's last tick).
   for (InputEvent* front = ring.Front();
-       front != nullptr && front->stamp_ns <= latch_ns; front = ring.Front()) {
+       front != nullptr &&
+       EdgeBelongsToTick(front->stamp_ns, latch_ns, /*last_tick=*/false);
+       front = ring.Front()) {
     const InputEvent event = *front;
     ring.Pop();
     ++stats_.events;
@@ -40,9 +45,11 @@ InputFrame InputFolder::Latch(Tick tick, std::uint64_t latch_ns,
         break;
       case InputKind::kReleaseAll:
         for (int a = 0; a < kMaxActions; ++a) {
-          if (((held_ >> a) & 1U) != 0) {
-            Edge(frame, static_cast<ActionId>(a), false, event);
-          }
+          const auto index = static_cast<std::size_t>(a);
+          if (holders_[index] == 0) continue;
+          // The last holder's release makes the edge.
+          holders_[index] = 1;
+          Edge(frame, static_cast<ActionId>(a), false, event);
         }
         break;
       case InputKind::kHeartbeat:
@@ -59,13 +66,22 @@ void InputFolder::Edge(InputFrame& frame, ActionId action, bool down,
                        const InputEvent& event) noexcept {
   const std::uint64_t bit = std::uint64_t{1} << action;
   const auto index = static_cast<std::size_t>(action);
-  std::uint8_t& count = down ? frame.pressed[index] : frame.released[index];
-  if (count < 255) ++count;
+  std::uint16_t& holders = holders_[index];
   if (down) {
+    const bool first = holders == 0;
+    if (holders < UINT16_MAX) ++holders;
+    if (!first) return;
     held_ |= bit;
   } else {
+    if (holders == 0) {
+      ++stats_.stray_releases;
+      return;
+    }
+    if (--holders != 0) return;
     held_ &= ~bit;
   }
+  std::uint8_t& count = down ? frame.pressed[index] : frame.released[index];
+  if (count < 255) ++count;
   if (frame.edge_count >= kMaxEdgesPerTick) {
     ++stats_.edges_dropped;
     return;
@@ -81,6 +97,7 @@ void InputFolder::Edge(InputFrame& frame, ActionId action, bool down,
 
 void InputFolder::Reset() noexcept {
   held_ = 0;
+  holders_ = {};
   axes_ = {};
 }
 

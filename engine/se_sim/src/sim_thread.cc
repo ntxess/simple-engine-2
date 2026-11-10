@@ -49,6 +49,8 @@ struct SimThread::Impl {
   InputFolder folder;
   std::uint64_t session_id = 0;
   std::uint32_t generation = 0;
+  // The session's GameStateStack::Revision() the generation stands for.
+  std::uint32_t stack_revision = 0;
   SimRunState state = SimRunState::kPaused;
   bool quit = false;
   bool faulted = false;
@@ -57,6 +59,8 @@ struct SimThread::Impl {
   // Reliable deltas since the last successful publish.
   ReliableDeltas pending;
   std::uint32_t dropped = 0;
+  // The spin cap's warning was logged (PacedClock does not log).
+  bool cap_warned = false;
   SimThreadStats stats;
 
   void Run(const std::stop_token& stop) SE_REQUIRES(g_sim_owner);
@@ -104,6 +108,7 @@ void SimThread::Impl::StartGame(std::uint64_t now_ns) {
     return;
   }
   session = std::move(*made);
+  stack_revision = session->States().Revision();
   faulted = false;
   state = SimRunState::kRunning;
   steps_left = 0;
@@ -252,6 +257,14 @@ bool SimThread::Impl::RunOneTick(Tick tick, std::uint64_t latch_ns,
     return false;
   }
   const std::uint64_t cost = wait_clock->NowNs() - start;
+  if (const std::uint32_t revision = session->States().Revision();
+      revision != stack_revision) {
+    // The tick changed the GameStateStack (a scene load, a state switch):
+    // its slots are a new generation, never interpolated with older ones.
+    stack_revision = revision;
+    ++generation;
+    Event(SessionEventKind::kGenerationChanged);
+  }
   ++stats.ticks;
   ticks_run->fetch_add(1, std::memory_order_release);
   TickRecord record;
@@ -301,6 +314,14 @@ void SimThread::Impl::Run(const std::stop_token& stop) {
     const Tick next = session->Driver().NextTick();
     clock->WaitForDeadline(next, stop);
     if (stop.stop_requested()) break;
+    if (!cap_warned && clock->Stats().capped_waits != 0) {
+      cap_warned = true;
+      SE_LOG_WARN(
+          "sim pacing: the timer overshoots by {:.2f} ms (p99), more than the "
+          "{:.2f} ms spin cap; ticks may wake late",
+          static_cast<double>(clock->OvershootP99Ns()) * 1e-6,
+          static_cast<double>(clock->MarginCapNs()) * 1e-6);
+    }
     // Commands that arrived during the wait apply at this boundary.
     DrainCommands();
     if (quit || !session || state != SimRunState::kRunning) continue;
@@ -313,8 +334,10 @@ void SimThread::Impl::Run(const std::stop_token& stop) {
     }
     for (std::uint32_t i = 0; i < burst.count; ++i) {
       const Tick tick = burst.first + i;
-      // Only the burst's last tick publishes its render part.
-      const bool render = i + 1 == burst.count;
+      // Only the burst's last 2 ticks publish their render part, so the
+      // platform has a pair to interpolate after a burst (dedicated-
+      // driver.md "Data Flow", Snapshot slot).
+      const bool render = i + 2 >= burst.count;
       if (!RunOneTick(tick, clock->DeadlineNs(tick), render)) break;
       clock->OnTickRun();
     }

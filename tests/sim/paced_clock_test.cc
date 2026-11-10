@@ -108,6 +108,48 @@ TEST_CASE("PacedClock's margin follows the timer overshoot's p99",
   CHECK(clock.WakeErrorP99Ns() < 1 * kUs);
 }
 
+TEST_CASE("PacedClock caps the spin margin at min(2 ms, P / 4)",
+          "[paced_clock]") {
+  ManualClock manual(ManualClock::Mode::kAutoAdvance, kT0 - 20 * kMs);
+  // Three 4 ms timer overshoots in every 64 waits: the p99 is 4 ms, which
+  // uncapped would spin 4 ms of each 8.33 ms period.
+  std::vector<std::int64_t> overshoots(64, 0);
+  overshoots[10] = 4'000'000;
+  overshoots[20] = 4'000'000;
+  overshoots[30] = 4'000'000;
+  manual.SetOvershoots(overshoots);
+  manual.SetRelaxStep(1 * kUs);
+  PacedClock clock(manual, PacedClockConfig{});
+  clock.Start(1, kT0);
+  REQUIRE(clock.MarginCapNs() == 2 * kMs);
+  Tick k = 1;
+  for (; k <= 512; ++k) {
+    const std::uint64_t woke = clock.WaitForDeadline(k, std::stop_token{});
+    REQUIRE(woke >= clock.DeadlineNs(k));
+  }
+  REQUIRE(clock.OvershootP99Ns() == 4 * kMs);
+  REQUIRE(clock.MarginNs() == 2 * kMs);
+  REQUIRE(clock.Stats().capped_waits > 0);
+  // The spin of a wait whose timer is on time is at most the cap.
+  const std::uint64_t spins_before = clock.Stats().spin_iterations;
+  std::uint64_t on_time = 0;
+  for (; k <= 1024; ++k) {
+    const std::uint64_t woke = clock.WaitForDeadline(k, std::stop_token{});
+    REQUIRE(woke >= clock.DeadlineNs(k));
+    if (woke - clock.DeadlineNs(k) < 1 * kUs) ++on_time;
+  }
+  const std::uint64_t spins = clock.Stats().spin_iterations - spins_before;
+  REQUIRE(on_time >= 400);
+  // 512 waits of at most 2 ms (2000 relax steps) each.
+  CHECK(spins <= std::uint64_t{512} * 2000);
+  CHECK(spins >= std::uint64_t{400} * 1900);
+  // A short period caps lower: P / 4 at 4x speed.
+  clock.SetTimeScale(4.0, k);
+  REQUIRE(clock.PeriodNs() == 2'083'333);
+  CHECK(clock.MarginCapNs() == 2'083'333 / 4);
+  CHECK(clock.MarginNs() == 2'083'333 / 4);
+}
+
 TEST_CASE("PacedClock: a wait that starts late does not sleep",
           "[paced_clock]") {
   ManualClock manual(ManualClock::Mode::kAutoAdvance, kT0 + 3 * kMs);

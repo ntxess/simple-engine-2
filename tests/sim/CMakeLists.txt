@@ -7,7 +7,9 @@
 #                         SnapshotChannel and its seeded property runs, and
 #                         the SimThread: inline against threaded hashes on
 #                         the kernel and rampage goldens and scenarios, the
-#                         commands, a faulting tick (ADR-083)
+#                         commands, a faulting tick (ADR-083), catch-up
+#                         bursts, and the sim thread's snapshots against the
+#                         inline driver's RenderLists (ADR-086)
 
 se_add_module(se_sim_tests KIND EXECUTABLE
   SOURCES
@@ -21,6 +23,7 @@ se_add_module(se_sim_tests KIND EXECUTABLE
     ../support/tracy_inert_listener.cc
   PRIVATE_DEPS
     se_core
+    se_render_core
     se_sim
     se_test_support
     game_rampage

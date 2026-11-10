@@ -9,8 +9,13 @@
 // arithmetic, so 120 ticks take exactly one second), T0 and k0 the anchor
 // of the current grid, and phi the wake phase.
 //   - WaitForDeadline(k): a timer to L_k - margin, margin = max(spin floor,
-//     the measured timer overshoot's p99), then a spin with the pause
-//     instruction until L_k. It never returns before L_k (unless stopped).
+//     the measured timer overshoot's p99) capped at min(max_margin, P / 4),
+//     then a spin with the pause instruction until L_k. It never returns
+//     before L_k (unless stopped). The cap keeps a few long timer overshoots
+//     (or a coarse timer) from turning the wait into a spin for most of the
+//     period: the design spins only a short tail. Waits whose margin was cut
+//     by the cap are counted (the timer overshoots more than the cap, so
+//     those ticks may wake late; the SimThread warns once).
 //   - DueTicks(next, now): the ticks whose deadlines have passed, at most
 //     max_catch_up (8: 66.7 ms of sim time) per burst; the caller runs them
 //     back to back, re-checks its commands and asks again. Behind by more
@@ -125,6 +130,8 @@ struct PacedClockConfig {
   std::uint64_t dilation_after_ns = 250'000'000;
   // The spin tail's floor: the timer wakes at least this long before L_k.
   std::uint64_t spin_floor_ns = 300'000;
+  // The spin tail's cap (with P / 4), however much the timer overshoots.
+  std::uint64_t max_margin_ns = 2'000'000;
   // The most phi moves per tick.
   std::uint64_t phi_slew_ns = 100'000;
 };
@@ -149,6 +156,8 @@ struct PacedClockStats {
   std::uint64_t spin_iterations = 0;
   // Waits that began after their deadline.
   std::uint64_t late_waits = 0;
+  // Waits whose margin the cap cut (the overshoot's p99 was above it).
+  std::uint64_t capped_waits = 0;
   std::uint64_t dilations = 0;
   std::uint64_t dilated_ns = 0;
   std::uint64_t rebases = 0;
@@ -197,8 +206,10 @@ class PacedClock {
   [[nodiscard]] std::int64_t Phi() const noexcept { return phi_; }
   [[nodiscard]] std::int64_t PhiTarget() const noexcept { return phi_target_; }
   [[nodiscard]] std::uint32_t Epoch() const noexcept { return epoch_; }
-  // max(spin floor, overshoot p99).
+  // max(spin floor, overshoot p99), at most MarginCapNs().
   [[nodiscard]] std::uint64_t MarginNs() const noexcept;
+  // max(spin floor, min(max_margin, P / 4)).
+  [[nodiscard]] std::uint64_t MarginCapNs() const noexcept;
   [[nodiscard]] std::uint64_t OvershootP99Ns() const noexcept {
     return overshoot_p99_;
   }
