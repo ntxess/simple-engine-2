@@ -18,9 +18,20 @@
 
 namespace se {
 
+// One action of the game: ActionId i is the i-th binding (bit i of
+// InputFrame::held). se_runtime's ActionMap resolves the names (M8).
 struct ActionBinding {
   std::string_view action;
+  // The default key: an SDL key name ("W", "Space", "Escape") or a legacy
+  // config name ("w", "space", "esc", "enter"); "mouse-left" and the other
+  // mouse-* names bind a mouse button.
   std::string_view key;
+  // The user setting that rebinds the key: control-settings/key-bindings/
+  // <config_key> in the game's settings file. Empty: not rebindable.
+  std::string_view config_key = {};
+  // Default gamepad inputs, comma-separated SDL gamepad names: buttons
+  // ("south", "dpup", "start") and half axes ("-lefty", "+leftx").
+  std::string_view pad = {};
 };
 
 struct ActionMapDefaults {

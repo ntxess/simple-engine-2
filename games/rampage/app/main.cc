@@ -19,6 +19,7 @@
 #include <expected>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "game_rampage/module.h"
 #include "game_rampage/view.h"
@@ -61,6 +62,8 @@ std::expected<se::GameSetup, se::Error> MakeRampage(
   setup.window_width = 1280;
   setup.window_height = 720;
   setup.texture_table = "config/texture.json";
+  // Key bindings and sound volumes (M8).
+  setup.settings_file = "config/config.json";
   setup.camera = [](const se::World& world) {
     return se::rampage::SandboxCamera(world);
   };
@@ -78,6 +81,11 @@ std::expected<se::GameSetup, se::Error> MakeRampage(
     }
     se::rampage::SetSandboxScene(std::move(request));
     return {};
+  };
+  // A --record replay starts from the scene file, as se_replay's do.
+  setup.replay_start = [scene](const se::ContentPaths& paths) {
+    auto bytes = se::fs::ReadFile(se::fs::Join(paths.content_root, scene));
+    return bytes ? std::move(*bytes) : std::vector<std::byte>();
   };
   return setup;
 }

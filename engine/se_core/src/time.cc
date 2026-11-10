@@ -10,9 +10,11 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <span>
 #include <vector>
 
 #include "se_core/assert.h"
+#include "se_core/edge_placement.h"
 
 namespace se {
 namespace {
@@ -269,22 +271,19 @@ StepPlan FixedStepper::Plan(const FrameClock& clock, const FrameCosts& costs,
                   miss_offset_sec_;
   miss_offset_sec_ = std::max(0.0, miss_offset_sec_ - kMissOffsetDecaySec);
 
-  // The input window of each tick.
+  // The input window of each tick (se_core/edge_placement.h holds the
+  // rule): Locked splits the frame's span evenly, Free ends tick i at
+  // start - remainder - (steps - 1 - i) dt.
   if (steps > 0) {
     const std::uint64_t start = clock.frame_start_ns;
+    const std::span<std::uint64_t> windows(plan.tick_window_end_ns.data(),
+                                           static_cast<std::size_t>(steps));
     if (locked) {
+      // A stall or the first frame spans one period.
       const std::uint64_t span = std::min(delta_ns, start);
-      const std::uint64_t prev = start - span;
-      for (std::uint64_t i = 0; i < steps; ++i) {
-        plan.tick_window_end_ns[i] = prev + span * (i + 1) / steps;
-      }
+      LockedTickWindows(start - span, start, windows);
     } else {
-      const std::uint64_t remainder_ns = acc_units_ / rate_;
-      for (std::uint64_t i = 0; i < steps; ++i) {
-        const std::uint64_t back =
-            remainder_ns + (steps - 1 - i) * 1'000'000'000ULL / rate_;
-        plan.tick_window_end_ns[i] = back < start ? start - back : 0;
-      }
+      FreeTickWindows(start, acc_units_ / rate_, rate_, windows);
     }
   }
 

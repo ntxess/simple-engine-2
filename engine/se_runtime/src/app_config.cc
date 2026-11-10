@@ -230,6 +230,42 @@ std::expected<ReadbackHook, Error> ParseReadback(std::string_view text) {
   return ReadbackHook{*frame, std::string(text.substr(colon + 1))};
 }
 
+// FRAME:MS:KEY[:up].
+std::expected<PushKeyHook, Error> ParsePushKey(std::string_view text) {
+  PushKeyHook hook;
+  const std::size_t first = text.find(':');
+  const std::size_t second = first == std::string_view::npos
+                                 ? std::string_view::npos
+                                 : text.find(':', first + 1);
+  if (second == std::string_view::npos) {
+    return Bad(std::format("--push-key {}: expected FRAME:MS:KEY[:up]", text));
+  }
+  const auto frame = ParseNumber<std::int64_t>(text.substr(0, first));
+  const auto ms =
+      ParseNumber<double>(text.substr(first + 1, second - first - 1));
+  std::string_view key = text.substr(second + 1);
+  if (key.ends_with(":up")) {
+    hook.down = false;
+    key.remove_suffix(3);
+  } else if (key.ends_with(":down")) {
+    key.remove_suffix(5);
+  }
+  if (!frame || *frame < 1 || !ms || *ms < 0.0 || key.empty()) {
+    return Bad(std::format("--push-key {}: expected FRAME:MS:KEY[:up]", text));
+  }
+  hook.frame = *frame;
+  hook.offset_ms = *ms;
+  hook.key = std::string(key);
+  return hook;
+}
+
+std::optional<AudioRequest> ParseAudio(std::string_view text) {
+  if (text == "device") return AudioRequest::kDevice;
+  if (text == "null") return AudioRequest::kNull;
+  if (text == "none") return AudioRequest::kNone;
+  return std::nullopt;
+}
+
 std::expected<void, Error> NeedTestHooks(std::string_view option) {
   if (kRuntimeTestHooks) return {};
   return Bad(
@@ -444,6 +480,33 @@ std::expected<AppConfig, Error> ParseAppConfig(
       auto value = reader.Value(option);
       if (!value) return std::unexpected(value.error());
       config.lane_step_trace = std::string(*value);
+    } else if (option == "--no-raw-keyboard") {
+      if (auto ok = flag(); !ok) {
+        return std::unexpected(ok.error());
+      }
+      config.raw_keyboard = false;
+    } else if (option == "--record") {
+      auto value = reader.Value(option);
+      if (!value) return std::unexpected(value.error());
+      config.record_path = std::string(*value);
+    } else if (option == "--audio") {
+      auto value = reader.Value(option);
+      if (!value) return std::unexpected(value.error());
+      const auto audio = ParseAudio(*value);
+      if (!audio) {
+        return Bad(std::format("--audio: bad value '{}' (device, null or none)",
+                               *value));
+      }
+      config.audio = *audio;
+    } else if (option == "--push-key") {
+      if (auto ok = NeedTestHooks(option); !ok) {
+        return std::unexpected(ok.error());
+      }
+      auto value = reader.Value(option);
+      if (!value) return std::unexpected(value.error());
+      auto hook = ParsePushKey(*value);
+      if (!hook) return std::unexpected(hook.error());
+      config.push_keys.push_back(std::move(*hook));
     } else {
       return Bad(std::format("unknown option '{}'", option));
     }

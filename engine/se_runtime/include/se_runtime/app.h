@@ -40,16 +40,17 @@
 // N-L fence, present statistics, the FrameClock), plan the frame's ticks with
 // the FixedStepper (none while the top state's AssetScope is not resident: the
 // sim holds), tick the running Worlds through SimDriver::TickInline with
-// BasicInputService's frames, then render: the GameStateStack's render
-// sources (every state's Worlds, the top one at the plan's alpha) through
-// GameSetup::camera, drawn by Renderer2D into the composite and blitted to
-// the swapchain (M7); then FramePacer::EndFrame (Paced, Standard or VRR;
-// M6b). The pacer presents through RenderPresentPort, the adapter over
-// se::present and Renderer2D, and Renderer2D's GPU timings are FrameCosts'
-// g (the M6/M7 integration). Iterates that do not render still pump the
-// texture uploads. A fault in the render build phase is a fault of the
-// game build: it takes the callbacks' fault path (a dump, the message box,
-// the quit path).
+// the InputService's frames (M8: stamped edges placed on the plan's tick
+// windows, the ActionMap from the settings file), then render: the
+// GameStateStack's render sources (every state's Worlds, the top one at the
+// plan's alpha) through GameSetup::camera, drawn by Renderer2D into the
+// composite and blitted to the swapchain (M7); then FramePacer::EndFrame
+// (Paced, Standard or VRR; M6b). The pacer presents through RenderPresentPort,
+// the adapter over se::present and Renderer2D, and Renderer2D's GPU timings are
+// FrameCosts' g (the M6/M7 integration). Iterates that do not render still pump
+// the texture uploads. A fault in the render build phase is a fault of the game
+// build: it takes the callbacks' fault path (a dump, the message box, the quit
+// path).
 //
 // Device loss (ADR-068): the device status is read at each iterate's start
 // and after a failed submit. On kRemoved the lifecycle enters DeviceLost:
@@ -85,6 +86,7 @@
 #include <SDL3/SDL_init.h>
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <functional>
@@ -99,7 +101,9 @@
 #include "se_core/thread_safety.h"
 #include "se_core/time.h"
 #include "se_core/types.h"
+#include "se_platform/gamepads.h"
 #include "se_platform/inbox.h"
+#include "se_platform/input_sampler.h"
 #include "se_platform/sdl_context.h"
 #include "se_platform/wake.h"
 #include "se_platform/window.h"
@@ -115,6 +119,7 @@
 #include "se_runtime/lifecycle.h"
 #include "se_runtime/quit.h"
 #include "se_runtime/render_present_port.h"
+#include "se_runtime/user_settings.h"
 #include "se_sim/game_module.h"
 
 namespace se {
@@ -179,6 +184,13 @@ struct GameSetup {
   // What each GameState's AssetScope loads before its Worlds step (M9),
   // by state id; empty: every texture of the table.
   std::function<StateAssets(std::string_view state_id)> state_assets;
+  // The settings file (config/config.json) relative to the content root:
+  // the key bindings and sound volumes (user_settings.h, M8); empty: the
+  // module's default bindings and full volumes.
+  std::string settings_file;
+  // The start bytes of a --record replay (rampage: its scene file); empty:
+  // none.
+  std::function<std::vector<std::byte>(const ContentPaths& paths)> replay_start;
   // The camera a World is drawn with; empty: its primary Camera2D, else a
   // default one.
   std::function<Camera2D(const World& world)> camera;
@@ -254,6 +266,15 @@ class App final : public WindowListener {
     return stepper_;
   }
   [[nodiscard]] const FramePacer& Pacer() const noexcept { return pacer_; }
+  // The input sampler (from the first iterate to shutdown step 4), or
+  // nullptr.
+  [[nodiscard]] const InputSampler* Sampler() const noexcept {
+    return input_sampler_.get();
+  }
+  // The settings file's contents (M8).
+  [[nodiscard]] const UserSettings& Settings() const noexcept {
+    return settings_;
+  }
   // Device losses recovered so far (ADR-068).
   [[nodiscard]] std::uint64_t DeviceRecoveries() const noexcept {
     return device_recoveries_;
@@ -330,6 +351,16 @@ class App final : public WindowListener {
   [[nodiscard]] std::int64_t ExitTestTick() const noexcept;
   void StopPlanAtExitTestTick(StepPlan& plan, Tick first_tick) const;
   void RunExitTests(Tick next_tick) SE_REQUIRES(g_main);
+  // M8: the settings file (boot step 10), the --record replay at shutdown,
+  // and the --push-key hook at the end of an iterate.
+  std::expected<void, Error> LoadSettings();
+  void WriteReplay() SE_REQUIRES(g_main);
+  void RunPushKeys(const FrameReport& report) SE_REQUIRES(g_main);
+  // The input sampler (M8): started at the first iterate, inside ADR-047's
+  // window; parked while Suspended or Idle; its rate from the power source
+  // every 5 s; stopped before shutdown step 4.
+  void StartInputSampler() SE_REQUIRES(g_main);
+  void UpdateInputSampler(std::uint64_t now_ns) SE_REQUIRES(g_main);
 
   AppConfig config_;
   GameSetup setup_;
@@ -358,7 +389,13 @@ class App final : public WindowListener {
   // the teardown.
   std::optional<LaneStats> lane_stats_;
   std::vector<LaneStepRecord> lane_trace_;
+  UserSettings settings_;
   std::unique_ptr<GameRuntime> game_;
+  // M8: gamepads are opened on main as SDL reports them; the sampler
+  // updates them.
+  Gamepads gamepads_;
+  std::unique_ptr<InputSampler> input_sampler_;
+  PowerWatch power_;
 
   Lifecycle lifecycle_;
   QuitController quit_;

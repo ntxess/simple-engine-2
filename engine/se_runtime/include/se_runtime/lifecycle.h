@@ -153,6 +153,8 @@ class Lifecycle {
     return power_suspended_;
   }
   [[nodiscard]] bool Focused() const noexcept { return focused_; }
+  // Idle (the editor without input for 1 s): the input sampler parks (M8).
+  [[nodiscard]] bool Idle() const noexcept { return idle_; }
   [[nodiscard]] bool DeviceLost() const noexcept { return device_lost_; }
 
   // One-shot outputs: true once after the change that needs them.
