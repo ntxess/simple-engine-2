@@ -127,6 +127,7 @@ void FramePacer::ResetClock() noexcept {
   prev_start_ns_ = 0;
   prev_now_ns_ = 0;
   measured_vblank_sec_ = 0.0;
+  modal_period_sec_ = 0.0;
   target_ns_ = 0;
   vrr_deadline_ns_ = 0;
   half_rate_take_ns_ = 0;
@@ -270,6 +271,7 @@ FrameClock FramePacer::BeginFrame(bool modal, FixedStepper& stepper) {
   const SamplerSample sample = Sample(reading);
 
   // 4. The FrameClock.
+  if (!modal) modal_period_sec_ = 0.0;
   if (prev_now_ns_ != 0 && now > prev_now_ns_) {
     const double delta = ToSec(now - prev_now_ns_);
     if (delta < kMaxMeasuredSec) {
@@ -279,6 +281,13 @@ FrameClock FramePacer::BeginFrame(bool modal, FixedStepper& stepper) {
               ? per_vblank
               : measured_vblank_sec_ +
                     kMeasureWeight * (per_vblank - measured_vblank_sec_);
+      if (modal) {
+        modal_period_sec_ =
+            modal_period_sec_ == 0.0
+                ? delta
+                : modal_period_sec_ +
+                      kModalWeight * (delta - modal_period_sec_);
+      }
     }
   }
   const double display_period = display_hz_ > 0.0 ? 1.0 / display_hz_ : 0.0;
@@ -287,6 +296,10 @@ FrameClock FramePacer::BeginFrame(bool modal, FixedStepper& stepper) {
   vblank_period_sec_ = period.period_sec;
   const int interval = PresentInterval();
 
+  // Nothing waits while Modal, so EndFrame sets no Paced target: a target
+  // from before the modal loop would pin every modal frame's start to it
+  // (no time would pass for the stepper). Paced starts afresh after it.
+  if (modal) target_ns_ = 0;
   FrameClock clock;
   clock.modal = modal;
   clock.gpu_fence_pending_at_start = frame_.fence_pending;
@@ -349,6 +362,14 @@ FrameClock FramePacer::BeginFrame(bool modal, FixedStepper& stepper) {
   } else {
     // The wall clock: the stepper snaps the deltas (M5's frame clock).
     clock.period_sec = period.period_sec * interval;
+    clock.vblanks_known = false;
+  }
+  if (modal && config_.fixed_frame_dt_sec <= 0.0 &&
+      modal_period_sec_ > clock.period_sec) {
+    // SDL's WM_TIMER runs the modal loop's frames (about 64 Hz), not the
+    // display: with the display's period a 165 Hz screen would cap the
+    // stepper at one or two ticks per frame, below the tick rate (ADR-091).
+    clock.period_sec = modal_period_sec_;
     clock.vblanks_known = false;
   }
   clock.frame_start_ns = start;

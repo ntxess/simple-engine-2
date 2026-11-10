@@ -2841,3 +2841,46 @@ once, so the virtual-gamepad tests are unchanged.
 apart; with no pad open they only cost main's pacing precision. With a pad
 open the cost returns: the real-gamepad row of docs/gates.md now also asks
 for `pacing.vrr_deadline` with a pad connected.
+
+## ADR-091 Modal frames run at the modal loop's own period (2026-11-09)
+
+**Context.** `platform.Ticks continue during a modal loop with Modal set`
+(M5/M6: at least 100 ticks per second of modal time) failed now and then
+in msvc-asan on this machine's 165 Hz display: "65 frames, 65 ticks, at
+most 1 per frame". SDL's WM_TIMER drives the modal loop's iterates at
+about 64 Hz, but the FrameClock's period was the display's (6.06 ms), so
+the stepper's Free cadence gave k_rt = 1 and, when the costs left no room
+for a second tick in 6 ms (k_hi <= 1, as under ASan), k_max = 1: 64 ticks
+a second, the rest dilated. A unit test of the FramePacer on a fake clock
+also showed that a Paced target set before the modal loop pinned every
+modal frame's start to it (EndFrame sets no target while Modal), so no
+time passed for the stepper at all.
+
+**Decision.** While Modal the FramePacer
+- drops the Paced target at each BeginFrame (frames start on the vblank
+  grid at or before now, as Paced does without a target; Paced starts
+  afresh after the loop);
+- reports as the FrameClock's period the modal frames' own interval (an
+  average of their deltas, weight 0.5) when it is longer than the
+  display's, with vblanks_known false. The stepper's formulas are
+  unchanged: T is the presentation period, which in the modal loop is the
+  modal timer's.
+Out of the loop the display's period returns at once. The desktop test
+prints the smallest cap it saw; `pacing.Modal frames at the WM_TIMER rate
+run the tick rate at 165 Hz` reproduces the failure (65 ticks in 65
+frames) without the change.
+
+Two other timing tests the same review found flaky change their bounds,
+not the engine: `present.*.Present statistics advance one present at a
+time` failed on one sample whose sync time was 103 ms old (bound 100 ms,
+machine idle); a sync time over 100 ms old is now counted and reported,
+more than 2 such samples fail unless the machine was busy (ForeignActivity),
+and any over 1 s (frozen statistics) fails. `audio.Stop, scope release and
+reload are clean while a mixer plays` failed once under a parallel lint
+run; its rounds take about a millisecond, so it now waits (bounded) for
+the mixer thread to mix before them.
+
+**Why.** "The cap still applies" (dedicated-driver.md, Running to Modal)
+is about a cap derived from the frames that actually run; deriving it
+from a refresh rate the modal loop does not follow capped the game below
+its tick rate on any display faster than the tick rate.

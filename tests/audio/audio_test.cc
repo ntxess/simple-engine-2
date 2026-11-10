@@ -303,6 +303,13 @@ TEST_CASE("Stop, scope release and reload are clean while a mixer plays",
       mixed.fetch_add(engine->ReadFrames(chunk), std::memory_order_relaxed);
     }
   });
+  // The rounds below take about a millisecond: on a loaded machine the
+  // mixer may not have run yet, so wait until it mixes (bounded).
+  for (int i = 0; i < 100'000 && mixed.load(std::memory_order_relaxed) == 0;
+       ++i) {
+    std::this_thread::sleep_for(std::chrono::microseconds(100));
+  }
+  REQUIRE(mixed.load(std::memory_order_relaxed) > 0);
   std::uint32_t stopped = 0;
   for (int round = 0; round < 300; ++round) {
     const ScopeId scope = static_cast<ScopeId>(1 + round % 3);

@@ -393,6 +393,52 @@ TEST_CASE("Nothing waits while Modal", "[pacer]") {
   REQUIRE(loop.port.swapchain_waits == 0);
 }
 
+TEST_CASE("Modal frames at the WM_TIMER rate run the tick rate at 165 Hz",
+          "[pacer]") {
+  const testing::MainThreadScope main;
+  Loop loop(Patched());
+  // Costs that leave no room for a second tick in a 165 Hz period (an ASan
+  // build): k_hi is 0, so with the display's period the cap would be 1.
+  loop.costs.non_tick_hi = 5.0e-3;
+  loop.costs.non_tick_95 = 5.0e-3;
+  loop.costs.tick_hi = 1.0e-3;
+  loop.costs.tick_95 = 1.0e-3;
+  loop.Attach();
+  loop.Run(0.5);
+  // SDL's WM_TIMER drives the modal loop's iterates every 15.6 ms; nothing
+  // waits.
+  std::uint64_t ticks = 0;
+  int max_steps = 0;
+  int frames = 0;
+  int over_cap = 0;
+  const std::uint64_t start = loop.clock.now_ns;
+  while (loop.clock.now_ns - start < 1'000'000'000) {
+    const FrameClock clock = loop.pacer.BeginFrame(true, loop.stepper);
+    const StepPlan plan =
+        loop.stepper.Plan(clock, loop.costs, true, false, false);
+    ticks += static_cast<std::uint64_t>(plan.steps);
+    max_steps = std::max(max_steps, plan.steps);
+    if (plan.steps > plan.k_max) ++over_cap;
+    ++frames;
+    loop.clock.Advance(15'600'000);
+    loop.port.Present();
+    loop.pacer.OnFrameSubmitted(true, false);
+    loop.pacer.EndFrame(loop.stepper.PlanNext(clock, loop.costs), loop.costs,
+                        true);
+  }
+  INFO(frames << " modal frames, " << ticks << " ticks, at most " << max_steps
+              << " per frame");
+  REQUIRE(frames >= 60);
+  // 120 ticks a second within a frame's worth, the cap still applied.
+  REQUIRE(ticks >= 115);
+  REQUIRE(ticks <= 122);
+  REQUIRE(over_cap == 0);
+  REQUIRE(max_steps >= 2);
+  // Out of the modal loop the display's period is back.
+  const Frame after = loop.Step();
+  CHECK(std::abs(after.clock.period_sec - kPeriod165 * 1e-9) < 1e-6);
+}
+
 TEST_CASE("The N-L fence: pending at frame start, then waited for", "[pacer]") {
   const testing::MainThreadScope main;
   Loop loop(Patched());

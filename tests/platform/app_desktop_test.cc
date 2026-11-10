@@ -135,6 +135,7 @@ TEST_CASE("Ticks continue during a modal loop with Modal set",
   int modal_frames = 0;
   int cap_violations = 0;
   int max_modal_steps = 0;
+  int min_modal_cap = kMaxStepsPerFrame;
   int frames_after_modal = 0;
   std::uint32_t modal_entries = 0;
 
@@ -172,6 +173,7 @@ TEST_CASE("Ticks continue during a modal loop with Modal set",
       ++modal_frames;
       modal_ticks += static_cast<std::uint64_t>(report.plan.steps);
       max_modal_steps = std::max(max_modal_steps, report.plan.steps);
+      min_modal_cap = std::min(min_modal_cap, report.plan.k_max);
       if (report.plan.steps > report.plan.k_max) ++cap_violations;
       CHECK(report.state == LifecycleState::kModal);
       CHECK(report.rendered);
@@ -195,9 +197,10 @@ TEST_CASE("Ticks continue during a modal loop with Modal set",
   const double modal_sec =
       static_cast<double>(modal_last_ns - modal_start_ns) * kNsToSec;
   std::printf("modal for %.3f s: %d frames, %" PRIu64
-              " ticks (%.1f per s), at most %d per frame\n",
+              " ticks (%.1f per s), at most %d per frame, cap at least %d\n",
               modal_sec, modal_frames, modal_ticks,
-              static_cast<double>(modal_ticks) / modal_sec, max_modal_steps);
+              static_cast<double>(modal_ticks) / modal_sec, max_modal_steps,
+              min_modal_cap);
   REQUIRE(modal_sec > 0.8);
   // At least 100 ticks per second of modal time, with the cap applied.
   CHECK(static_cast<double>(modal_ticks) >= 100.0 * modal_sec);
