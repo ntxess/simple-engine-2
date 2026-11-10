@@ -1,4 +1,4 @@
-# Milestone specs: M1 to M9 and M17a
+# Milestone specs: M1 to M10, M12, M14 and M17a
 
 Detailed specs for the first milestones after M0. The milestone table and the
 exit criteria are in docs/implementation-plan.md; the design is in
@@ -1591,3 +1591,358 @@ ADRs 083-086.
 - The full matrix (-Milestone -Legacy, which includes -Desktop, plus
   wsl:linux-clang-debug and msvc-unpatched-dev).
 - ADRs 087 and on.
+
+## M10 Editor shell on the single loop (design build step 8, CF c)
+
+Design sources: docs/design/mt-design.md "Editor" (all of it), "Lifecycle"
+(Play.Edit, Play.Playing, Play.Paused, Play.Stepping, Play.Faulted and
+their transitions; QuitPending), "Failure Handling", "Platform" (file
+dialogs, ImGui's global context, imgui_impl_sdlgpu3 hazards, SDL_GPU
+release on D3D12), the API sketch, build step 8; docs/design/
+costfree-end-state.md "Editor", "Dear ImGui (docking branch)" and "Kept From
+Todays Code" (the editor pieces to port). The legacy editor in app/editor
+is the source of the ported pieces; it is read, not changed.
+
+M10 runs as two tracks that meet in the panel interface below: M10a (ImGui,
+documents, commands, Play, faults, recovery, quit, the editor executable)
+and M10b (the panels). Asset browser, tilemap painter and animation
+preview are M19 (they need its content types); save/load beyond what Play
+and recovery need, prefabs and the real component-removal command are M11.
+
+### The panel interface (the contract between M10a and M10b)
+
+`engine/se_editor/include/se_editor/panel.h`, written by M10a first and
+committed early (M10b copies it verbatim onto its branch until the merge):
+
+```cpp
+// Read-only state a panel draws from, valid for one frame.
+struct PanelContext {
+  const World* world = nullptr;        // the document, or the play World
+  bool playing = false;                // Play.Playing / Paused / Stepping
+  bool faulted = false;                // Play.Faulted: read-only, no edits
+  const Selection* selection = nullptr;
+  EditorCommands* commands = nullptr;  // null while Playing or Faulted
+  TextureIds* textures = nullptr;      // Handle<Texture> -> ImTextureID,
+                                       // resolved every frame (never stored)
+  const EditorStats* stats = nullptr;  // pacing, schedule, render, ForkStats
+  LogView* log = nullptr;              // the main-owned formatted log ring
+  double real_delta_sec = 0.0;
+};
+class Panel {
+ public:
+  virtual ~Panel() = default;
+  virtual std::string_view Name() const = 0;   // the window title
+  virtual void Draw(const PanelContext& context) = 0;
+};
+class EditorCommands {                 // every Edit-mode mutation
+ public:
+  virtual ~EditorCommands() = default;
+  virtual void Submit(std::unique_ptr<EditorCommand> command) = 0;
+  virtual void BeginCoalesce(std::string_view label) = 0;  // a drag
+  virtual void EndCoalesce() = 0;
+  virtual void Select(std::span<const Guid> guids) = 0;
+};
+```
+
+`EditorCommand` (se_editor/commands.h, M10a): Apply(World&) and Revert(World&)
+returning std::expected<void, Error>, plus a label; the kinds are set,
+add and remove a component (before/after JSON through the
+ComponentRegistry), create and destroy an entity (stored serialized), and
+path-point commands (insert, move, delete, the waypoint canvas's).
+`TextureIds` wraps GpuResources (M7) and the ImGui backend: panels hold
+`Handle<Texture>` and ask for an ImTextureID each frame.
+
+### M10a: ImGui, documents, commands, Play, faults, recovery, quit
+
+**New module engine/se_imgui** (STATIC; Dear ImGui v1.93.0-docking from
+.deps, already declared; the only target that compiles ImGui):
+- imconfig override: `GImGui` is `thread_local` (the documented
+  override), so any ImGui call off main fails at once; asserts on;
+  imgui_stdlib; the first-party backends imgui_impl_sdl3 and
+  imgui_impl_sdlgpu3 from the archive.
+- The renderer integration with M7: ImGui draws in the swapchain pass after
+  the composite blit; PrepareDrawData runs before the pass; ImGui's vertex
+  and index buffers are pre-sized and growth is logged (its growth calls
+  SDL_WaitForGPUIdle); ImGui texture updates submit before the frame's
+  command buffer. A debug wrapper of RenderDrawData asserts that no texture
+  it binds was released this frame.
+- A checks rule (planted violation): no `ImTextureID` or `SDL_GPUTexture*`
+  member in se_editor (extends M7's check_gpu_members.py).
+- Fonts: the dynamic font atlas; gamepad navigation on; multi-viewports
+  opt-in and off by default; one DockSpace seeded once with DockBuilder and
+  persisted to the pref path.
+
+**New module engine/se_editor** (STATIC; deps se_runtime, se_imgui,
+se_render, se_assets, se_audio, game modules through GameModule):
+- `EditDocument`: a World that is never stepped, opened from a scene file
+  (M3's loader), with its own undo stack, selection and dirty flag. Panels
+  get `const World&` after the frame's ticks, in Edit and Play, so there is
+  one inspector path and no mirror.
+- Commands and undo: every Edit-mode change is an EditorCommand; undo and
+  redo; drags coalesce into one command. Document edits apply after
+  ImGui::Render and before the RenderList build, so they show in the same
+  frame; commands that release GPU resources (document close, viewport
+  resize) apply at the next frame start. A headless test fails on any
+  Edit-mode mutation made outside commands (the World's mutation gate,
+  M2, closed while in Edit mode outside command application).
+- Play controls take effect between frames and are logged with their tick:
+  - Play serializes the document into a fresh play World (a serializer
+    round trip); the bytes go to the lane as a recovery file and are kept
+    as the Play-start bytes (M12 attaches them to hang dumps); gameplay
+    assets freeze until Stop (visual ones may hot reload, logged in the
+    SessionLog);
+  - Pause stops stepping, sets prev := current once and resets the
+    accumulator; Step runs exactly one tick;
+  - Stop destroys the play World at the next frame start, stopping its
+    voices first, and asserts the document hash is unchanged;
+  - edits during Play queue in the SessionLog against the next tick (at
+    once while paused) and are discarded at Stop;
+  - 'Play game' runs the GameModule's GameStateStack from its start state.
+- Play.Faulted: an exception in a play tick or in the play World's
+  RenderList build (both fault boundaries, ADR-006 list extended) freezes
+  the play World read-only, renders it at alpha 1 on a guarded path with
+  edits disabled, saves the replay, the SessionLog and the breadcrumbs to
+  the pref path, and requests a dump; Stop leaves Faulted for Edit.
+- Pacing in the editor: Standard with frame latency 2 by default; editor
+  Play uses the Overloaded floor of 0 ticks (M2's `editor_play`); Idle
+  (waitevent) after 1 s without input in Edit mode, woken by input or
+  WakeMain; a 60 Hz preview toggle.
+- Recovery and autosave: dirty documents autosave after 2 s with no input
+  (Background lane jobs, unique temp and rename); the next start offers
+  recovery files; WM_QUERYENDSESSION writes recovery files synchronously.
+- Quit: two-phase (M5's QuitController): a prompt and a progress modal run
+  over normal frames, saves are Durable lane jobs, a failed save keeps its
+  document dirty and cancels the quit, and quit waits while a file dialog
+  is open.
+- File dialogs: SDL_ShowOpenFileDialog / SaveFileDialog with a refcounted
+  `DialogMailbox`: the callback (SDL's dialog thread) copies the paths in,
+  calls WakeMain (inside the ADR-047 window) and returns; main acts at the
+  next iterate. A callback that arrives after the editor started quitting
+  or after the mailbox's owner is gone is safe (the refcount keeps the
+  mailbox alive; nothing is touched but the mailbox).
+- The editor's own input: ImGui first, then the InputService only while
+  the viewport has focus in 'Play game'; raw keyboard off (IME, hotkeys).
+
+**apps/editor: the simple_editor executable** (SE_DEFINE_SDL_APP like
+rampage): opens rampage's sandbox scene by default, with `--scene FILE`,
+and the test hook `--editor-script FILE` (test builds): a line-based script
+of editor actions run at frame boundaries (open, select, set component
+JSON, add/remove component, create/destroy, path-point ops, undo, redo,
+play, pause, step N, stop, play-game, inject-throw tick|render, wait-ticks
+N, wait-frames N, dialog-callback PATHS [from-thread], quit, expect-hash
+document|play VALUE, expect-faulted, expect-dirty, dump-hash FILE). Every
+desktop test drives the editor through scripts; none uses real input.
+
+**Tests (M10a):**
+- headless (everywhere, TSan in WSL where threads are involved): commands
+  apply/revert for every kind, undo∘redo is the identity on the document
+  hash, coalescing, the no-mutation-outside-commands check, Play/Pause/
+  Step/Stop state machine, Stop's document hash, SessionLog edits applied
+  at tick boundaries and discarded at Stop, Play.Faulted from a tick throw
+  and from a render-build throw (inspectable afterwards), the dialog
+  mailbox from another thread including after quit started (TSan),
+  autosave and recovery through the lane;
+- desktop (unfocused window, scripts only): the editor opens the sandbox,
+  plays 300 ticks, pauses, steps, stops with an identical document hash;
+  a tick throw and a render throw each leave the editor alive and the
+  World inspectable; quit with a dirty document saves through the lane
+  (throttled disk) and exits; a foreign-thread dialog callback at quit;
+- replay: an editor session recorded through a script replays headless
+  (se_replay) to the same per-tick hashes.
+
+ADRs 095-099.
+
+### M10b: the panels (engine/se_editor/panels)
+
+Panels are classes deriving from `Panel`; they read `PanelContext` and
+change state only through `EditorCommands`. Ported pieces keep the legacy
+behaviour named in docs/design/costfree-end-state.md "Kept From Todays
+Code", rebound to the new model (no sf::, no live registry writes):
+- Hierarchy (Guid, name, parent; selection through the commands).
+- Inspector: reflection-generated drawers from the ComponentRegistry's
+  inspect hooks, plus the ported custom drawers for effects, team and
+  stats (app/editor/EditorComponentVisitor.cpp, with imgui_stdlib in place
+  of the const_cast buffer at :39-41) and the waypoint canvas
+  (app/editor/Editor.cpp:677-931): its path-editing rules (:828-885) and
+  controls (:903-930: left-click adds a point, right-drag pans, right-click
+  opens a menu, the wheel zooms in 0.1 steps within 0.1-10) become path
+  commands, with command tests for each rule. Every edit is a command;
+  a value drag coalesces into one.
+- Viewport: an M7 ViewportTarget shown with ImGui::Image through
+  TextureIds; pan and zoom; picking (the broadphase scratch when its valid
+  tick is current, else exact AABBs ordered by layer and z; a faulted World
+  picks by brute force); a 2D move gizmo as an ImGui overlay whose drag
+  previews and commits one coalesced command; the ported entity overlays
+  (Editor.cpp:538-620) and letterbox math (:451-464, :632-656).
+- Log: lines formatted once into a main-owned ring fed by a log consumer
+  (M4's LogWorker panel sink), with severity colours and layout ported from
+  Editor.cpp:380-427 and dropped-record counts; never re-reads the file.
+- Profiler: per-system ring buffers with the ported axis rule
+  max(avg*1.5, peak*1.1, 1.0) (EditorSceneSystemVisitor.cpp:29); pacing
+  (mode, cadence, B, frame latency, misses, HalfRate); overload and
+  dilation badge; render stats; ForkStats when M14's pool runs (join
+  p99.9, missed wakes, fallbacks); a flight-recorder dump button.
+- Schedule: serial and parallel time per phase and each fork site's state.
+- Stress generator: the ported enemy archetype (Editor.cpp:966-980) as a
+  prefab-like spawn spec, spreading spawns across ticks through commands
+  (Edit) or the SessionLog (Play), logged.
+- Scene settings: camera, tick rate display, background colour.
+- Tests (headless, no window): each panel draws in an ImGui context with a
+  fake PanelContext (a World built by the test, a recording
+  EditorCommands) and synthetic ImGui IO events (io.AddMousePosEvent,
+  AddMouseButtonEvent, AddMouseWheelEvent, AddKeyEvent; never OS input):
+  the waypoint canvas rules each produce the expected path commands;
+  inspector edits produce set-component commands with correct before/after
+  JSON; a drag coalesces; panels never mutate the World (the test World's
+  mutation gate is closed); the log panel shows records and drop counts;
+  the profiler's axis rule.
+
+ADRs 100-103.
+
+### Exit (M10)
+
+- Stop leaves an identical document hash.
+- Tick and render exceptions leave the editor alive and the World
+  inspectable (Play.Faulted).
+- A recorded editor session replays headless to the same hash.
+- A foreign-thread dialog callback is safe, including at quit.
+- Every Edit-mode change goes through commands (the headless check), the
+  ported waypoint canvas rules hold as command tests, and the editor opens,
+  plays and stops the sandbox in a window (I check a screenshot).
+
+## M12 Watchdog (design build step 9)
+
+Design sources: docs/design/mt-design.md "Threads" (watchdog), "Lifecycle"
+(Hung, Running -> Hung -> Running), "Failure Handling", "Determinism And
+Debugging", build step 9; ADR-043 (M4's skeleton: hang declaration off).
+
+- se_crash watchdog: hang declaration on. A hang is 5 consecutive 1 s
+  periods (on the unbiased clock: QueryUnbiasedInterruptTime / CLOCK_
+  MONOTONIC, which exclude system sleep) with no progress of main's iterate
+  counter, while not Suspended, not Modal, without a heartbeat and without
+  a debugger. Armed after the first SDL_AppIterate; until then only the 30 s
+  boot budget applies (M4). Joined last.
+- An in-driver flag: main sets it around SDL_GPU acquire, present and
+  fence waits (and the pacer's waitable and fence waits); a hang during it
+  is labelled a GPU or compositor stall in the dump and the log.
+- One out-of-process dump per hang episode (DumpWithoutCrash from the
+  watchdog thread), carrying the registered streams, a new session-header
+  stream (scene, seed, tick rate, build id, start tick: what a replay needs)
+  and, in the editor, the Play-start bytes (M10; registered as a stream
+  when Play starts). The episode ends when progress resumes (Hung ->
+  Running, logged with its length).
+- The heartbeat: long work on main that is known (a large synchronous
+  load, a blocking save at session end) raises it; nothing else does.
+- The shutdown deadline (M4 integration) stays: 5 s after the Durable
+  drain, dump request, log drain, termination. Release builds' fast exit
+  after the final flush (M5) stays.
+- `tools/se_replay --from-dump DUMP`: reads the session-header stream and
+  the InputFrame ring (tools/minidump/read_dump.py --json, or a C++ reader
+  of the same layout) and replays the session headless to the breadcrumb's
+  tick; with the hang test hook it reports reaching the hanging tick with
+  the per-tick hashes of the ticks before it.
+- Test hooks: `--hang-test after-ticks:N` (test builds) puts main in an
+  infinite loop inside a system at tick N.
+- Tests:
+  - desktop (rampage, unfocused): the injected hang yields an
+    out-of-process dump within 6 s of the hang's start, with main's
+    breadcrumb at tick N, decoded by read_dump.py; se_replay --from-dump
+    replays to tick N;
+  - unit (everywhere, TSan in WSL): the HangDetector with a fake clock:
+    5 periods to declare; Modal, Suspended, heartbeat and a debugger
+    each prevent it; a slow boot under 30 s and system sleep (the unbiased
+    clock does not advance) trigger nothing; one dump per episode;
+  - teardown: the CI's App tests tear down in under 2 s each (measured and
+    gated in the callback tests);
+  - sleep/resume and a real debugger attach stay a gates.md row (manual
+    procedure in tests/platform/watchdog_manual.md).
+
+ADRs 104-106.
+
+### Exit (M12)
+
+- An injected infinite loop yields an out-of-process dump within 6 s that
+  replays to the hanging tick.
+- Modal, Suspended, a debugger (faked), a slow boot and system sleep (fake
+  unbiased clock) trigger nothing; real sleep/resume is a gates.md row.
+- CI teardown under 2 s.
+
+## M14 ForkJoinPool threaded, still disabled (design build step 10)
+
+Design sources: docs/design/mt-design.md "Threads" (fork-join workers),
+"Job System" (all of it), "Measurements" (fork-join overhead, tails,
+determinism across worker counts, unexplained wake stalls), "Risks"
+(fork-protocol bug, wake stalls, hybrid CPUs), build step 10.
+
+- se_core jobs: the threaded ForkJoinPool replaces M2's inline-only one
+  behind the same API; ParallelFor runs the same fixed chunks inline when
+  a site is disabled, inside a fallback window, below minItems, or at
+  W = 0, so results are identical.
+  - Workers: role kForkWorker, started with se_os StartThread (HighQoS,
+    soft affinity through CpuSetRequest), one per physical core up to
+    ForkPoolSize (M4's CpuTopology); PerformanceOnly sites use
+    PerformanceOnlyCount. No worker exists until a site is enabled.
+  - The wake protocol: each worker has its own padded wake word; main does
+    fetch_add(release) and notify_one for participants - 1 workers; the
+    worker loop loads the wake word, tries to claim, then wait(old), so no
+    bump is lost; after a join a worker spins at most 20 us when another
+    fork is predicted (never on battery), then parks.
+  - The descriptor and the remaining count on separate cache lines; large
+    sites claim in batches; participants = min(W + 1, chunks / 4).
+  - Per-chunk outputs grown from per-chunk arenas and concatenated in chunk
+    order; per-chunk DebugDraw slices; World-level sinks assert
+    not-in-fork; nested forks run inline; the first exception is rethrown
+    on main after the join (a fork chunk is a fault boundary, ADR-006).
+  - ForkStats per site: join p50, p99, p99.9 and max, missed wakes,
+    fallbacks, participants; the fallback rule (a join slower than 4x its
+    median runs the site inline for 5 s, then retries; counted).
+  - Calibration: a 10 ms dummy fork per EfficiencyClass at startup when the
+    pool starts.
+  - Chaos mode (`SE_CHAOS_SEED`): seeded claim permutation, yields, delays
+    between claim and descriptor read and between last write and
+    decrement, injected late wakes.
+- Sites stay disabled in every shipped configuration (the enabling rules
+  are M16's); tests enable them explicitly.
+- Tests:
+  - TSan property tests in WSL: no lost wake (a worker never sleeps
+    through a bump; stress with chaos seeds), every chunk runs exactly
+    once, joins see every chunk's writes, exceptions propagate, stop joins;
+  - determinism: identical per-tick hashes for W = 0/1/3/7 and 8 chaos
+    seeds, including pile-up scenes (all colliders in one cell), with the
+    candidate sites of rampage's systems enabled in the test (movement,
+    broadphase, narrowphase, RenderList cull/keys/vertices where they are
+    written as fork sites; write the ones that are not yet sites);
+  - M17a's pending check: the threaded sim driver's hashes equal the inline
+    driver's at W = 1 and 3 (remove the gates.md row);
+  - bench: fork overhead (empty and 50 us chunks) and the join tails at
+    W = 1/3/7, recorded in se_bench (Release, label bench, thresholds from
+    an idle run);
+  - the 12-29 ms wake stalls: a soak (label slow, 10 minutes, Release) that
+    records every wake's latency with QPC stamps and reports p99.9 and max;
+    either explain stalls seen (with the stamps, Windows Performance
+    Recorder `wpr.exe`, which is built into Windows, or a Tracy capture if
+    present) or bound them (no wake over 2 ms in the soak); record it in an
+    ADR and gates.md.
+
+ADRs 107-110.
+
+### Exit (M14)
+
+- TSan property tests green, including no lost wake.
+- Hashes identical for W = 0/1/3/7 and 8 chaos seeds, including pile-ups.
+- The threaded sim driver matches inline at W = 1 and 3.
+- The wake stalls are explained or bounded by a trace or a soak.
+- No site is enabled in any shipped configuration.
+
+## Integration (M10a + M10b + M12 + M14)
+
+- M10b's panels in M10a's editor: the dock layout, every panel live, the
+  viewport through ViewportTarget and TextureIds; the editor's desktop tests
+  with the panels open.
+- M12 in the editor: the Play-start bytes as a dump stream while Playing; a
+  hang in editor Play dumps and the editor-session replay reaches the
+  hanging tick.
+- M14's ForkStats in the profiler and schedule panels.
+- The full matrix (-Milestone -Legacy, which includes -Desktop, plus
+  wsl:linux-clang-debug and msvc-unpatched-dev).
+- ADRs 111 and on.
