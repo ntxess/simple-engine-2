@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <expected>
 #include <format>
+#include <fstream>
 #include <map>
 #include <memory>
 #include <stdexcept>
@@ -898,6 +899,50 @@ TEST_CASE("The scan reports a changed watched file", "[lane][scan]") {
   lane->DrainCompletions(
       [&](LaneCompletion&& c) { done.push_back(std::move(c)); });
   REQUIRE(done.size() == 3);
+}
+
+TEST_CASE("The scan reports a file being written once, when it settles",
+          "[lane][scan]") {
+  const MainThreadScope main;
+  const std::string dir = ScratchDir("scan_settle");
+  const std::string path = fs::Join(dir, "growing.txt");
+  REQUIRE(WriteBytes(path, TextBytes("start")));
+  LaneConfig config = TestConfig();
+  config.scan_period_ns = 100'000'000;
+  auto lane = StartLane(config);
+  lane->Submit(Desc(JobClass::kBackground), MakeWatchJob(path, 7, true));
+  std::vector<LaneCompletion> done;
+  REQUIRE(DrainCount(*lane, done, 1));
+  // A writer appends every 25 ms for 400 ms, so every scan while it runs
+  // sees a new size. The rule before ADR-094 reported each of them.
+  {
+    std::ofstream out(path, std::ios::binary | std::ios::app);
+    REQUIRE(out);
+    for (int i = 0; i < 16; ++i) {
+      out << "0123456789";
+      out.flush();
+      std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+  }
+  REQUIRE(DrainCount(*lane, done, 2, std::chrono::seconds(5)));
+  // Later scans of the settled file report nothing more.
+  std::this_thread::sleep_for(std::chrono::milliseconds(400));
+  lane->DrainCompletions(
+      [&](LaneCompletion&& c) { done.push_back(std::move(c)); });
+  std::vector<std::uint64_t> sizes;
+  for (std::size_t i = 1; i < done.size(); ++i) {
+    REQUIRE(done[i].result.has_value());
+    const auto* change = std::get_if<FileChange>(&*done[i].result);
+    REQUIRE(change != nullptr);
+    sizes.push_back(change->size);
+  }
+  std::string seen;
+  for (const std::uint64_t size : sizes) seen += std::format(" {}", size);
+  INFO("reported sizes:" << seen);
+  // One report of the finished file; a second only if the writer stalled
+  // for a whole scan period (a loaded machine).
+  REQUIRE(sizes.size() <= 2);
+  REQUIRE(sizes.back() == 5 + 16 * 10);
 }
 
 TEST_CASE("Replay and SessionLog flushes go through the lane",

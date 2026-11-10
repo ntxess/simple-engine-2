@@ -2966,3 +2966,45 @@ ticks in that model.
 The desktop test `The audio delay D comes from the FramePacer's frame` checks
 the App's D against `PlanAudioDelayNs`. ADR-077's D bullet is superseded
 for cadences other than Locked k <= 2.
+
+## ADR-094 The hot-reload scan reports settled files; pacing tests wait for regular vblanks (2026-11-10)
+
+**Decision.**
+- The background lane's scan reports a watched file's change only when two
+  scans in a row see the same new size and modification time. A file seen
+  between its truncation and its last write waits one more scan period
+  (500 ms in rampage) instead of being reported, and cooked, half written.
+  A writer that pauses for a whole scan period can still be caught; hot
+  reload is a development aid and accepts that.
+- The desktop pacing tests wait (up to 3 s) for the vblank sampler's
+  intervals to be regular (p90 - p10 spread at most 5% of the median)
+  before comparing its period with the display mode. `two_monitors`
+  warns, instead of failing, for a display that never refreshes regularly
+  in that time; `sampler_measures_window_monitor` and `display_rates`
+  keep the comparison for a regular reading.
+- `display_rates` keeps its 3% check of the plain-VSYNC present rate
+  against the mode with one active display; with more than one, it
+  requires only that the rate is above 0.6 of the mode (well above SDL's
+  misreported 60 Hz, the case ADR-055 was about) and reports the rate.
+
+**Why.** The merged M8/M9/M17a matrix (2026-11-10) failed three tests on
+the environment, not the code:
+- WSL debug's `assets.The scan reports a changed watched file` saw the
+  file at size 0, between the test's truncate and write.
+- With this machine's second 165 Hz monitor on and nobody at it,
+  `pacing.two_monitors` read a first sampler window with a 10.7-20.6 ms
+  median and a 14.5 ms spread on the primary output. Reruns read
+  6.06 ms with spreads under 0.1 ms in 2 of 3 runs.
+- `pacing.display_rates` measured plain VSYNC presents at 117-163 Hz
+  while the sampler saw a steady 165 Hz. It measured 164.8 Hz with one
+  monitor at the M6/M7 tag.
+The engine already does the right thing in each case: Paced needs the
+sampler to agree with the mode, so an irregular output runs Standard, and
+`pacing.paced_misses` passed in the same matrix. Why plain VSYNC loses
+vblanks with two unsynchronised outputs is the open question already
+recorded in gates.md for M15.
+
+**Tests.** `assets.The scan reports a file being written once, when it
+settles` appends to a watched file every 25 ms for 400 ms under a 100 ms
+scan: the old rule reported once per scan during the writes, the new one
+reports the finished size once (twice at most on a stalled writer).

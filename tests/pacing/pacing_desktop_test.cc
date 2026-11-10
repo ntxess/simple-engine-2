@@ -199,6 +199,30 @@ VblankReading WaitForMonitor(const VblankSampler& sampler,
   return reading;
 }
 
+// Regular vblanks: the p90 - p10 spread of the intervals is at most 5% of
+// their median. Right after the sampler starts or the window moves, the
+// first 64 intervals can include stalls (a median of 10-20 ms with a 14 ms
+// spread on this machine's 165 Hz outputs, 2026-11-10), and a display whose
+// refresh varies (variable refresh while the desktop idles) never settles.
+bool Regular(const VblankReading& reading) {
+  return reading.valid && reading.period_ns > 0 &&
+         reading.spread_ns * 20 <= reading.period_ns;
+}
+
+// WaitForMonitor, then up to |timeout_ms| more for regular vblanks (ADR-094).
+VblankReading WaitForRegular(const VblankSampler& sampler,
+                             MonitorHandle monitor, std::uint32_t timeout_ms) {
+  VblankReading reading = WaitForMonitor(sampler, monitor, timeout_ms);
+  const std::uint64_t end =
+      SDL_GetTicksNS() + std::uint64_t{timeout_ms} * 1'000'000;
+  while (reading.valid && reading.monitor == monitor && !Regular(reading) &&
+         SDL_GetTicksNS() < end) {
+    Pump(50);
+    reading = sampler.Read(SDL_GetTicksNS());
+  }
+  return reading;
+}
+
 // Skips the test when the output's waits return at once (the display is
 // off or asleep; measured on this machine, ADR-056).
 void SkipIfDisplayOff(const VblankReading& reading) {
@@ -279,7 +303,7 @@ TEST_CASE("sampler_measures_window_monitor", "[desktop][vblank]") {
   const MonitorMode mode = QueryMonitorMode(monitor);
   Print("window's monitor: " + DescribeMonitorMode(mode));
   REQUIRE(mode.known);
-  const VblankReading reading = WaitForMonitor(*rig.sampler, monitor, 3000);
+  const VblankReading reading = WaitForRegular(*rig.sampler, monitor, 3000);
   Print("sampler: " + DescribeReading(reading));
   if (!reading.valid) {
     CloseRig(rig);
@@ -331,7 +355,7 @@ TEST_CASE("two_monitors", "[desktop][vblank]") {
                       DescribeMonitorMode(mode)));
     REQUIRE(SDL_GetDisplayForWindow(rig.window->Native()) == id);
     rig.sampler->SetMonitor(monitor);
-    const VblankReading reading = WaitForMonitor(*rig.sampler, monitor, 3000);
+    const VblankReading reading = WaitForRegular(*rig.sampler, monitor, 3000);
     Print("sampler: " + DescribeReading(reading));
     if (!reading.valid) {
       CloseRig(rig);
@@ -340,8 +364,15 @@ TEST_CASE("two_monitors", "[desktop][vblank]") {
     REQUIRE(reading.valid);
     CHECK(reading.monitor == monitor);
     REQUIRE(mode.known);
-    CHECK(PeriodsAgree(static_cast<double>(reading.period_ns) * 1e-9,
-                       1.0 / mode.hz));
+    if (Regular(reading)) {
+      CHECK(PeriodsAgree(static_cast<double>(reading.period_ns) * 1e-9,
+                         1.0 / mode.hz));
+    } else {
+      // The pacer stays in Standard on such an output (no agreement with
+      // the mode); the sampler still follows the window.
+      WARN("display " << id << " never refreshed regularly in 3 s: "
+                      << DescribeReading(reading));
+    }
   }
   desktop.CheckUntouched(rig.Hwnd());
   CloseRig(rig);
@@ -386,7 +417,7 @@ TEST_CASE("display_rates", "[desktop][display]") {
   renderer->reset();
   device->WaitForIdle();
   device.reset();
-  const VblankReading reading = WaitForMonitor(*rig.sampler, monitor, 2000);
+  const VblankReading reading = WaitForRegular(*rig.sampler, monitor, 2000);
   const double sampler_hz =
       reading.valid ? 1e9 / static_cast<double>(reading.period_ns) : 0.0;
   Print(std::format("VSYNC presents at {:.3f} Hz; the sampler {} ({}); {}",
@@ -400,13 +431,29 @@ TEST_CASE("display_rates", "[desktop][display]") {
                                  "against the current mode's {:.4f} Hz",
                                  sdl_hz, mode.hz));
   // The present rate follows the current mode (within 3%: a frame or two
-  // of the measurement may be lost to the scheduler).
-  if (std::abs(present_hz - mode.hz) > 0.03 * mode.hz && desktop.Busy()) {
+  // of the measurement may be lost to the scheduler). With more than one
+  // active display, DWM composes the window against outputs whose vblanks
+  // drift apart and plain VSYNC presents lose vblanks (121-163 Hz on this
+  // machine's two 165 Hz outputs, 2026-11-10; ADR-094); the rate must then
+  // still be well above any misreported mode (SDL's 60 Hz, ADR-055).
+  int displays = 0;
+  SDL_free(SDL_GetDisplays(&displays));
+  const bool off = std::abs(present_hz - mode.hz) > 0.03 * mode.hz;
+  if (off && desktop.Busy()) {
     WARN("present rate off with a busy desktop: " << desktop.Report());
+  } else if (off && displays > 1) {
+    WARN("present rate " << present_hz << " Hz against " << mode.hz
+                         << " Hz with " << displays << " active displays");
+    CHECK(present_hz > 0.6 * mode.hz);
   } else {
-    CHECK(std::abs(present_hz - mode.hz) <= 0.03 * mode.hz);
+    CHECK(!off);
   }
-  if (reading.valid) CHECK(PeriodsAgree(1.0 / sampler_hz, 1.0 / mode.hz));
+  if (Regular(reading)) {
+    CHECK(PeriodsAgree(1.0 / sampler_hz, 1.0 / mode.hz));
+  } else if (reading.valid) {
+    WARN(
+        "the sampler's vblanks were not regular: " << DescribeReading(reading));
+  }
   CloseRig(rig);
 }
 

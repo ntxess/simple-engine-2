@@ -108,7 +108,12 @@ struct LaneState {
   struct Watched {
     std::string path;
     std::vector<std::uint64_t> tags;
+    // What the last report (or the watch) saw.
     fs::PathInfo info;
+    // A change seen by one scan, reported once the next scan sees it
+    // unchanged (ADR-094): a file being written is never reported half way.
+    fs::PathInfo pending;
+    bool has_pending = false;
   };
 
   explicit LaneState(BackgroundLane* owner) : lane(owner) {}
@@ -384,8 +389,16 @@ struct LaneState {
     }
   }
 
+  static bool SameInfo(const fs::PathInfo& a, const fs::PathInfo& b) {
+    return a.type == b.type && a.size == b.size &&
+           a.modify_time_ns == b.modify_time_ns;
+  }
+
   // One step of the hot-reload scan: compares the size and modification
-  // time of up to kScanFilesPerStep watched files.
+  // time of up to kScanFilesPerStep watched files. A change is reported
+  // when two scans in a row see the same new size and time (ADR-094), so a
+  // file caught between its truncation and its last write waits for the
+  // write to finish.
   void ScanStep() {
     ApplyQos(JobClass::kBackground);
     Bump(stats.scans);
@@ -395,10 +408,17 @@ struct LaneState {
       Watched& watch = watched[scan_cursor++];
       fs::PathInfo info;
       if (auto stat = fs::Stat(watch.path)) info = *stat;
-      if (info.type == watch.info.type && info.size == watch.info.size &&
-          info.modify_time_ns == watch.info.modify_time_ns) {
+      if (SameInfo(info, watch.info)) {
+        watch.has_pending = false;
         continue;
       }
+      if (!watch.has_pending || !SameInfo(info, watch.pending)) {
+        // New, or still changing: wait for one more scan.
+        watch.pending = info;
+        watch.has_pending = true;
+        continue;
+      }
+      watch.has_pending = false;
       watch.info = info;
       Bump(stats.changes);
       for (const std::uint64_t tag : watch.tags) {
