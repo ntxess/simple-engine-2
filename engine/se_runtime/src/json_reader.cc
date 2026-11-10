@@ -83,7 +83,7 @@ class Reader {
       if (!Consume(':')) return Bad("expected ':'");
       auto value = Value(depth + 1);
       if (!value) return value;
-      node.members.emplace_back(std::move(*key), std::move(*value));
+      node.members.push_back(Member{std::move(*key), std::move(*value)});
       SkipSpace();
       if (Consume('}')) return node;
       if (!Consume(',')) return Bad("expected ',' or '}'");
@@ -271,8 +271,8 @@ class Reader {
 }  // namespace
 
 const Node* Node::Find(std::string_view key) const noexcept {
-  for (const auto& [name, value] : members) {
-    if (name == key) return &value;
+  for (const Member& member : members) {
+    if (member.name == key) return &member.value;
   }
   return nullptr;
 }

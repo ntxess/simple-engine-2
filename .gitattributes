@@ -62,6 +62,9 @@
 #*.rtf   diff=astextplain
 #*.RTF   diff=astextplain
 
+# Generated sounds (tools/audio/make_sounds.py) are compared byte for byte.
+*.wav binary
+
 # Shell scripts run in WSL and must keep LF endings.
 *.sh text eol=lf
 

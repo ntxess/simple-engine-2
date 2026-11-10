@@ -18,6 +18,7 @@
 #include "se_core/log.h"
 #include "se_core/world.h"
 #include "se_render_core/render_components.h"
+#include "se_sim/audio_events.h"
 #include "se_sim/game_module.h"
 #include "se_sim/game_state.h"
 
@@ -47,6 +48,8 @@ class SandboxState final : public GameState {
     if (auto loaded = LoadRequestedScene(*world_, PendingScene()); !loaded) {
       SE_LOG_ERROR("sandbox: {}", loaded.error().message);
     }
+    // The rules' sounds (M8); never part of the World's state.
+    AddAudioEvents(*world_);
     world_->RecordHash();
     worlds_[0] = world_.get();
   }

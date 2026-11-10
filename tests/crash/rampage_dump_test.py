@@ -45,6 +45,7 @@ TICK = 240
 ROLE_MAIN = 1
 ROLE_LOG_WORKER = 5
 ROLE_WATCHDOG = 6
+ROLE_INPUT_SAMPLER = 7
 ROLE_VBLANK_SAMPLER = 8
 LEVEL_WARN = 3
 LEVEL_ERROR = 4
@@ -108,6 +109,7 @@ class Failures:
 def run_rampage(rampage, args):
     env = dict(os.environ)
     env["SE_NO_MESSAGE_BOX"] = "1"
+    env.setdefault("SE_AUDIO", "null")
     started = time.monotonic()
     result = subprocess.run([str(rampage), *args], capture_output=True,
                             text=True, errors="replace", env=env,
@@ -179,6 +181,7 @@ def check_breadcrumbs(failures, dump, tick):
                        "main's breadcrumb (role, tick)")
     for role, name in ((ROLE_LOG_WORKER, "log-worker"),
                        (ROLE_WATCHDOG, "watchdog"),
+                       (ROLE_INPUT_SAMPLER, "input-sampler"),
                        (ROLE_VBLANK_SAMPLER, "vblank-sampler")):
         record = live.get(role)
         if failures.check(record is not None, f"no live {name} slot"):
@@ -251,6 +254,7 @@ def check_dump(failures, dump, scenario):
     names = {t["id"]: t["name"] for t in dump["threads"]}
     for role, name in ((ROLE_MAIN, "main"), (ROLE_LOG_WORKER, "log-worker"),
                        (ROLE_WATCHDOG, "watchdog"),
+                       (ROLE_INPUT_SAMPLER, "input-sampler"),
                        (ROLE_VBLANK_SAMPLER, "vblank-sampler")):
         failures.equal(names.get(ids.get(role)), name,
                        f"OS name of the {name} thread")

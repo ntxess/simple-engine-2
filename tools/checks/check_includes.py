@@ -4,6 +4,8 @@ Reads se_checks.json (written by se_check_link_graph at configure time) and
 scans every source file of each module for #include paths matching the
 module's banned patterns, and for the project-wide bans:
   - spdlog only in se_log, which owns the sinks (test modules too);
+  - miniaudio only in se_audio, which owns the audio engine (test modules
+    too; M8);
   - <windows.h>, in any letter case, and the Win32 headers it gathers
     (<winbase.h>, <processthreadsapi.h>, ...) only in se_os, se_crash,
     se_platform and se_render (engine modules; test code is exempt, as
@@ -11,7 +13,7 @@ module's banned patterns, and for the project-wide bans:
 
 usage:
   check_includes.py <build>/se_checks.json
-  check_includes.py --planted <dir> [--expect spdlog|windows]
+  check_includes.py --planted <dir> [--expect spdlog|windows|miniaudio]
       succeeds only if a violation is found; with a ban named, only if
       every source file under <dir> violates it (one case per file)
 """
@@ -47,6 +49,7 @@ WIN32_HEADERS = (
 # whether test modules are checked too).
 GLOBAL_BANS = [
     ("spdlog", r"^spdlog/", {"se_log"}, True),
+    ("miniaudio", r"^miniaudio", {"se_audio"}, True),
     ("windows", WIN32_HEADERS,
      {"se_os", "se_crash", "se_platform", "se_render"}, False),
 ]

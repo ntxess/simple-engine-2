@@ -25,6 +25,8 @@
 #include <utility>
 #include <vector>
 
+#include "se_audio/audio_engine.h"
+#include "se_audio/pcm.h"
 #include "se_core/error.h"
 #include "se_core/input_frame.h"
 #include "se_core/jobs.h"
@@ -52,6 +54,7 @@
 #include "se_render_core/render_list.h"
 #include "se_runtime/action_map.h"
 #include "se_runtime/app_config.h"
+#include "se_runtime/audio_bridge.h"
 #include "se_runtime/frame_pacer.h"
 #include "se_runtime/input_service.h"
 #include "se_runtime/integration.h"
@@ -60,6 +63,7 @@
 #include "se_runtime/quit.h"
 #include "se_runtime/render_present_port.h"
 #include "se_runtime/user_settings.h"
+#include "se_sim/audio_events.h"
 #include "se_sim/game_module.h"
 #include "se_sim/game_state.h"
 #include "se_sim/replay.h"
@@ -74,11 +78,13 @@ namespace se {
 struct GameRuntime {
   GameRuntime(const GameModule& module, const StateEnv& env,
               const jobs::ForkJoinPool::Config& pool_config, ActionMap map,
-              const InputServiceConfig& input_config)
+              const InputServiceConfig& input_config,
+              audio::AudioEngine* engine)
       : instance(module),
         states(instance.Factory(), WithRegistry(env, instance)),
         pool(pool_config),
         driver(instance.MutableSchedule(), pool),
+        audio(engine),
         input(std::move(map), input_config) {}
   GameRuntime(const GameRuntime&) = delete;
   GameRuntime& operator=(const GameRuntime&) = delete;
@@ -96,7 +102,8 @@ struct GameRuntime {
   SimDriver driver;
   SessionLog session;
   ReplayRecorder recorder;
-  NullAudioSink audio;
+  // The Worlds' audio events onto the engine (M8).
+  AudioBridge audio;
   InputService input;
 };
 
@@ -130,6 +137,33 @@ void InjectedThrow(std::string_view site) {
 std::string GpuDriverFromEnvironment() {
   const char* value = SDL_getenv("SE_GPU_DRIVER");
   return value != nullptr ? std::string(value) : std::string();
+}
+
+// --audio, else SE_AUDIO (device, null or none), else the device (the null
+// backend for a headless app); nullopt: no audio engine.
+std::optional<audio::Output> AudioOutputFor(const AppConfig& config) {
+  AudioRequest request = config.audio;
+  if (request == AudioRequest::kDefault) {
+    const char* value = SDL_getenv("SE_AUDIO");
+    const std::string_view env = value != nullptr ? value : "";
+    if (env == "device") {
+      request = AudioRequest::kDevice;
+    } else if (env == "null") {
+      request = AudioRequest::kNull;
+    } else if (env == "none") {
+      request = AudioRequest::kNone;
+    } else {
+      request = config.headless ? AudioRequest::kNull : AudioRequest::kDevice;
+    }
+  }
+  switch (request) {
+    case AudioRequest::kNone:
+      return std::nullopt;
+    case AudioRequest::kNull:
+      return audio::Output::kNull;
+    default:
+      return audio::Output::kDevice;
+  }
 }
 
 FramePacerConfig PacerConfigFrom(const AppConfig& config) {
@@ -334,6 +368,7 @@ std::expected<void, Error> App::Boot() {
   if (auto settings = LoadSettings(); !settings) {
     return settings;
   }
+  StartAudio();
   if (auto game = StartGame(); !game) {
     return game;
   }
@@ -442,7 +477,8 @@ std::expected<void, Error> App::StartGame() {
   input_config.key_source = EdgeSource::kWinMessage;
 #endif
   game_ = std::make_unique<GameRuntime>(*setup_.module, env, pool_config,
-                                        std::move(*map), input_config);
+                                        std::move(*map), input_config,
+                                        audio_.get());
   // Every latched InputFrame goes into the process's ring, a dump stream.
   game_->driver.AttachInputRing(&integration::DumpInputRing());
   if (setup_.configure) {
@@ -538,6 +574,84 @@ void App::UpdateInputSampler(std::uint64_t now_ns) {
     input_sampler_->SetRate(*rate);
     SE_LOG_INFO("input sampler: {} Hz ({})", *rate,
                 power_.OnBattery() ? "on battery" : "on AC power");
+  }
+}
+
+void App::StartAudio() {
+  const std::optional<audio::Output> output = AudioOutputFor(config_);
+  if (!output) {
+    SE_LOG_INFO("audio: none (--audio none)");
+    return;
+  }
+  audio::EngineConfig audio_config;
+  audio_config.output = *output;
+  audio_config.group_volume = {
+      static_cast<float>(settings_.music_volume / 100.0),
+      static_cast<float>(settings_.effects_volume / 100.0)};
+  auto engine = audio::AudioEngine::Create(audio_config);
+  if (!engine) {
+    SE_LOG_WARN("audio: no engine, the game runs silent: {}",
+                engine.error().message);
+    return;
+  }
+  audio_ = std::move(*engine);
+  LoadSounds();
+}
+
+void App::LoadSounds() {
+  if (setup_.sound_table.empty() || audio_ == nullptr) return;
+  const std::string table_path =
+      fs::Join(paths_.content_root, setup_.sound_table);
+  auto text = fs::ReadTextFile(table_path);
+  if (!text) {
+    SE_LOG_ERROR("sound table: {} ({})", text.error().message, table_path);
+    return;
+  }
+  auto table = ParseNameTable(*text, table_path);
+  if (!table) {
+    SE_LOG_ERROR("sound table: {} ({})", table.error().message,
+                 table.error().path);
+    return;
+  }
+  std::size_t loaded = 0;
+  for (const auto& [name, file] : *table) {
+    const std::string path = fs::Join(paths_.content_root, file);
+    auto bytes = fs::ReadFile(path);
+    if (!bytes) {
+      SE_LOG_ERROR("sound '{}': {} ({})", name, bytes.error().message, path);
+      continue;
+    }
+    // Decoded on main at boot for now; M9's lane decodes off main.
+    auto pcm = audio::DecodeSound(*bytes, audio_->SampleRate(),
+                                  audio_->Channels(), path);
+    if (!pcm) {
+      SE_LOG_ERROR("sound '{}': {} ({})", name, pcm.error().message, path);
+      continue;
+    }
+    audio_->SetSound(SoundKeyOf(name), std::move(*pcm));
+    ++loaded;
+  }
+  SE_LOG_INFO("audio: {} of {} sounds from {}", loaded, table->size(),
+              setup_.sound_table);
+}
+
+void App::BeginAudioFrame(const StepPlan& plan, const FrameClock& clock) {
+  // D = B + T/2: the plan's budget and the display's vblank period (the
+  // FramePacer's).
+  double vblank_sec = pacer_.LastFrame().vblank_period_sec;
+  if (!(vblank_sec > 0.0)) {
+    vblank_sec = clock.period_sec / std::max(1, pacer_.PresentInterval());
+  }
+  game_->audio.BeginFrame(SDL_GetTicksNS(),
+                          AudioDelayNs(plan.budget_b, vblank_sec));
+  // Pan follows the camera of the first running World.
+  const InlineOwnerScope owner(OnMainThread());
+  for (const World* world : game_->states.RunningWorlds()) {
+    const Camera2D camera = CameraFor(*world);
+    const float zoom = camera.zoom > 0.0F ? camera.zoom : 1.0F;
+    game_->audio.SetListener(camera.center.x,
+                             camera.virtual_size.x * 0.5F / zoom);
+    break;
   }
 }
 
@@ -1063,6 +1177,7 @@ SDL_AppResult App::Iterate() {
                     /*debugger=*/false, /*editor_play=*/false);
   report.first_tick = game_->driver.NextTick();
   if (kRuntimeTestHooks) StopPlanAtExitTestTick(report.plan, report.first_tick);
+  BeginAudioFrame(report.plan, frame_clock);
   const std::uint64_t ticks_start = SDL_GetTicksNS();
   game_->driver.TickInline(game_->states, report.plan, game_->input,
                            game_->session, game_->recorder, game_->audio);
@@ -1101,6 +1216,9 @@ SDL_AppResult App::Iterate() {
     renderer_->PumpUploads();
   }
   if (kRuntimeTestHooks) RunReadbacks(report);
+  // Finished voices and the end ring, every iterate (Suspended's 10 Hz
+  // included).
+  game_->audio.Sweep();
   if (report.presented) {
     ++presented_frames_;
     SE_PROFILE_FRAME();
@@ -1274,6 +1392,15 @@ SDL_AppResult App::Shutdown(SDL_AppResult result) {
   if (device_recoveries_ > 0) {
     SE_LOG_INFO("device losses recovered: {}", device_recoveries_);
   }
+  if (game_) {
+    const AudioBridgeStats& sound = game_->audio.Stats();
+    SE_LOG_INFO(
+        "audio at shutdown: {}; {} events, {} played ({} late), {} cosmetic "
+        "dropped, {} failed, {} without an engine",
+        audio_ ? audio::BackendName(audio_->GetBackend()) : "none",
+        sound.events, sound.played, sound.late, sound.cosmetic_dropped,
+        sound.failed, sound.no_engine);
+  }
   // The --record replay, before the Worlds go (M8).
   if (booted_) WriteReplay();
   // The renderer's totals and leak check, while logging still runs; the
@@ -1329,6 +1456,9 @@ void App::Teardown() {
     if (!RunGameHook("GameState::OnExit", clear)) shutdown_faulted_ = true;
     game_.reset();
   }
+  // Step 7: the audio engine: every voice stopped and uninitialised, then
+  // ma_engine_uninit (joins miniaudio's device thread), then the PCM.
+  audio_.reset();
   // Step 8: the background lane (queued jobs that are not Durable are
   // cancelled, a running step finishes, Durable jobs run to the end).
   if (assets_) {

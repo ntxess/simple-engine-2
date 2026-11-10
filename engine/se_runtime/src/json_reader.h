@@ -13,7 +13,6 @@
 #include <expected>
 #include <string>
 #include <string_view>
-#include <utility>
 #include <vector>
 
 #include "se_core/error.h"
@@ -29,6 +28,8 @@ enum class Kind : std::uint8_t {
   kObject,
 };
 
+struct Member;
+
 struct Node {
   Kind kind = Kind::kNull;
   bool boolean = false;
@@ -36,10 +37,16 @@ struct Node {
   // A string's decoded value.
   std::string text;
   std::vector<Node> items;
-  std::vector<std::pair<std::string, Node>> members;
+  std::vector<Member> members;
 
   // The member named |key| of an object, or nullptr.
   [[nodiscard]] const Node* Find(std::string_view key) const noexcept;
+};
+
+// An object's member.
+struct Member {
+  std::string name;
+  Node value;
 };
 
 // Parses |text|; |source| names it in errors (a path).

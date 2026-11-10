@@ -12,8 +12,15 @@
 #include "se_core/thread_role.h"
 #include "se_core/time.h"
 #include "se_core/world.h"
+#include "se_sim/audio_events.h"
 
 namespace se {
+
+void NullAudioSink::Drain(World& world, std::uint64_t /*tick_window_end_ns*/) {
+  // The drain ends the tick: a Play World's gate opens for it.
+  const MutationGate gate = world.OpenGate(GateReason::kTick);
+  if (AudioEvents* events = FindAudioEvents(world)) events->Clear();
+}
 
 TickResult SimDriver::RunTick(GameStateStack& states, const InputFrame& frame,
                               SessionLog& log, ReplayRecorder& recorder,

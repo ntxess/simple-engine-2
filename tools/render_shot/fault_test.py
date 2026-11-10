@@ -54,6 +54,7 @@ def run(command, timeout=100):
     print("$", " ".join(str(part) for part in command))
     env = dict(os.environ)
     env["SE_NO_MESSAGE_BOX"] = "1"
+    env.setdefault("SE_AUDIO", "null")
     result = subprocess.run(command, capture_output=True, text=True,
                             errors="replace", timeout=timeout, env=env,
                             check=False)

@@ -19,6 +19,7 @@ se_add_module(se_runtime KIND STATIC
     src/app.cc
     src/app_config.cc
     src/asset_runtime.cc
+    src/audio_bridge.cc
     src/frame_clock.cc
     src/frame_pacer.cc
     src/input_service.cc
@@ -40,10 +41,12 @@ se_add_module(se_runtime KIND STATIC
     se_crash
     se_platform
     se_render
+    se_audio
   # lz4_static is reachable through se_assets (M9), which alone includes
-  # it (se_assets' BANNED_INCLUDES do not list it; every other module's do).
+  # it (se_assets' BANNED_INCLUDES do not list it; every other module's do);
+  # miniaudio through se_audio (M8), which alone includes it.
   FORBID
-    se_imgui miniaudio sentry)
+    se_imgui sentry)
 # Internal headers are included as "src/<name>.h".
 target_include_directories(se_runtime PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 

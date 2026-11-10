@@ -42,16 +42,21 @@
 
 namespace se {
 
-// Where tick sounds go (M8 schedules them at tick anchor + D).
+// Where tick sounds go: after each World's step, the World's AudioEvents
+// (se_sim/audio_events.h). The runtime's AudioBridge starts them at tick
+// anchor + D (M8).
 class AudioSink {
  public:
   virtual ~AudioSink() = default;
-  virtual void Drain(World& world, std::uint64_t tick_window_end_ns) = 0;
+  virtual void Drain(World& world, std::uint64_t tick_window_end_ns)
+      SE_REQUIRES(g_sim_owner) = 0;
 };
 
+// Drops the tick's audio events (headless runs, tests).
 class NullAudioSink final : public AudioSink {
  public:
-  void Drain(World& /*world*/, std::uint64_t /*tick_window_end_ns*/) override {}
+  void Drain(World& world, std::uint64_t tick_window_end_ns)
+      SE_REQUIRES(g_sim_owner) override;
 };
 
 // Holds a frame's remaining ticks (M9: a World never steps before its

@@ -13,8 +13,10 @@
 
 #include "game_rampage/components.h"
 #include "game_rampage/systems.h"
+#include "se_core/core_components.h"
 #include "se_core/schedule.h"
 #include "se_core/world.h"
+#include "se_sim/audio_events.h"
 
 namespace se::rampage {
 namespace {
@@ -23,14 +25,23 @@ void Add(float* stat, float value) {
   if (stat != nullptr) *stat += value;
 }
 
+// An effect's own application (not a revert); |damaged| is set when it
+// lowers HP.
+void Apply(const EffectDef& def, float* stat, bool& damaged) {
+  Add(stat, def.value);
+  if (stat != nullptr && def.stat == kStatHp && def.value < 0.0F) {
+    damaged = true;
+  }
+}
+
 // One tick of one effect; true when it is complete.
 bool Process(ActiveEffect& effect, Stats& stats, Tick now, Tick watchdog,
-             std::uint32_t rate) {
+             std::uint32_t rate, bool& damaged) {
   const EffectDef& def = effect.def;
   float* stat = FindStat(stats, def.stat);
   switch (def.kind) {
     case EffectKind::kInstant:
-      Add(stat, def.value);
+      Apply(def, stat, damaged);
       return true;
     case EffectKind::kOverTime: {
       // R7: floor(d / i) applications, the first one interval after the
@@ -48,7 +59,7 @@ bool Process(ActiveEffect& effect, Stats& stats, Tick now, Tick watchdog,
       if (effect.applied < total && since >= interval) {
         effect.next = now + interval;
         ++effect.applied;
-        Add(stat, def.value);
+        Apply(def, stat, damaged);
       }
       return watchdog < since || effect.applied >= total;
     }
@@ -64,7 +75,7 @@ bool Process(ActiveEffect& effect, Stats& stats, Tick now, Tick watchdog,
       if (effect.applied == 0) {
         effect.applied = 1;
         effect.next = effect.start + duration;
-        Add(stat, def.value);
+        Apply(def, stat, damaged);
       }
       if (since >= duration) {
         Add(stat, def.value * -1.0F);
@@ -87,6 +98,7 @@ void EffectSystem::Run(World& world, const TickContext& context) {
   const std::uint32_t rate = context.clock.rate;
   const Tick watchdog = TicksFromMs(watchdog_ms, rate);
   const Tick now = context.clock.tick;
+  AudioEvents* audio = FindAudioEvents(world);
   for (const auto [e, active] : reg.view<ActiveEffects>().each()) {
     auto& effects = active.effects;
     if (effects.empty()) continue;
@@ -97,23 +109,41 @@ void EffectSystem::Run(World& world, const TickContext& context) {
       continue;
     }
     // R8: in creation order.
+    bool damaged = false;
     std::size_t kept = 0;
     for (std::size_t i = 0; i < effects.size(); ++i) {
-      if (Process(effects[i], *stats, now, watchdog, rate)) continue;
+      if (Process(effects[i], *stats, now, watchdog, rate, damaged)) continue;
       if (kept != i) effects[kept] = effects[i];
       ++kept;
     }
     effects.resize(kept);
+    // The sound of the damage (M8): asked for, never read back.
+    if (damaged && audio != nullptr) {
+      const auto* transform = reg.try_get<Transform>(e);
+      audio->Push({.sound = kSoundHit,
+                   .positional = transform != nullptr,
+                   .position = transform != nullptr ? transform->pos : Vec2{}});
+    }
   }
 }
 
 void DeathRule::Run(World& world, const TickContext& /*context*/) {
   entt::registry& reg = world.Reg();
+  AudioEvents* audio = FindAudioEvents(world);
   for (const auto [e, stats] : reg.view<const Stats>().each()) {
     // R10: a missing HP counts as 0.
     const float* hp = FindStat(stats, kStatHp);
     const float value = hp != nullptr ? *hp : 0.0F;
-    if (value <= 0.0F) world.RequestDestroy(e);
+    if (value > 0.0F) continue;
+    world.RequestDestroy(e);
+    // A cosmetic sound: dropped when it would start too late (M8).
+    if (audio != nullptr) {
+      const auto* transform = reg.try_get<Transform>(e);
+      audio->Push({.sound = kSoundDeath,
+                   .cosmetic = true,
+                   .positional = transform != nullptr,
+                   .position = transform != nullptr ? transform->pos : Vec2{}});
+    }
   }
 }
 

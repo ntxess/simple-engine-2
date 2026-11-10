@@ -2155,6 +2155,113 @@ the game because only the game knows its actions.
 its pushes inside the window ADR-047 found safe; parking with a doorbell
 keeps main from ever waiting on the sampler.
 
+## ADR-076 se_audio: one engine on main, voices in a fixed table, the end ring and the sweep (2026-11-09)
+
+**Decision.**
+- se_audio (engine/se_audio; STATIC; ALLOW_ONLY se_core and miniaudio)
+  is the only module that links miniaudio (every other module's FORBID
+  list keeps it out; se_runtime's no longer names it, since it reaches
+  miniaudio through se_audio) and the only one that includes it:
+  check_includes.py's new project-wide `miniaudio` ban, test modules
+  included, with `checks.planted.miniaudio_include`. miniaudio's target is
+  marked SYSTEM, so its header brings no warnings or lint findings.
+- `AudioEngine::Create` on main: kDevice (the default playback device; on
+  failure the null backend, logged with the reason), kNull (miniaudio's
+  null backend: a thread mixes in real time and nothing is heard) or
+  kNoDevice (ma_engine's noDevice: frames pulled with ReadFrames). The
+  engine gets its own ma_resource_manager with no job threads
+  (MA_RESOURCE_MANAGER_FLAG_NO_THREADING): nothing loads through it, so
+  the only miniaudio thread is the device's. 48 kHz stereo f32.
+- Groups Music and Effects are ma_sound_groups; their volumes are
+  config/config.json "sound-settings" / 100. Voice caps are per group (32
+  music, 224 effects; at most 256 together), and a group at its cap
+  stops its oldest voice first.
+- PCM is `std::shared_ptr<const Pcm>` (f32 at the engine's format,
+  decoded by `DecodeSound` with miniaudio's decoder: WAV, FLAC and MP3 are
+  built into miniaudio; no new dependency). DecodeSound touches no engine
+  state, so M9's lane can call it. A voice is one of 256 fixed records
+  (never moved): its ma_sound (MA_SOUND_FLAG_NO_SPATIALIZATION and
+  NO_PITCH; miniaudio still resamples a sound of another rate), the
+  ma_audio_buffer that reads the PCM in place, the PCM reference, group,
+  scope, cosmetic flag and start serial. A voice id is slot and
+  generation.
+- Ends: the end callback (miniaudio's thread) pushes the voice id into an
+  se_core SpscRing of 256 and never waits; a full ring is counted. Sweep()
+  (main, every iterate) drains the ring, then uninitialises every voice
+  whose ma_sound_at_end is true; a ring entry for a slot already reused
+  has the wrong generation and is ignored. A voice's PCM reference is
+  dropped only after ma_sound_uninit has returned.
+- Scopes: Play takes a ScopeId; ReleaseScope stops and uninitialises its
+  voices. SetSound replaces a sound's PCM for new voices only.
+- `--audio device|null|none` and the `SE_AUDIO` environment variable
+  choose the App's output; a headless App defaults to null. Nothing a test
+  runs may be heard: scripts/ci.ps1 sets SE_AUDIO=null, so do
+  tests/platform/run_app.py, the crash and fault drivers and RunTestApp
+  (unless a test chose), and the one real-device test
+  (`audio.The playback device opens at volume 0 for 1 s and closes`)
+  opens the device at master and group volume 0.
+- Shutdown step 7: the App destroys the engine right after the Worlds:
+  every voice uninitialised, the groups, ma_engine_uninit (which joins the
+  device thread), then the PCM.
+
+**Why.** A fixed voice table gives miniaudio stable addresses and the end
+callback something it can read without locks; draining a ring and sweeping
+at_end together means a full ring or a callback that never ran cannot
+leak a voice. The ma_sound_uninit-before-release order is the design's
+fence for PCM lifetime.
+
+## ADR-077 The AudioBridge schedules at anchor + D; rampage's sounds and input buffer leave the hashes alone (2026-11-09)
+
+**Decision.**
+- `AudioEvents` (se_sim/audio_events.h) is a World ctx resource: systems
+  push {sound key (Fnv1a32 of the sound table's name), group, cosmetic,
+  positional, position}; at most 256 per tick, more are counted. The
+  `AudioSink::Drain` contract is now SE_REQUIRES(g_sim_owner) and
+  NullAudioSink clears the events, so headless runs never accumulate
+  them. The ctx is not hashed and nothing reads the events back, so audio
+  never changes simulation state.
+- `AudioBridge` (se_runtime) is the App's AudioSink. Each frame, before
+  the ticks, it recalibrates a `PcmClock` (se_audio/pcm_clock.h) and takes
+  D = B + T/2: B is the frame's StepPlan::budget_b, T the FramePacer's
+  vblank period of that frame (PacerFrame::vblank_period_sec, else the
+  frame clock's period over the present interval). So D already comes
+  from the real FramePacer (the integration's item is done here). After
+  each World's tick it starts each event at the PCM frame of
+  min(anchor + D, now + D), the anchor being the tick's window end; the
+  min caps a start that a synthetic frame clock puts in the future.
+- The PCM clock maps SDL_GetTicksNS to engine frames with the largest
+  offset (frames - t * rate) of the last 64 calibrations: the leading edge
+  of the device's 10 ms mixing staircase. Spacing between mapped times is
+  exact, which is what the 8.33 ms requirement needs.
+- Late: a start already passed plays at once; a cosmetic sound more than
+  100 ms late is dropped and counted. Pan is the event's x against the
+  first running World's camera (center, half its virtual width over zoom).
+- Each World gets a voice scope at its first drain; the scope's token
+  lives in its AudioEvents, so destroying the World releases its voices
+  (through a weak reference to the bridge, so a World that outlives the
+  bridge releases nothing).
+- Sounds load synchronously on main at boot from `GameSetup::sound_table`
+  (config/sound.json, name to file); a missing or undecodable file is
+  logged and its events fail (counted). M9's lane will decode them.
+- rampage: tools/audio/make_sounds.py writes assets/sounds/hit.wav and
+  death.wav with integer synthesis (byte-identical everywhere;
+  `checks.sounds_fresh` regenerates and compares them). EffectSystem asks
+  for "hit" when an effect's own application lowers HP; DeathRule asks for
+  the cosmetic "death". The M3 goldens (determinism_rampage, ref.sandbox.*)
+  are unchanged.
+- rampage's IntentSystem buffers the discrete actions (jump 8 ticks; exit,
+  enter, back 6; a1-a6 10) in an `ActionBuffer` component (se_core
+  InputBuffer) added to a player at its first discrete press. It is
+  serialized but not hashed: it is a function of the recorded input and
+  nothing consumes it before M13, whose rules will make it hashed (and
+  rebase the goldens) when they read it.
+
+**Why.** Scheduling against the tick's window end keeps the ticks' own
+spacing in the sound; the cap on early starts keeps synthetic clocks
+(tests, --fixed-frame-dt) from delaying sounds by seconds. Keeping both
+the audio events and the input buffer out of the hash is what lets the M3
+goldens prove that this milestone changed no simulation result.
+
 ## ADR-078 Cooked atlas pages: one texture per page, cooked at build time, re-cooked on the lane in dev builds (2026-11-09)
 
 **Decision.**

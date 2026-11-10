@@ -22,7 +22,10 @@
 //                      watchdog (boot budget until the first iterate), then
 //                      the background lane and the AssetRegistry (M9,
 //                      asset_runtime.h)
-//   10 game            the GameModule's registry and storages, the
+//   10 game            the settings file; the audio engine (M8: miniaudio,
+//                      the null backend when no device opens, --audio) and
+//                      the sound table's sounds, decoded on main; the
+//                      GameModule's registry and storages, the
 //                      GameStateStack with the start state pushed (its
 //                      AssetScope requests its assets), the SimDriver
 //                      writing the process's InputFrame ring and asking the
@@ -69,6 +72,14 @@
 // (step 10), release the present port and the device,
 // remove the subclass and destroy the window, SDL_QuitSubSystem, stop the
 // log worker (step 16), join the watchdog (step 17), stop the profiler.
+// M8: the audio engine goes at step 7, right after the Worlds (their voice
+// scopes end with them): every voice stopped and uninitialised, then
+// ma_engine_uninit, then the PCM. The input sampler stops before step 4.
+//
+// Audio (M8): each frame the AudioBridge recalibrates its PCM clock and
+// takes D = B + T/2 from the plan's budget and the pacer's vblank period;
+// the World's audio events start after each tick at max(now, anchor + D);
+// the engine's end ring and finished voices are swept every iterate.
 // Game code that runs during shutdown (GameSetup::on_shutdown and every
 // GameState::OnExit) has its throws contained: the fault is logged and
 // dumped and the remaining steps still run (ADR-044).
@@ -96,6 +107,7 @@
 #include <string_view>
 #include <vector>
 
+#include "se_audio/audio_engine.h"
 #include "se_core/error.h"
 #include "se_core/thread_role.h"
 #include "se_core/thread_safety.h"
@@ -188,6 +200,10 @@ struct GameSetup {
   // the key bindings and sound volumes (user_settings.h, M8); empty: the
   // module's default bindings and full volumes.
   std::string settings_file;
+  // The sound table (config/sound.json: name to file, like the texture
+  // table) relative to the content root; empty: no sounds. Decoded on main
+  // at boot (M8; M9's lane takes this over).
+  std::string sound_table;
   // The start bytes of a --record replay (rampage: its scene file); empty:
   // none.
   std::function<std::vector<std::byte>(const ContentPaths& paths)> replay_start;
@@ -271,9 +287,17 @@ class App final : public WindowListener {
   [[nodiscard]] const InputSampler* Sampler() const noexcept {
     return input_sampler_.get();
   }
+  // Gamepads the App has open.
+  [[nodiscard]] std::size_t OpenGamepads() const noexcept {
+    return gamepads_.Count();
+  }
   // The settings file's contents (M8).
   [[nodiscard]] const UserSettings& Settings() const noexcept {
     return settings_;
+  }
+  // The audio engine, or nullptr (--audio none, or it could not start).
+  [[nodiscard]] audio::AudioEngine* Audio() const noexcept {
+    return audio_.get();
   }
   // Device losses recovered so far (ADR-068).
   [[nodiscard]] std::uint64_t DeviceRecoveries() const noexcept {
@@ -354,6 +378,13 @@ class App final : public WindowListener {
   // M8: the settings file (boot step 10), the --record replay at shutdown,
   // and the --push-key hook at the end of an iterate.
   std::expected<void, Error> LoadSettings();
+  // Boot step 10: the audio engine and the sound table (M8). Never fails
+  // the boot: without an engine the game runs silent.
+  void StartAudio() SE_REQUIRES(g_main);
+  void LoadSounds() SE_REQUIRES(g_main);
+  // Before the frame's ticks: D, the PCM clock, the listener.
+  void BeginAudioFrame(const StepPlan& plan, const FrameClock& clock)
+      SE_REQUIRES(g_main);
   void WriteReplay() SE_REQUIRES(g_main);
   void RunPushKeys(const FrameReport& report) SE_REQUIRES(g_main);
   // The input sampler (M8): started at the first iterate, inside ADR-047's
@@ -390,6 +421,7 @@ class App final : public WindowListener {
   std::optional<LaneStats> lane_stats_;
   std::vector<LaneStepRecord> lane_trace_;
   UserSettings settings_;
+  std::unique_ptr<audio::AudioEngine> audio_;
   std::unique_ptr<GameRuntime> game_;
   // M8: gamepads are opened on main as SDL reports them; the sampler
   // updates them.

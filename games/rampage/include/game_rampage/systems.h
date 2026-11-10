@@ -4,15 +4,18 @@
 // the phases of rule R9 (docs/milestone-specs.md, M3b "Systems"):
 //
 //   Input      PlayerInputSystem    held bits -> MoveIntent
-//   Intent     IntentSystem         MoveIntent * speed -> velocity
+//   Intent     IntentSystem         MoveIntent * speed -> velocity; the
+//                                   discrete presses into ActionBuffer
 //   Movement   (PrevTransformCopy)  built in
 //              KinematicMoveSystem  the player: pos += velocity * dt
 //              PathSystem           path following (R6, R12, R13)
 //              BoundarySystem       the arena clamp (R11)
 //   Collision  CollisionSystem      contacts, cooldowns, new effects
 //                                   (R2, R3, R4, R8)
-//   Effects    EffectSystem         INSTANT, OVERTIME, TEMPTIMED (R1, R7)
-//   GameRules  DeathRule            HP <= 0 -> DestroyRequest (R10)
+//   Effects    EffectSystem         INSTANT, OVERTIME, TEMPTIMED (R1, R7);
+//                                   the "hit" sound when HP is damaged
+//   GameRules  DeathRule            HP <= 0 -> DestroyRequest (R10); the
+//                                   cosmetic "death" sound
 //   Cleanup    ClearMovedSystem     drops the Moved flags
 //              (built-in Cleanup)   destroys, FinalizeSpawns, hash
 //
@@ -27,6 +30,8 @@
 
 #include "game_rampage/components.h"
 #include "se_core/core_components.h"
+#include "se_core/hash.h"
+#include "se_core/input_frame.h"
 #include "se_core/schedule.h"
 #include "se_core/thread_role.h"
 #include "se_core/thread_safety.h"
@@ -82,6 +87,17 @@ struct ClearMovedSystem {
 
 // Registers the systems above in their phases.
 void RegisterRampageSystems(Schedule& schedule);
+
+// The sounds the rules ask for (config/sound.json names them; M8). Audio
+// events never change simulation state.
+inline constexpr std::uint32_t kSoundHit = Fnv1a32("hit");
+inline constexpr std::uint32_t kSoundDeath = Fnv1a32("death");
+
+// The buffer windows of the discrete actions, in ticks (6 to 12): jump 8,
+// exit, enter and back 6, a1-a6 10.
+[[nodiscard]] std::uint8_t ActionBufferTicks(ActionId action) noexcept;
+// Whether |action| is a discrete action IntentSystem buffers.
+[[nodiscard]] bool IsBufferedAction(ActionId action) noexcept;
 
 // The pieces of the systems, for tests.
 

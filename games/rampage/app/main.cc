@@ -62,8 +62,9 @@ std::expected<se::GameSetup, se::Error> MakeRampage(
   setup.window_width = 1280;
   setup.window_height = 720;
   setup.texture_table = "config/texture.json";
-  // Key bindings and sound volumes (M8).
+  // Key bindings and sound volumes, and the rules' sounds (M8).
   setup.settings_file = "config/config.json";
+  setup.sound_table = "config/sound.json";
   setup.camera = [](const se::World& world) {
     return se::rampage::SandboxCamera(world);
   };

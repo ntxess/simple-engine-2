@@ -25,6 +25,7 @@
 #include "se_core/component_registry.h"
 #include "se_core/guid.h"
 #include "se_core/hash.h"
+#include "se_core/input_buffer.h"
 #include "se_core/sim_clock.h"
 #include "se_core/types.h"
 
@@ -151,6 +152,16 @@ struct MoveIntent {
 struct PlayerControl {
   std::uint8_t player = 0;
   float speed = 120.0F;
+};
+
+// The player's buffered discrete actions (M8): IntentSystem records each
+// press of jump, exit, enter, back and a1-a6 for its window
+// (se_core/input_buffer.h; the windows are kActionBufferTicks), and rules
+// consume them. Added to a player at its first discrete press. Serialized,
+// not hashed: it is a pure function of the recorded input, and nothing
+// consumes it before M13, so the M3 hashes stay as they are (ADR-077).
+struct ActionBuffer {
+  InputBuffer buffer;
 };
 
 // A polyline the entity follows at its Speed stat (R6, R12, R13): segment i

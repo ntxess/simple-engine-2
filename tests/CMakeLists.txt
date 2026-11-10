@@ -98,6 +98,12 @@ add_test(NAME checks.planted.glaze
           --planted "${CMAKE_SOURCE_DIR}/tools/checks/planted/glaze")
 set_tests_properties(checks.glaze checks.planted.glaze PROPERTIES LABELS checks)
 
+# rampage's sounds are what tools/audio/make_sounds.py writes (M8).
+add_test(NAME checks.sounds_fresh
+  COMMAND Python3::Interpreter "${CMAKE_SOURCE_DIR}/tools/audio/make_sounds.py"
+          --check)
+set_tests_properties(checks.sounds_fresh PROPERTIES LABELS checks)
+
 # Death tests: one executable, one CTest test per scenario; each must end in
 # the failed SE_ASSERT it is about, matched by that assert's message, so a
 # scenario that trips another assert fails. Release builds compile the
@@ -187,6 +193,8 @@ if(SE_BUILD_PLATFORM)
   add_subdirectory(platform)
   add_subdirectory(present)
   add_subdirectory(pacing)
+  # M8: se_audio and the AudioBridge.
+  add_subdirectory(audio)
   # M7: Renderer2D and GpuResources, then render_shot (which links their
   # support library).
   add_subdirectory(render_gpu)
