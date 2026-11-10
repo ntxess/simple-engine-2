@@ -5,6 +5,7 @@
 #include <SDL3/SDL_error.h>
 #include <SDL3/SDL_filesystem.h>
 #include <SDL3/SDL_iostream.h>
+#include <SDL3/SDL_thread.h>
 #include <SDL3/SDL_timer.h>
 
 #include <algorithm>
@@ -370,6 +371,8 @@ std::expected<ReplaceOutcome, Error> TryReplace(std::string_view from,
   return ReplaceOutcome::kReplaced;
 #endif
 }
+
+void ReleaseThreadState() noexcept { SDL_CleanupTLS(); }
 
 std::string UniqueTempPath(std::string_view path) {
   const std::uint64_t serial =

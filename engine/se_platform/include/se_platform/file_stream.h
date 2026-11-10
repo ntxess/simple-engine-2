@@ -118,6 +118,12 @@ enum class ReplaceOutcome : std::uint8_t {
 [[nodiscard]] std::expected<ReplaceOutcome, Error> TryReplace(
     std::string_view from, std::string_view to);
 
+// Frees what SDL keeps for the calling thread (its error buffer and other
+// thread-local data, SDL_CleanupTLS). A thread the engine started that
+// called se::fs calls it last, before it returns: SDL frees that data by
+// itself only for threads it created (the background lane, M9).
+void ReleaseThreadState() noexcept;
+
 // A temporary file name in |path|'s directory, unique within the process
 // and, through the performance counter, across processes:
 // "<path>.<counter>-<serial>.tmp".

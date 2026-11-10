@@ -33,6 +33,14 @@ target_include_directories(se_assets_tests PRIVATE
 target_compile_definitions(se_assets_tests PRIVATE
   SE_TEST_OUT_DIR="${_se_assets_out}"
   SE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+# Sanitizer builds report the quit tests' wall-clock bound instead of
+# gating it: their allocator takes milliseconds to free a large job's
+# buffers (12 ms for 100 MB under ASan in WSL).
+if(SE_SANITIZER STREQUAL "")
+  target_compile_definitions(se_assets_tests PRIVATE SE_TEST_SANITIZED=0)
+else()
+  target_compile_definitions(se_assets_tests PRIVATE SE_TEST_SANITIZED=1)
+endif()
 
 catch_discover_tests(se_assets_tests
   DISCOVERY_MODE PRE_TEST

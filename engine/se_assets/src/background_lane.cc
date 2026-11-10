@@ -32,6 +32,7 @@
 #include "se_core/spsc_ring.h"
 #include "se_core/thread_role.h"
 #include "se_os/thread.h"
+#include "se_platform/file_stream.h"
 #include "se_platform/fs.h"
 #include "src/lane_fault_boundary.h"
 
@@ -684,6 +685,8 @@ void BackgroundLane::Run(const std::stop_token& stop) {
   state.held.clear();
   state.queue.clear();
   state.stats.exit_ns.store(SteadyNowNs(), std::memory_order_relaxed);
+  // Last: SDL's thread-local data from se::fs calls (its error buffer).
+  fs::ReleaseThreadState();
 }
 
 }  // namespace se
