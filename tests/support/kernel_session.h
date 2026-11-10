@@ -24,6 +24,7 @@
 #include "se_core/world.h"
 #include "se_sim/game_state.h"
 #include "se_sim/replay.h"
+#include "se_sim/sim_driver.h"
 
 namespace se::testing {
 
@@ -57,6 +58,8 @@ struct KernelSessionOptions {
   InputFrameRing* input_ring = nullptr;
   // Called after every tick.
   std::function<void(Tick, const GameStateStack&)> on_tick;
+  // Asked before every tick TickInline runs (M9's asset hold).
+  TickGate* gate = nullptr;
 };
 
 struct KernelSessionResult {

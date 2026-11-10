@@ -10,8 +10,8 @@ tests of the rampage executable run through this driver:
 Every --expect must match the combined stdout and stderr, no --reject may,
 and the process must exit with --expect-exit within --timeout seconds, or,
 with --expect-abort, end through abort() (exit status 3 on Windows,
-SIGABRT elsewhere). The child runs with SE_NO_MESSAGE_BOX=1. Python 3,
-stdlib only.
+SIGABRT elsewhere). The child runs with SE_NO_MESSAGE_BOX=1 and, unless
+the environment chose otherwise, SE_AUDIO=null. Python 3, stdlib only.
 """
 
 import argparse
@@ -39,6 +39,8 @@ def main():
 
     env = dict(os.environ)
     env["SE_NO_MESSAGE_BOX"] = "1"
+    # Nothing a test runs is heard: miniaudio's null backend (M8).
+    env.setdefault("SE_AUDIO", "null")
     try:
         result = subprocess.run(command, capture_output=True, text=True,
                                 errors="replace", timeout=args.timeout,

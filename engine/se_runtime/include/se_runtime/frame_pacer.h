@@ -18,7 +18,11 @@
 //                measured frame period (ADR-039). Frame starts lie on the
 //                vblank grid when the sampler is valid (ADR-016, ADR-057):
 //                one interval before the target in Paced, the vblank at or
-//                before now in Standard, the deadline in VRR.
+//                before now in Standard, the deadline in VRR. While Modal,
+//                SDL's WM_TIMER paces the iterates and nothing waits, so the
+//                period is the modal frames' own (an average of their
+//                deltas) when that is longer: the stepper's cap then
+//                follows the frames that run (ADR-091).
 //   OnFrameSubmitted  after the frame transaction: the frame's fence goes
 //                to the port, and the present is registered with its target
 //                vblank for the miss count.
@@ -198,6 +202,8 @@ class FramePacer {
   // The measured period: weight of each delta, longest delta averaged.
   static constexpr double kMeasureWeight = 0.1;
   static constexpr double kMaxMeasuredSec = 0.25;
+  // The modal frames' period: weight of each modal delta.
+  static constexpr double kModalWeight = 0.5;
 
   // |clock| outlives the pacer; nullptr: SdlClock().
   explicit FramePacer(const FramePacerConfig& config,
@@ -294,6 +300,8 @@ class FramePacer {
   std::uint64_t prev_now_ns_ = 0;
   std::uint64_t synthetic_ns_ = 0;
   double measured_vblank_sec_ = 0.0;
+  // The modal frames' average interval; 0 outside Modal.
+  double modal_period_sec_ = 0.0;
   double vblank_period_sec_ = 1.0 / kFallbackRefreshHz;
   double tick_dt_sec_ = 1.0 / 120.0;
   // Paced: the target of the frame being built (set by the previous

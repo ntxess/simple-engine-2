@@ -153,6 +153,8 @@ void RegisterRampageComponents(ComponentRegistry& registry) {
   registry.Add<KinematicBody>("KinematicBody", 1, kState);
   registry.Add<MoveIntent>("MoveIntent", 1, kHashed | kSerialized);
   registry.Add<PlayerControl>("PlayerControl", 1, kState);
+  // Input state, derived from the recorded input (M8, ADR-077).
+  registry.Add<ActionBuffer>("ActionBuffer", 1, kSerialized);
   registry.Add<Path>("Path", 1, kState);
   // Derived from Path; rebuilt on load.
   registry.Add<PathCache>("PathCache", 1, kNone);

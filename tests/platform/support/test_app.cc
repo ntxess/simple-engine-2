@@ -80,8 +80,8 @@ void RegisterStates(GameStateFactory& factory) {
 }
 
 constexpr std::array<ActionBinding, 2> kBindings = {{
-    {"left", "A"},
-    {"right", "D"},
+    {"left", "A", "", "dpleft"},
+    {"right", "D", "", "dpright"},
 }};
 
 GameSetup& NextSetup() {
@@ -125,6 +125,9 @@ int RunTestApp(GameSetup setup, std::vector<std::string> args) {
   // A message box would wait for a click; CTest sets this too.
   SDL_SetEnvironmentVariable(SDL_GetEnvironment(), "SE_NO_MESSAGE_BOX", "1",
                              true);
+  // Nothing a test runs is heard: miniaudio's null backend mixes and plays
+  // nothing (M8), unless the test chose an output.
+  SDL_SetEnvironmentVariable(SDL_GetEnvironment(), "SE_AUDIO", "null", false);
   NextSetup() = std::move(setup);
   args.emplace_back("--return-on-quit");
   args.emplace_back("--no-activate");

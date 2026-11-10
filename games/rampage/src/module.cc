@@ -18,6 +18,7 @@
 #include "se_core/log.h"
 #include "se_core/world.h"
 #include "se_render_core/render_components.h"
+#include "se_sim/audio_events.h"
 #include "se_sim/game_module.h"
 #include "se_sim/game_state.h"
 
@@ -47,6 +48,8 @@ class SandboxState final : public GameState {
     if (auto loaded = LoadRequestedScene(*world_, PendingScene()); !loaded) {
       SE_LOG_ERROR("sandbox: {}", loaded.error().message);
     }
+    // The rules' sounds (M8); never part of the World's state.
+    AddAudioEvents(*world_);
     world_->RecordHash();
     worlds_[0] = world_.get();
   }
@@ -83,22 +86,25 @@ void RegisterStates(GameStateFactory& factory) {
   factory.Register(kSandboxState, &MakeSandbox);
 }
 
-// The legacy key bindings (config/config.json control-settings).
+// The legacy key bindings (config/config.json control-settings, whose
+// entries rebind them) and the default gamepad bindings (ADR-074): the
+// d-pad and the left stick move, the face buttons, shoulders and stick
+// clicks are the discrete actions.
 constexpr std::array<ActionBinding, 14> kBindings = {{
-    {"up", "W"},
-    {"left", "A"},
-    {"down", "S"},
-    {"right", "D"},
-    {"jump", "Space"},
-    {"exit", "Escape"},
-    {"enter", "Enter"},
-    {"back", "Enter"},
-    {"a1", "U"},
-    {"a2", "I"},
-    {"a3", "O"},
-    {"a4", "J"},
-    {"a5", "K"},
-    {"a6", "L"},
+    {"up", "w", "key-up", "dpup,-lefty"},
+    {"left", "a", "key-left", "dpleft,-leftx"},
+    {"down", "s", "key-down", "dpdown,+lefty"},
+    {"right", "d", "key-right", "dpright,+leftx"},
+    {"jump", "space", "key-jump", "south"},
+    {"exit", "esc", "key-exit", "back"},
+    {"enter", "enter", "key-enter", "start"},
+    {"back", "enter", "key-back", "east"},
+    {"a1", "u", "key-1", "west"},
+    {"a2", "i", "key-2", "north"},
+    {"a3", "o", "key-3", "leftshoulder"},
+    {"a4", "j", "key-4", "rightshoulder"},
+    {"a5", "k", "key-5", "leftstick"},
+    {"a6", "l", "key-6", "rightstick"},
 }};
 
 }  // namespace

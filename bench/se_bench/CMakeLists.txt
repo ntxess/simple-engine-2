@@ -74,6 +74,10 @@ se_bench_suite(render_frame_10k
 se_bench_suite(rampage_tick_5k
   SOURCES suites/rampage_tick_5k.cc
   DEPS game_rampage)
+# M17a: the dedicated sim driver's per-tick snapshot publish.
+se_bench_suite(snapshot_publish_10k
+  SOURCES suites/snapshot_publish_10k.cc
+  DEPS se_render_core)
 
 add_test(NAME se_bench.list COMMAND se_bench --list)
 set_tests_properties(se_bench.list PROPERTIES

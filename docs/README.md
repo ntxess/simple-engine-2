@@ -26,18 +26,24 @@ behaviour reference until every rule and editor operation is ported.
 
 | Target | Directory | What it is |
 |---|---|---|
-| se_core | engine/se_core | Kernel: World, Schedule, component registry, hashing, detmath, jobs, time (M2) |
-| se_os | engine/se_os | The headless OS layer for threads: StartThread and RoleScope (names, roles, registry slots, QoS, CPU sets), the CPU topology and pool sizes, the unbiased clock, debugger detection, ExecutableDir; depends on se_core only (M4, ADR-029) |
+| se_core | engine/se_core | Kernel: World, Schedule, component registry, hashing, detmath, jobs, time (M2); the input placement rule (edge_placement.h: PlaceEdge, the Locked and Free tick windows the stepper uses) and the input buffer window (input_buffer.h) (M8, ADR-073); the PCM type the lane and the audio engine share (pcm.h, ADR-087); the dedicated driver's channels: SpscQueue, Doorbell, FaultBox, the Snapshot slot and the SnapshotChannel, and SimOwnerScope (M17a, ADR-083, ADR-085) |
+| se_os | engine/se_os | The headless OS layer for threads: StartThread and RoleScope (names, roles, registry slots, QoS, CPU sets), the CPU topology and pool sizes, the unbiased clock, debugger detection, ExecutableDir; depends on se_core only (M4, ADR-029); the sim thread's PreciseTimer (precise_wait.h, M17a, ADR-084) |
 | se_log | engine/se_log | The log worker: drains the per-thread log rings into the spdlog file, stderr and panel sinks; the only module that includes spdlog (M4, ADR-032) |
-| se_sim | engine/se_sim | Game modules, GameStateStack, SessionLog, replays, SimDriver (M2) |
-| se_render_core | engine/se_render_core | Headless renderer half: SpriteRenderer, Camera2D, BuildRenderList; depends on se_core only (M3) |
+| se_sim | engine/se_sim | Game modules, GameStateStack, SessionLog, replays, SimDriver (M2); AudioEvents and the AudioSink contract (M8); the TickGate (M9); the dedicated sim driver, headless: SimThread (role kSim; sessions built and destroyed on it, M17a's commands, the tick as a fault boundary), PacedClock (absolute deadlines, the timer-plus-spin wait with a capped margin, phi, catch-up and dilation; ManualClock for tests) and the InputFolder (M8's half-open placement, holder counts) (M17a, ADR-083, ADR-084, ADR-086); GameStateStack::Revision, which the snapshot generation follows (ADR-086); the App keeps the inline driver until M17b |
+| se_audio | engine/se_audio | The audio engine on miniaudio (the only module that links or includes it): one ma_engine owned by main, Music and Effects groups with the settings file's volumes, the null-backend fallback and a no-device mode for tests; refcounted PCM (WAV and FLAC through miniaudio's decoder), 256 fixed voices with scheduled starts, per-group caps that steal the oldest, the end-of-sound SPSC ring and the per-frame sweep, scopes, reloads for new voices only; the PcmClock (M8, ADR-076) |
+| se_render_core | engine/se_render_core | Headless renderer half: SpriteRenderer, Camera2D, BuildRenderList; depends on se_core only (M3); both ends of the dedicated driver's snapshots: AppendRenderView (a World into a slot's render part, on the sim thread) and SnapshotRenderSource (slots into RenderLists: the newest 3, tau and alpha, per-entity interpolation, starvation, hard cuts), sharing BuildRenderList's quad code (M17a, ADR-086) |
 | se_crash | engine/se_crash | Out-of-process crash capture on crashpad: Start/CrashGuard, RegisterStream, DumpWithoutCrash, the terminate annotation; nothing uploaded; a stub on Linux and in msvc-asan (M4, ADR-033, ADR-034). The watchdog skeleton: role kWatchdog, the HangDetector (boot budget; hangs declared from M12), RequestDump, the shutdown deadline (M4 integration, ADR-043) |
+| se_assets | engine/se_assets | The background lane (role kBackground: SPSC request and completion rings, a binary_semaphore whose 500 ms timeout drives the hot-reload scan, Urgent and Background classes with per-step QoS, bounded steps, strands, revisions, Durable jobs, the sharing-violation retry, a fault boundary per step) and its jobs (reads, SaveRequests and flushes, prefabs and scene chunks through glaze, sounds through M8's decoder, cooked `.seatlas` atlas pages one LZ4 block per step); the AssetRegistry on main (typed stores, Handle<T>, AssetScopes, hot reload, GpuResources behind an upload port) (M9, ADR-078 to ADR-082) |
 | game_rampage | games/rampage | The legacy Sandbox's gameplay on the kernel: components, systems, scenes and prefabs (assets/), legacy scenarios, projections (M3) |
-| se_platform | engine/se_platform | SDL3 on the main thread: SDL's initialisation, the event filter and Inbox, WakeMain, the window and its Win32 subclass (Modal, session end, power), se::fs on SDL's filesystem API, fault dialogs off under SE_NO_MESSAGE_BOX=1 and in every test executable (SDL's assertion dialog included: a failed SDL assertion prints and aborts, ADR-070) (M5); the display outputs (QueryDisplayConfig's current mode of the window's monitor, ADR-055) and the vblank sampler (role kVblankSampler: WaitForVBlank on the window's DXGI output, stamps in the SDL_GetTicksNS domain, a median period; a stub elsewhere) (M6b, ADR-056) |
+| se_platform | engine/se_platform | SDL3 on the main thread: SDL's initialisation, the event filter and Inbox, WakeMain, the window and its Win32 subclass (Modal, session end, power), se::fs on SDL's filesystem API (M9: stepwise FileReader with FILE_SHARE_DELETE on Windows, FileWriter, TryReplace with POSIX semantics and sharing violations as kBusy, the fault and delay injector in test builds; ADR-080), fault dialogs off under SE_NO_MESSAGE_BOX=1 and in every test executable (SDL's assertion dialog included: a failed SDL assertion prints and aborts, ADR-070) (M5); the input sampler (role kInputSampler: SDL_UpdateGamepads at 1000 Hz on AC and 250 Hz on battery, parked on a doorbell while Suspended or Idle, inside ADR-047's window) and the open gamepads (M8, ADR-075); the display outputs (QueryDisplayConfig's current mode of the window's monitor, ADR-055) and the vblank sampler (role kVblankSampler: WaitForVBlank on the window's DXGI output, stamps in the SDL_GetTicksNS domain, a median period; a stub elsewhere) (M6b, ADR-056) |
 | se_render | engine/se_render | The SDL_GPU device (D3D12 on Windows, Vulkan on Linux) (M5); Renderer2D on main: the frame transaction (FrameRecorder, its fault boundary and the --inject-frame-fault hook), GpuResources (texture handles with a magenta fallback, the retire queue, the 8 MB upload queue, device-loss release and recreation), the sprite and blit pipelines, the composite and ViewportTargets, the texture table and PNGs through stb; HLSL shaders in shaders/, SPIR-V committed in shaders/generated/, DXIL built with the SDK's dxc (M7, ADR-059 to ADR-063); `se::present` (present.h): the SDL presentation patch's frame-latency wait, present statistics, GPU timestamps, native handles, device status and present mode, all unsupported in the unpatched build (M6a, ADR-050 to ADR-053) |
-| se_runtime | engine/se_runtime | The App on SDL's main callbacks: boot steps, the frame, the lifecycle and two-phase quit state machines, BasicInputService, the noexcept callbacks (`SE_DEFINE_SDL_APP`) (M5); the main thread's RoleScope, crash capture and its dump streams, the log worker and the watchdog in boot order (integration.h; ADR-042); the FramePacer over the pure PacerPolicy (Paced, Standard, VRR, HalfRate, adaptive latency, misses from present statistics or the latency wait; `--pacing`) and the PresentPort it presents through (M6b, ADR-054, ADR-057, ADR-058); RenderPresentPort, the adapter over `se::present` and Renderer2D, misses from the frame-latency wait on the vblank grid whenever it can resolve a present, with present statistics counted beside it (and checked on their own after DWM's composition offset, ADR-072) and the source only without a waitable (ADR-066), HalfRate that backs off instead of flapping (ADR-071), the GPU timings as FrameCosts' g, and device loss (DeviceLost, recreation on main, `--inject-device-lost`) (M6/M7 integration, ADR-066 to ADR-068) |
-| rampage | games/rampage/app | The rampage executable: the sandbox scene at 120 Hz in a window (M5), drawn textured by Renderer2D (M7); crashpad_handler is copied next to it |
-| se_replay | tools/se_replay | Headless runs of a game module: per-tick hashes, replays, projections |
+| se_runtime | engine/se_runtime | The App on SDL's main callbacks: boot steps, the frame, the lifecycle and two-phase quit state machines, BasicInputService, the noexcept callbacks (`SE_DEFINE_SDL_APP`) (M5); the main thread's RoleScope, crash capture and its dump streams, the log worker and the watchdog in boot order (integration.h; ADR-042); the InputService (stamped edges latched per tick by the placement rule, held state, axes, focus-loss clears with source `cleared`) and the ActionMap (the game's bindings and the settings file's key-bindings as SDL keycodes, default pad bindings, unknown names a boot error), the settings file reader (user_settings.h), `--record` session replays and `--no-raw-keyboard` (M8, ADR-073, ADR-074), replacing BasicInputService; the AudioBridge (each World's audio events started at max(now, tick anchor + D), D = B + T/2 from the plan and the pacer, late and cosmetic rules, a voice scope per World), the audio engine at boot step 10 with the sound table's sounds and `--audio device|null|none` / SE_AUDIO (M8, ADR-076, ADR-077); the FramePacer over the pure PacerPolicy (Paced, Standard, VRR, HalfRate, adaptive latency, misses from present statistics or the latency wait; `--pacing`) and the PresentPort it presents through (M6b, ADR-054, ADR-057, ADR-058); RenderPresentPort, the adapter over `se::present` and Renderer2D, misses from the frame-latency wait on the vblank grid whenever it can resolve a present, with present statistics counted beside it (and checked on their own after DWM's composition offset, ADR-072) and the source only without a waitable (ADR-066), HalfRate that backs off instead of flapping (ADR-071), the GPU timings as FrameCosts' g, and device loss (DeviceLost, recreation on main, `--inject-device-lost`) (M6/M7 integration, ADR-066 to ADR-068); the background lane and the AssetRegistry in the boot and shutdown order (asset_runtime.h: an AssetScope per GameState, the hold until it is resident through SimDriver's TickGate, GpuResources behind the registry's upload port, the lane's QuitProvider for Durable jobs; `--cooked-root`, `--hot-reload`, `--lane-step-trace`) (M9, ADR-081) |
+| rampage | games/rampage/app | The rampage executable: the sandbox scene at 120 Hz in a window (M5), drawn textured by Renderer2D (M7) from the cooked pages of config/texture.json loaded through the background lane, hot-reloading a changed texture (M9); crashpad_handler is copied next to it |
+| asset_cook | tools/asset_cook | Cooks the textures of config/texture.json into `.seatlas` pages (a header and independent LZ4 blocks of about 256 KB of RGBA8), one per texture; CMake runs it at build time into `<build>/bin/cooked` (M9, ADR-078) |
+| input_probe | tools/input_probe | A window that logs each real key event's SDL stamp (SDL's raw-input thread with `--raw-keyboard on`, the Win32 message time with `off`) and its poll delay, and reports the stamps' resolution; needs a person (docs/gates.md "Win32 key stamp resolution"); only `--help` runs unattended (`tools.input_probe.usage`) (M8) |
+| make_sounds | tools/audio/make_sounds.py | Writes rampage's sounds (assets/sounds/hit.wav, death.wav) by integer synthesis; `--check` is `checks.sounds_fresh` (Python 3, stdlib only) (M8) |
+| se_audio_tests | tests/audio | se_audio and the AudioBridge mixed offline or on the null backend (`audio.*`, label unit, TSan and ASan in WSL): 8.33 ms between two ticks' sounds by onset detection, late and cosmetic rules, voice-cap stealing, the end ring and the sweep, stop, scope release and reload while a mixer thread plays, the fallback; the real device at volume 0 (label desktop) |
+| se_replay | tools/se_replay | Headless runs of a game module: per-tick hashes, replays, projections; `--edges-out` lists a replay's recorded edges with their sources (M8) |
 | render_shot | tools/render_shot | A rampage scenario at one tick rendered offscreen by se_render into a PNG, and the image comparison (`--compare`, the golden tolerance: the spec's three conditions, 90% of the drawn pixels, every sprite-sized object at least a quarter within, no solid block drawn in one image only, no fallback magenta; ADR-065, ADR-069); drives the legacy image comparison (whose legacy image must equal tests/golden/render/legacy/) and the rampage fault-injection tests, `render.fault.<driver>.device_lost` included (M7, ADR-065; ADR-068) |
 | build_shaders | tools/shaders/build_shaders.py | Compiles the renderer's HLSL: SPIR-V headers through glslang (committed; `--check` is the WSL freshness test), DXIL headers through dxc at build time (Python 3, stdlib only) |
 | compare_images | tools/render_shot/compare_images.py | Compares two PNGs with the renderer's tolerance (the same rule as render_shot, ADR-069) and writes a diff image (Python 3, stdlib only) |
@@ -49,7 +55,33 @@ behaviour reference until every rule and editor operation is ported.
 | se_present_tests | tests/present | The present API on both GPU drivers (`present.d3d12.*`, `present.vulkan.*`, chosen with SE_GPU_DRIVER): caps, GPU timing, handles and status (label gpu), and the frame-latency waits, statistics, resize and present-mode changes (label desktop) |
 | SDL patch | cmake/patches | sdl3-3.4.20-se-presentation.patch: `include/SDL3/SDL_gpu_se.h` and its D3D12 and Vulkan backends, applied with `SE_SDL_PATCH` (docs/deps.md has the rebase notes) |
 | se_bench | bench/se_bench | Benchmark suites and their Release gates (`bench.*`) |
+| se_lane_bench | bench/lane_steps | `bench.lane_steps`: the background lane's steps (a 1 MB read, a 256 KB LZ4 block decode, a scene chunk parse), each gated on its p99 (M9) |
 | legacy tree | core/, app/ | The SFML reference (`SE_BUILD_LEGACY`, legacy presets) |
+
+## Threads
+
+Every engine thread is a named role started through `se::StartThread`
+(se_os), with a ThreadRegistry slot that carries its breadcrumb and log
+ring into crash dumps; `integration::EngineThreadsRunning()` counts the
+live ones besides main. The App starts and stops them in this order
+(docs/design/mt-design.md "Shutdown Order"; ADR-047, ADR-075, ADR-088), and
+logs the teardown as "shutdown order: ...":
+
+| Thread (OS name) | Role | Module | Started | Stopped | What it does |
+|---|---|---|---|---|---|
+| main | kMain | se_runtime | SDL's main thread, from SDL_AppInit | the end of SDL_AppQuit | window, events, GPU, every World in inline mode, the audio engine's calls, the AssetRegistry |
+| log-worker | kLogWorker | se_log | boot step 2 | shutdown step 16 | drains the per-thread log rings into the file, stderr and the panel ring |
+| vblank-sampler | kVblankSampler | se_platform | boot step 9 (Windows, with a window) | shutdown step 9 (or detached in its wait) | stamps the window's output's vblanks for the FramePacer |
+| watchdog | kWatchdog | se_crash | boot step 9 | shutdown step 17 (the last) | the boot budget, hangs, requested dumps, the 5 s shutdown deadline |
+| bg-lane | kBackground | se_assets | boot step 9, after the watchdog | shutdown step 8 (Durable jobs finish) | the background lane: reads, cooked pages, sound decoding, saves, the hot-reload scan; calls WakeMain only inside ADR-047's window |
+| input-sampler | kInputSampler | se_platform | the first iterate, after the wake scope opens (ADR-047) | before shutdown step 4 | SDL_UpdateGamepads at 1 kHz (250 Hz on battery), parked while Suspended or Idle |
+| sim | kSim | se_sim | `SimThread::Start` (tests; the App wires it in M17b) | Quit, `SimThread::Stop` | the dedicated sim driver: owns its session's Worlds and runs SimDriver::RunTick on PacedClock deadlines (M17a) |
+| fork workers | kForkWorker | se_core | (W = 0: none start) | | deterministic fork-join chunks (M14) |
+
+Library threads (role kLibrary, no slot): miniaudio's device thread (or
+the null backend's mixing thread), SDL's HID, joystick and raw-input
+threads, Tracy's listener with `--profile`; crashpad's handler is a
+separate process.
 
 ## Building
 
@@ -94,13 +126,46 @@ bench/thresholds.json; run them on an otherwise idle machine.
 
 The rampage executable runs the sandbox scene in a window, drawn by
 Renderer2D with the textures of config/texture.json (the title shows the
-tick and the lifecycle state). `--frames N`
+tick and the lifecycle state). The textures load through the background
+lane from the pages `asset_cook` wrote into `<build>/bin/cooked` at build
+time (`--cooked-root DIR` elsewhere); in dev builds a page whose PNG
+changed is re-cooked on the lane, and `--hot-reload on` (the default
+except in Release) reloads a PNG changed while the game runs within about
+half a second. The sim holds (no ticks) until the start state's textures
+and sounds are resident; the log says when it starts and stops holding
+("state 'sandbox': its 5 assets are resident after ... ms").
+`--lane-step-trace FILE` (test builds) writes every lane step at shutdown. `--frames N`
 quits after N presented frames; the runtime's options are listed in
 engine/se_runtime/include/se_runtime/app_config.h:
 
 ```bat
 out\build\msvc-dev\bin\rampage --frames 600
 ```
+
+rampage reads its key bindings and sound volumes from config/config.json
+and its sounds from config/sound.json (M8). The sounds load like the
+textures: the start state's AssetScope requests every file of the sound
+table, the background lane reads each one in 1 MB steps and decodes it with
+miniaudio's decoder in steps of about 1 ms (data only; ma_engine stays on
+main), and the registry hands the PCM to the audio engine when it is
+resident; a sound file changed while the game runs is decoded again and new
+voices play the new PCM while the playing ones finish the old (ADR-087).
+`--audio null` mixes on
+miniaudio's null backend and plays nothing (scripts/ci.ps1 sets
+`SE_AUDIO=null` for every test), `--audio none` runs without an audio
+engine, `--record FILE` writes the session's replay, which `se_replay
+--module rampage --inputs FILE` checks tick by tick (`--edges-out` lists
+its edges and their sources), and `--no-raw-keyboard` stamps keys from
+Win32 messages instead of SDL's raw keyboard. Gamepads work through the
+input sampler (1 kHz); a plugged-in pad is opened when SDL reports it.
+`--record`'s replay is written through the background lane as a Durable
+save at shutdown, and any Durable lane job keeps a quit pending until it is
+renamed into place ("quit waits for N Durable lane job(s)", "quit ready
+after X ms"; ADR-089). `tools/input_probe` shows the key stamps' resolution
+with a person at the keyboard (docs/gates.md). Test builds add
+`--push-key FRAME:MS:KEY[:up]` (a stamped key event) and
+`--durable-save-test FRAME:KB:MS` (a Durable save on a throttled disk, then
+the quit).
 
 `--pacing paced|standard|vrr|auto` chooses the FramePacer's mode:
 
@@ -126,8 +191,9 @@ textures re-uploaded; ADR-068). A PresentMon capture is summarised with
 capture command).
 
 The renderer's test hooks (every build but Release) write the composite
-as PNG (`--readback FRAME:FILE`), reload a texture (`--reload-texture
-NAME@FRAME[=FILE]`) and make one step of the frame transaction fail
+as PNG (`--readback FRAME:FILE`, or `--readback-tick TICK:FILE` for the
+first frame after a tick, since the sim holds while assets load), reload a
+texture on the background lane (`--reload-texture NAME@FRAME[=FILE]`) and make one step of the frame transaction fail
 (`--inject-frame-fault STEP[:EVERY[:UNTIL]]`); frames count iterates.
 render_shot draws a scenario offscreen at one tick, and with the legacy
 build (`legacy-msvc-release`) the two can be compared by hand; from the

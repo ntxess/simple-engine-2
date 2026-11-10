@@ -89,6 +89,11 @@ class RampageTestWorld {
     }
   }
 
+  // Runs one tick with |frame| (its tick must be the next one).
+  void StepFrame(const InputFrame& frame) SE_REQUIRES(g_sim_owner) {
+    module_.MutableSchedule().Step(*world_, frame, pool_);
+  }
+
   [[nodiscard]] Tick Now() const noexcept { return world_->Clock().tick; }
   [[nodiscard]] bool Alive(entt::entity e) const {
     return world_->CReg().valid(e);

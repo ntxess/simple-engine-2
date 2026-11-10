@@ -13,6 +13,11 @@
 //             [--jitter-ms MS] [--hash-out FILE] [--projection-out FILE]
 //             [--record FILE] [--expect-golden NAME]
 //
+// --module rampage also takes --edges-out FILE: with --inputs, every recorded
+// edge as a line "tick action down|up stamp_ns order source" (sources as
+// tools/minidump/read_dump.py names them), so a test can check what a
+// recorded session's edges were and where their stamps came from (M8).
+//
 // --inputs takes a replay written by --record (the module's session log
 // comes with it, and the recorded hashes are checked tick by tick) or a
 // legacy .seinput text file (lines "tick held pressed released" in hex,
@@ -34,6 +39,7 @@
 // Exit status: 0 ok, 1 a check failed, 2 bad arguments or input.
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -87,6 +93,7 @@ struct Args {
   std::string hash_out;
   std::string projection_out;
   std::string record;
+  std::string edges_out;
   std::uint32_t det_crosscheck = 0;
   int jobs = 0;
   std::string expect_golden;
@@ -103,7 +110,8 @@ void Usage() {
                "                 [--hash-out FILE] [--projection-out FILE] "
                "[--record FILE]\n"
                "                 [--det-crosscheck K] [--jobs W] "
-               "[--expect-golden NAME]\n");
+               "[--expect-golden NAME]\n"
+               "                 [--edges-out FILE]\n");
 }
 
 std::optional<Args> Parse(int argc, char** argv) {
@@ -143,6 +151,8 @@ std::optional<Args> Parse(int argc, char** argv) {
       args.projection_out = value;
     } else if (flag == "--record") {
       args.record = value;
+    } else if (flag == "--edges-out") {
+      args.edges_out = value;
     } else if (flag == "--det-crosscheck") {
       args.det_crosscheck = static_cast<std::uint32_t>(std::stoul(value));
     } else if (flag == "--jobs") {
@@ -173,6 +183,28 @@ bool WriteFile(const std::string& path, const std::vector<std::byte>& bytes) {
   std::ofstream out(path, std::ios::binary | std::ios::trunc);
   out.write(reinterpret_cast<const char*>(bytes.data()),
             static_cast<std::streamsize>(bytes.size()));
+  return static_cast<bool>(out);
+}
+
+// The recorded edges of |reader|, one line each (--edges-out).
+bool WriteEdges(const std::string& path, const ReplayReader& reader) {
+  static constexpr std::array<std::string_view, 6> kSources = {
+      "raw-keyboard", "win-message", "gamepad-sampler",
+      "mouse",        "replay",      "cleared"};
+  static_assert(kSources.size() ==
+                static_cast<std::size_t>(kLastEdgeSource) + 1);
+  std::ofstream out(path, std::ios::trunc);
+  for (const InputFrame& frame : reader.Frames()) {
+    for (std::uint8_t i = 0; i < frame.edge_count; ++i) {
+      const InputEdge& edge = frame.edges[i];
+      const auto source = static_cast<std::size_t>(edge.source);
+      out << std::format(
+          "{} {} {} {} {} {}\n", frame.tick, static_cast<int>(edge.action),
+          edge.down ? "down" : "up", edge.stamp_ns,
+          static_cast<int>(edge.order),
+          source < kSources.size() ? kSources[source] : std::string_view("?"));
+    }
+  }
   return static_cast<bool>(out);
 }
 
@@ -296,6 +328,17 @@ int RunRampage(const Args& args) SE_REQUIRES(g_main) SE_EXCLUDES(g_sim_owner) {
       input_ticks = reader->Frames().size();
       options.input = &*reader;
       if (reader->Header().seed != 0) options.seed = reader->Header().seed;
+    }
+  }
+  if (!args.edges_out.empty()) {
+    if (!reader) {
+      std::fprintf(stderr, "se_replay: --edges-out needs a replay --inputs\n");
+      return 2;
+    }
+    if (!WriteEdges(args.edges_out, *reader)) {
+      std::fprintf(stderr, "se_replay: cannot write %s\n",
+                   args.edges_out.c_str());
+      return 2;
     }
   }
   options.ticks =

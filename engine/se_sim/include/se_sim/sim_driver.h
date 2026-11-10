@@ -13,7 +13,11 @@
 // main thread, latching one InputFrame per tick; the M17 threaded driver
 // calls RunTick unchanged from its own thread. With an InputFrameRing
 // attached, RunTick also writes each tick's frame into it (the crash
-// dump's input history); nothing else changes.
+// dump's input history); nothing else changes. With a TickGate (M9),
+// TickInline applies the stack's pending changes before each tick and
+// stops the frame's ticks while the gate holds; RunTick's own
+// ApplyPending then finds nothing left, so replays, which call RunTick
+// directly, run the same ticks.
 
 #ifndef SE_SIM_SIM_DRIVER_H_
 #define SE_SIM_SIM_DRIVER_H_
@@ -38,16 +42,33 @@
 
 namespace se {
 
-// Where tick sounds go (M8 schedules them at tick anchor + D).
+// Where tick sounds go: after each World's step, the World's AudioEvents
+// (se_sim/audio_events.h). The runtime's AudioBridge starts them at tick
+// anchor + D (M8).
 class AudioSink {
  public:
   virtual ~AudioSink() = default;
-  virtual void Drain(World& world, std::uint64_t tick_window_end_ns) = 0;
+  virtual void Drain(World& world, std::uint64_t tick_window_end_ns)
+      SE_REQUIRES(g_sim_owner) = 0;
 };
 
+// Drops the tick's audio events (headless runs, tests).
 class NullAudioSink final : public AudioSink {
  public:
-  void Drain(World& /*world*/, std::uint64_t /*tick_window_end_ns*/) override {}
+  void Drain(World& world, std::uint64_t tick_window_end_ns)
+      SE_REQUIRES(g_sim_owner) override;
+};
+
+// Holds a frame's remaining ticks (M9: a World never steps before its
+// AssetScope is resident). TickInline applies the stack's pending changes
+// and asks the gate before each tick; when it holds, the frame runs no
+// more ticks (none are run late: the stepper plans afresh next frame).
+class TickGate {
+ public:
+  virtual ~TickGate() = default;
+  // True: tick |next_tick| and the rest of the frame do not run.
+  virtual bool HoldTicks(const GameStateStack& states, Tick next_tick)
+      SE_REQUIRES(g_sim_owner) = 0;
 };
 
 struct TickResult {
@@ -80,6 +101,12 @@ class SimDriver {
 
   [[nodiscard]] Tick NextTick() const noexcept { return next_tick_; }
 
+  // TickInline asks |gate| before each tick (nullptr: none). The gate must
+  // outlive its use here.
+  void SetTickGate(TickGate* gate) noexcept { gate_ = gate; }
+  // The last TickInline stopped at the gate.
+  [[nodiscard]] bool HeldLastFrame() const noexcept { return held_; }
+
   // Writes every frame RunTick runs into |ring| from now on (nullptr
   // stops). The ring must outlive its use here; one registered as a dump
   // stream is never destroyed.
@@ -94,6 +121,8 @@ class SimDriver {
   jobs::ForkJoinPool* jobs_;
   Tick next_tick_;
   InputFrameRing* input_ring_ = nullptr;
+  TickGate* gate_ = nullptr;
+  bool held_ = false;
   std::vector<TickResult> frame_results_;
 };
 

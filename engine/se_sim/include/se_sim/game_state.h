@@ -88,6 +88,12 @@ class GameStateFactory {
   std::vector<std::pair<std::string_view, StateCreator>> creators_;
 };
 
+// A state on the stack (GameStateStack::Entries).
+struct StackEntry {
+  std::string_view id;
+  const GameState* state = nullptr;
+};
+
 // A World to draw and its interpolation factor.
 struct WorldRenderSource {
   const World* world = nullptr;
@@ -121,7 +127,14 @@ class GameStateStack {
   // The hash of every World on the stack, tagged with the state ids.
   [[nodiscard]] WorldHash Hash() const;
 
+  // The states, bottom to top (the runtime keeps an AssetScope per state,
+  // M9).
+  [[nodiscard]] std::vector<StackEntry> Entries() const;
+
   [[nodiscard]] std::size_t Depth() const noexcept { return stack_.size(); }
+  // Bumped by every change of the stack (a push, pop, replace or Clear):
+  // the dedicated sim driver's snapshot generation follows it (M17a).
+  [[nodiscard]] std::uint32_t Revision() const noexcept { return revision_; }
   [[nodiscard]] std::string_view TopId() const noexcept;
   [[nodiscard]] std::size_t PendingCount() const noexcept {
     return queue_.size();
@@ -145,6 +158,7 @@ class GameStateStack {
   std::vector<Entry> stack_;
   std::deque<StateCommand> queue_;
   std::uint32_t rejected_ = 0;
+  std::uint32_t revision_ = 0;
 };
 
 // Queues a GameState command from a system; it applies at the next tick

@@ -24,8 +24,27 @@
 namespace se::rampage {
 namespace {
 
+// ActionBuffer's sample: jump (action 4) pressed at tick 12 in an 8-tick
+// window, a1's (action 8) window 10 ticks, every other entry 0.
+std::string ActionBufferSample() {
+  std::string pressed;
+  std::string window;
+  for (int a = 0; a < kMaxActions; ++a) {
+    pressed += a == 4 ? "12" : "0";
+    window += a == 4 ? "8" : (a == 8 ? "10" : "0");
+    if (a + 1 < kMaxActions) {
+      pressed += ',';
+      window += ',';
+    }
+  }
+  return R"({"buffer":{"pressed_at":[)" + pressed + R"(],"window":[)" + window +
+         "]}}";
+}
+
 // A non-default value of each component in its canonical JSON form.
 const std::map<std::string_view, std::string_view>& Samples() {
+  static const auto* const kActionBuffer =
+      new std::string(ActionBufferSample());
   static const auto* const kSamples =
       new std::map<std::string_view, std::string_view>{
           {"Team", R"({"id":"enemy"})"},
@@ -49,6 +68,7 @@ const std::map<std::string_view, std::string_view>& Samples() {
           {"KinematicBody", R"({"velocity":{"x":-120,"y":0}})"},
           {"MoveIntent", R"({"dir":{"x":1,"y":-1}})"},
           {"PlayerControl", R"({"player":1,"speed":120})"},
+          {"ActionBuffer", *kActionBuffer},
           {"Path", R"({"points":[{"x":1,"y":2},{"x":3.5,"y":-4}],"loop":true,)"
                    R"("segment":1,"u":0.25,"done":false})"},
           {"PathCache", R"({"lengths":[1.5],"totals":[0,1.5]})"},
@@ -135,6 +155,11 @@ TEST_CASE("Rampage component flags", "[rampage][serialization]") {
     CHECK(HasFlag(info->flags, ComponentFlags::kHashed));
     CHECK(HasFlag(info->flags, ComponentFlags::kSerialized));
   }
+  // The input buffer is saved but not hashed (ADR-077).
+  const ComponentInfo* buffer = registry.FindByName("ActionBuffer");
+  REQUIRE(buffer != nullptr);
+  CHECK_FALSE(HasFlag(buffer->flags, ComponentFlags::kHashed));
+  CHECK(HasFlag(buffer->flags, ComponentFlags::kSerialized));
   // The derived path cache is neither.
   const ComponentInfo* cache = registry.FindByName("PathCache");
   REQUIRE(cache != nullptr);

@@ -1,8 +1,6 @@
 // Copyright 2026 The simple-engine-2 Authors.
 //
-// AppConfig's command line, the M5 frame clock and BasicInputService.
-
-#include <SDL3/SDL_scancode.h>
+// AppConfig's command line and the M5 frame clock.
 
 #include <array>
 #include <catch2/catch_test_macros.hpp>
@@ -14,7 +12,6 @@
 #include "se_core/input_frame.h"
 #include "se_core/time.h"
 #include "se_runtime/app_config.h"
-#include "se_runtime/basic_input.h"
 #include "se_runtime/frame_clock.h"
 #include "se_sim/game_module.h"
 
@@ -86,6 +83,30 @@ TEST_CASE("Test hooks parse where they are built in", "[app_config]") {
   REQUIRE(InitStepNames().size() == 10);
   REQUIRE(InitStepNames().front() == "crash-handler");
   REQUIRE(InitStepNames().back() == "game");
+}
+
+TEST_CASE("The M9 options parse", "[app_config]") {
+  auto config = Parse({"--cooked-root", "pages", "--hot-reload", "off"});
+  REQUIRE(config);
+  REQUIRE(config->cooked_root == "pages");
+  CHECK_FALSE(config->hot_reload);
+  auto defaults = Parse({});
+  REQUIRE(defaults);
+  CHECK(defaults->cooked_root.empty());
+  CHECK(defaults->hot_reload == !kReleaseBuild);
+  CHECK_FALSE(Parse({"--hot-reload", "maybe"}));
+  auto hooks = Parse({"--lane-step-trace", "trace.txt", "--readback-tick",
+                      "130:t.png", "--readback", "5:f.png"});
+  if (!kRuntimeTestHooks) {
+    CHECK_FALSE(hooks);
+    return;
+  }
+  REQUIRE(hooks);
+  REQUIRE(hooks->lane_step_trace == "trace.txt");
+  REQUIRE(hooks->readbacks.size() == 2);
+  CHECK(hooks->readbacks[0].by_tick);
+  REQUIRE(hooks->readbacks[0].frame == 130);
+  CHECK_FALSE(hooks->readbacks[1].by_tick);
 }
 
 TEST_CASE("The frame clock follows SDL's clock and the display period",
@@ -174,44 +195,6 @@ TEST_CASE("A fixed frame dt makes the clock synthetic", "[frame_clock]") {
                  .steps;
   }
   REQUIRE(ticks == 122);
-}
-
-TEST_CASE("BasicInputService latches held keys per tick", "[basic_input]") {
-  constexpr std::array<ActionBinding, 4> kBindings = {{
-      {"up", "W"},
-      {"enter", "Enter"},
-      {"back", "Enter"},
-      {"broken", "NoSuchKey"},
-  }};
-  BasicInputService input(ActionMapDefaults{.bindings = kBindings});
-  REQUIRE(input.UnknownKeys() == std::vector<std::string>{"NoSuchKey"});
-  REQUIRE(input.ActionsFor(SDL_SCANCODE_RETURN) == 0x6);
-
-  input.OnKey(SDL_SCANCODE_W, true, false);
-  input.OnKey(SDL_SCANCODE_W, true, true);  // a repeat
-  const InputFrame first = input.Latch(1, 0, true);
-  REQUIRE(first.tick == 1);
-  REQUIRE(first.held == 0x1);
-  REQUIRE(first.pressed[0] == 1);
-  CHECK(first.platform_live);
-  const InputFrame second = input.Latch(2, 0, true);
-  REQUIRE(second.held == 0x1);
-  REQUIRE(second.pressed[0] == 0);
-
-  // A tap between two latches shows as a press and a release.
-  input.OnKey(SDL_SCANCODE_RETURN, true, false);
-  input.OnKey(SDL_SCANCODE_RETURN, false, false);
-  const InputFrame third = input.Latch(3, 0, true);
-  REQUIRE(third.held == 0x1);
-  REQUIRE(third.pressed[1] == 1);
-  REQUIRE(third.released[1] == 1);
-  REQUIRE(third.pressed[2] == 1);
-
-  // Focus lost: everything held is released.
-  input.ClearHeld();
-  const InputFrame fourth = input.Latch(4, 0, true);
-  REQUIRE(fourth.held == 0);
-  REQUIRE(fourth.released[0] == 1);
 }
 
 }  // namespace

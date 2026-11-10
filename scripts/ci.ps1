@@ -41,6 +41,10 @@ if (Test-Path Env:SE_UPDATE_GOLDENS) {
 # SE_NO_MESSAGE_BOX=1, the test executables and render_shot also install a
 # handler that prints and aborts).
 $env:SDL_ASSERT = 'abort'
+# Nothing a test runs may be heard on this machine's speakers: every App
+# mixes on miniaudio's null backend (M8; the one real-device test opens the
+# device at volume 0 by itself).
+$env:SE_AUDIO = 'null'
 # powershell -File passes "a,b" as one string; accept both forms.
 $Presets = @($Presets | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
 if ($Milestone) {

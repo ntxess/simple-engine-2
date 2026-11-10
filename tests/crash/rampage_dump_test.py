@@ -17,7 +17,8 @@ Each dump must show, from the real rings:
   - main's breadcrumb (ThreadRegistry slot 0, role main, live) at tick 240
     (fault: at the last tick that ran), and the log worker's, the
     watchdog's and the vblank sampler's slots (M6b: rampage's window has a
-    vblank sampler);
+    vblank sampler), the input sampler's (M8) and the background lane's
+    (M9; the integration, ADR-088), each with its OS thread name;
   - main's log ring (stream 0x53450100) with the line logged just before
     the dump, at that tick, and nothing ticked after it;
   - the InputFrame ring holding ticks 1 up to that tick, no torn slot;
@@ -43,8 +44,10 @@ EXCEPTION_ACCESS_VIOLATION = 0xC0000005
 SIMULATED = 0x0517A7ED  # crashpad's DumpWithoutCrash
 TICK = 240
 ROLE_MAIN = 1
+ROLE_BACKGROUND = 4
 ROLE_LOG_WORKER = 5
 ROLE_WATCHDOG = 6
+ROLE_INPUT_SAMPLER = 7
 ROLE_VBLANK_SAMPLER = 8
 LEVEL_WARN = 3
 LEVEL_ERROR = 4
@@ -108,6 +111,7 @@ class Failures:
 def run_rampage(rampage, args):
     env = dict(os.environ)
     env["SE_NO_MESSAGE_BOX"] = "1"
+    env.setdefault("SE_AUDIO", "null")
     started = time.monotonic()
     result = subprocess.run([str(rampage), *args], capture_output=True,
                             text=True, errors="replace", env=env,
@@ -179,6 +183,8 @@ def check_breadcrumbs(failures, dump, tick):
                        "main's breadcrumb (role, tick)")
     for role, name in ((ROLE_LOG_WORKER, "log-worker"),
                        (ROLE_WATCHDOG, "watchdog"),
+                       (ROLE_BACKGROUND, "bg-lane"),
+                       (ROLE_INPUT_SAMPLER, "input-sampler"),
                        (ROLE_VBLANK_SAMPLER, "vblank-sampler")):
         record = live.get(role)
         if failures.check(record is not None, f"no live {name} slot"):
@@ -251,6 +257,8 @@ def check_dump(failures, dump, scenario):
     names = {t["id"]: t["name"] for t in dump["threads"]}
     for role, name in ((ROLE_MAIN, "main"), (ROLE_LOG_WORKER, "log-worker"),
                        (ROLE_WATCHDOG, "watchdog"),
+                       (ROLE_BACKGROUND, "bg-lane"),
+                       (ROLE_INPUT_SAMPLER, "input-sampler"),
                        (ROLE_VBLANK_SAMPLER, "vblank-sampler")):
         failures.equal(names.get(ids.get(role)), name,
                        f"OS name of the {name} thread")

@@ -7,23 +7,27 @@ frames").
                        viewport_pass|acquire|swapchain_pass|submit|
                        device_lost
 
-Every run uses a synthetic 120 Hz frame clock (--fixed-frame-dt), so frame
-140 is the same tick in every run, reloads the player texture at frame 10
-(so the upload step has work during the fault), shows its window without
-focus and quits after 150 presented frames. --step none is the reference
-run: it writes the frame-140 readback that the other steps compare with.
+Every run uses a synthetic 120 Hz frame clock (--fixed-frame-dt), one tick
+per frame once the sim runs, reloads the player texture at frame 10 (so
+the upload step has work during the fault), shows its window without
+focus and quits after 260 presented frames. The readback is of the first
+frame after tick 130 (--readback-tick): since M9 the sim holds until the
+start state's textures are resident, so a fault on the uploads (or their
+submit) for 100 frames delays the ticks, and a frame number would name a
+different tick in each run. --step none is the reference
+run: it writes the tick-130 readback that the other steps compare with.
 With --inject-frame-fault STEP:1:100 (frames 1 to 100):
   - build and vertices throw in the build phase, a fault of the game build:
     the app quits through the callbacks' fault path (exit 1) after
     "render build fault", and shuts down in order;
   - every other step makes its SDL call look failed: the app keeps running
-    (exit 0), and its frame-140 readback, 40 frames after the fault
-    stopped, matches the reference within the golden tolerance
+    (exit 0), and its tick-130 readback, at least 30 frames after the
+    fault stopped, matches the reference within the golden tolerance
     (render_shot --compare).
 With --inject-device-lost 100 (step device_lost; the M6/M7 integration,
 ADR-068) the device status reports removed once at the start of frame
 100: the app enters DeviceLost, releases every GPU object, recreates the
-device on main, re-uploads its textures and runs on (exit 0); its frame-140
+device on main, re-uploads its textures and runs on (exit 0); its tick-130
 readback matches the reference the same way.
 Every run must release every GPU object ("0 alive"), never trip an
 SE_ASSERT (the frame guard asserts it never cancels after an acquire) and,
@@ -38,8 +42,8 @@ import re
 import subprocess
 import sys
 
-FRAMES = 150
-READBACK_FRAME = 140
+FRAMES = 260
+READBACK_TICK = 130
 FAULT_UNTIL = 100
 BUILD_STEPS = {"build", "vertices"}
 DEVICE_LOST_FRAME = 100
@@ -50,6 +54,7 @@ def run(command, timeout=100):
     print("$", " ".join(str(part) for part in command))
     env = dict(os.environ)
     env["SE_NO_MESSAGE_BOX"] = "1"
+    env.setdefault("SE_AUDIO", "null")
     result = subprocess.run(command, capture_output=True, text=True,
                             errors="replace", timeout=timeout, env=env,
                             check=False)
@@ -81,7 +86,7 @@ def main():
     command = [args.rampage, "--gpu-driver", args.driver, "--no-activate",
                "--pref-dir", str(work / "pref"), "--fixed-frame-dt", "8.3333",
                "--frames", str(FRAMES), "--reload-texture", "player@10",
-               "--readback", f"{READBACK_FRAME}:{readback}"]
+               "--readback-tick", f"{READBACK_TICK}:{readback}"]
     if args.step == "device_lost":
         command += ["--inject-device-lost", str(DEVICE_LOST_FRAME)]
     elif args.step != "none":
@@ -115,7 +120,7 @@ def main():
             failures.append(f"exit status {status}, expected 0")
         expect(rf"shutdown \(success\): \d+ iterates, {FRAMES} presented",
                "the app did not keep running to the end")
-        expect(rf"readback of frame {READBACK_FRAME} \(tick \d+",
+        expect(rf"readback of frame \d+ \(tick {READBACK_TICK},",
                "no readback")
         if args.step == "device_lost":
             expect(rf"removed \(iterate {DEVICE_LOST_FRAME}\): DeviceLost",

@@ -133,7 +133,8 @@ RampageSessionResult RunRampageSession(const RampageSessionOptions& options) {
 
   jobs::ForkJoinPool pool;
   SimDriver driver(module.MutableSchedule(), pool);
-  NullAudioSink audio;
+  NullAudioSink null_audio;
+  AudioSink& audio = options.audio != nullptr ? *options.audio : null_audio;
   SessionLog log;
   RampageScriptedInput scripted(options.seed);
   InputSource& input = options.input != nullptr ? *options.input : scripted;

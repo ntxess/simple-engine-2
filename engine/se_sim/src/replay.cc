@@ -102,7 +102,7 @@ bool DecodeFrame(ByteReader& in, InputFrame* f) {
     std::uint8_t source = 0;
     if (!in.U8(&e.action) || !in.U8(&down) || !in.U64(&e.stamp_ns) ||
         !in.U8(&e.order) || !in.U8(&source) ||
-        source > static_cast<std::uint8_t>(EdgeSource::kReplay)) {
+        source > static_cast<std::uint8_t>(kLastEdgeSource)) {
       return false;
     }
     e.down = down != 0;

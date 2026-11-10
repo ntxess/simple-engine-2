@@ -43,6 +43,7 @@ target_compile_definitions(rampage_test_support PRIVATE
 
 se_add_module(se_rampage_tests KIND EXECUTABLE
   SOURCES
+    audio_events_test.cc
     boundary_test.cc
     broadphase_test.cc
     determinism_test.cc

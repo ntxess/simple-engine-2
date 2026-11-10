@@ -3,7 +3,7 @@
 // StampedInput: input as edges stamped on the wall clock, latched into
 // ticks by the stepper's tick windows the way the platform's InputService
 // does (docs/design/mt-design.md, input): each edge goes to the first tick
-// whose window ends at or after its stamp.
+// whose window ends after its stamp (M8's half-open windows).
 //
 // The edges are a seeded script placed on SyntheticFrameClock's tick grid:
 // edge e belongs to tick t_e and is stamped at

@@ -4,7 +4,9 @@ glaze costs seconds per translation unit to compile (ADR-010), so engine
 code reaches it only through se_core/reflect_glaze.h, and only translation
 units named *_components.cc include that header:
 
-  - no #include of a glaze header except in reflect_glaze.h;
+  - no #include of a glaze header except in reflect_glaze.h, or in a
+    translation unit named *_glaze.cc (a module's one JSON-parsing unit:
+    se_assets' payloads_glaze.cc, ADR-082);
   - no #include of se_core/reflect_glaze.h except in *_components.cc.
 
 Test and tool modules (kind "test") are exempt, like the banned-API scan.
@@ -31,7 +33,8 @@ def scan_file(path):
     for match in INCLUDE_RE.finditer(text):
         target = match.group(1)
         line = text.count("\n", 0, match.start()) + 1
-        if target.startswith("glaze/") and path.name != "reflect_glaze.h":
+        if (target.startswith("glaze/") and path.name != "reflect_glaze.h"
+                and not path.name.endswith("_glaze.cc")):
             found.append(f"{path}:{line}: glaze included outside "
                          f"{REFLECT_HEADER}: <{target}>")
         if target == REFLECT_HEADER and not path.name.endswith(

@@ -22,13 +22,24 @@ inline constexpr int kMaxActions = 64;
 inline constexpr int kMaxAxes = 8;
 inline constexpr int kMaxEdgesPerTick = 32;
 
+// Where an edge's stamp came from (docs/design/mt-design.md "Timestamp
+// sources"); replays keep it. Values are stored in replay files: append
+// only.
 enum class EdgeSource : std::uint8_t {
+  // SDL's raw-input thread (SDL_HINT_WINDOWS_RAW_KEYBOARD=1), SDL_GetTicksNS.
   kRawKeyboard,
+  // Win32 message times (the editor, raw keyboard off).
   kWinMessage,
+  // The input sampler's SDL_UpdateGamepads (about 1 ms).
   kGamepadSampler,
   kMouse,
+  // Synthesised without a platform (tests, legacy inputs).
   kReplay,
+  // A release the engine made when it cleared held input (focus loss, the
+  // Windows modal loop), stamped when it cleared (M8).
+  kCleared,
 };
+inline constexpr EdgeSource kLastEdgeSource = EdgeSource::kCleared;
 
 struct InputEdge {
   ActionId action = 0;

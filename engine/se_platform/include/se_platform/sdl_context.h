@@ -4,7 +4,8 @@
 // se_platform). SdlContext::Init, on the main thread:
 //
 //   - sets SDL_HINT_AUTO_UPDATE_JOYSTICKS=0 (the M8 input sampler updates
-//     gamepads itself) and, when asked, the video driver hint;
+//     gamepads itself), SDL_HINT_WINDOWS_RAW_KEYBOARD as asked and, when
+//     asked, the video driver hint;
 //   - routes SDL's log output to the SE_LOG front end (any thread);
 //   - initialises the requested subsystems (VIDEO | GAMEPAD by default);
 //   - cross-checks the engine's main thread (RegisterMainThread, ADR-009)
@@ -36,6 +37,9 @@ struct SdlInitConfig {
   // SDL_HINT_VIDEO_DRIVER when not empty ("dummy", "offscreen", ...). The
   // SDL_VIDEO_DRIVER environment variable applies when this is empty.
   std::string video_driver;
+  // SDL_HINT_WINDOWS_RAW_KEYBOARD: key events stamped on SDL's raw-input
+  // thread (SDL_GetTicksNS) instead of from Win32 message times (M8).
+  bool raw_keyboard = false;
   // SDL_SetAppMetadata; empty fields are left unset.
   std::string app_name;
   std::string app_version;

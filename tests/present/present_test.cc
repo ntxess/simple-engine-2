@@ -611,6 +611,13 @@ void CheckPresentStatistics(WindowMode mode) SE_REQUIRES(g_main) {
   int one_step = 0;
   int other_steps = 0;
   int shared_refreshes = 0;
+  // Samples whose sync time was more than 100 ms old: a compositor or
+  // scheduler hiccup (one sample at 103 ms was seen on an idle machine);
+  // a few are reported, more fail unless the machine was busy, none may be
+  // a second old (frozen statistics), and a window DWM stopped composing
+  // (stale syncs with presents not shown) skips.
+  int stale_samples = 0;
+  std::uint64_t max_sync_age = 0;
   std::uint64_t max_sync_lag = 0;
   for (std::size_t i = 0; i < samples.size(); ++i) {
     const present::PresentStats& s = samples[i].stats;
@@ -621,7 +628,9 @@ void CheckPresentStatistics(WindowMode mode) SE_REQUIRES(g_main) {
     max_sync_lag =
         std::max(max_sync_lag, s.sync_refresh_count - s.present_refresh_count);
     REQUIRE(s.sync_time_ns <= samples[i].now_ns);
-    REQUIRE(samples[i].now_ns - s.sync_time_ns < 100 * kNsPerMs);
+    const std::uint64_t sync_age = samples[i].now_ns - s.sync_time_ns;
+    max_sync_age = std::max(max_sync_age, sync_age);
+    if (sync_age >= 100 * kNsPerMs) ++stale_samples;
     if (i == 0) continue;
     const present::PresentStats& p = samples[i - 1].stats;
     // One present per frame was issued between the samples.
@@ -656,8 +665,26 @@ void CheckPresentStatistics(WindowMode mode) SE_REQUIRES(g_main) {
        << (last.present_refresh_count - first.present_refresh_count)
        << " refreshes; sync lag at most " << max_sync_lag << "; "
        << shared_refreshes << " samples where one refresh showed two presents"
-       << (composed ? " (composed by DWM)" : "") << "; foreign input "
+       << (composed ? " (composed by DWM)" : "") << "; " << stale_samples
+       << " samples with a sync time over 100 ms old (at most "
+       << static_cast<double>(max_sync_age) / 1e6 << " ms); foreign input "
        << activity.InputSeen() << ", CPU load " << activity.CpuLoad());
+  if (composed && stale_samples > 2 && presents + 2 < issued) {
+    // DWM stopped composing the window for a while (its sync times went
+    // stale and it showed fewer presents than were issued; seen twice in
+    // one night run, 84 and 22 of 119 shown, at most 219 and 595 ms stale):
+    // the statistics froze as they do at zero while the display sleeps
+    // (ADR-052), so nothing below can be measured.
+    const std::string driver(device.Driver());
+    fixture.Close();
+    SKIP(driver << " windowed: DWM composed " << presents << " of " << issued
+                << " presents and " << stale_samples << " of " << samples.size()
+                << " samples had a sync time over 100 ms old (at most "
+                << static_cast<double>(max_sync_age) / 1e6
+                << " ms): the compositor was not composing (ADR-091)");
+  }
+  // The statistics are live: none is a second old.
+  REQUIRE(max_sync_age < 1000 * kNsPerMs);
   // Every issued present is displayed (VSYNC drops none), and the displayed
   // refresh follows the sampled one closely.
   REQUIRE(presents + 2 >= issued);
@@ -665,12 +692,14 @@ void CheckPresentStatistics(WindowMode mode) SE_REQUIRES(g_main) {
   const bool mostly_one_step =
       one_step * 10 >= static_cast<int>(samples.size()) * 9;
   const bool small_lag = max_sync_lag <= 2;
-  if (activity.Busy() && !(mostly_one_step && small_lag)) {
+  const bool fresh = stale_samples <= 2;
+  if (activity.Busy() && !(mostly_one_step && small_lag && fresh)) {
     // Excused: other work delayed this thread's samples or presents.
     WARN("statistics outside the bounds excused: the machine was busy");
   } else {
     REQUIRE(mostly_one_step);
     REQUIRE(small_lag);
+    REQUIRE(fresh);
   }
   fixture.Close();
 }

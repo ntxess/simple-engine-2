@@ -17,6 +17,8 @@
 #include "game_rampage/systems.h"
 #include "se_core/core_components.h"
 #include "se_core/detmath.h"
+#include "se_core/input_buffer.h"
+#include "se_core/input_frame.h"
 #include "se_core/schedule.h"
 #include "se_core/types.h"
 #include "se_core/world.h"
@@ -294,14 +296,50 @@ void PlayerInputSystem::Run(World& world, const TickContext& context) {
   }
 }
 
-void IntentSystem::Run(World& world, const TickContext& /*context*/) {
+void IntentSystem::Run(World& world, const TickContext& context) {
+  entt::registry& reg = world.Reg();
   for (const auto [e, intent, control, body] :
-       world.Reg()
-           .view<const MoveIntent, const PlayerControl, KinematicBody>()
+       reg.view<const MoveIntent, const PlayerControl, KinematicBody>()
            .each()) {
     body.velocity = {intent.dir.x * control.speed,
                      intent.dir.y * control.speed};
   }
+  // The discrete actions go into each player's buffer window (M8).
+  const InputFrame& in = context.input;
+  bool pressed = false;
+  for (int a = 0; a < kMaxActions; ++a) {
+    const auto action = static_cast<ActionId>(a);
+    if (IsBufferedAction(action) && in.pressed[a] > 0) pressed = true;
+  }
+  for (const auto [e, control] : reg.view<const PlayerControl>().each()) {
+    auto* actions = reg.try_get<ActionBuffer>(e);
+    if (actions == nullptr) {
+      if (!pressed) continue;
+      actions = &reg.emplace<ActionBuffer>(e);
+      for (int a = 0; a < kMaxActions; ++a) {
+        const auto action = static_cast<ActionId>(a);
+        if (IsBufferedAction(action)) {
+          SetBufferWindow(actions->buffer, action, ActionBufferTicks(action));
+        }
+      }
+    }
+    InputFrame discrete = in;
+    for (int a = 0; a < kMaxActions; ++a) {
+      if (!IsBufferedAction(static_cast<ActionId>(a))) discrete.pressed[a] = 0;
+    }
+    BufferPresses(actions->buffer, discrete);
+  }
+}
+
+bool IsBufferedAction(ActionId action) noexcept {
+  return action >= static_cast<ActionId>(Action::kJump) &&
+         action <= static_cast<ActionId>(Action::kA6);
+}
+
+std::uint8_t ActionBufferTicks(ActionId action) noexcept {
+  if (action == static_cast<ActionId>(Action::kJump)) return 8;
+  if (action >= static_cast<ActionId>(Action::kA1)) return 10;
+  return 6;
 }
 
 void KinematicMoveSystem::Run(World& world, const TickContext& context) {

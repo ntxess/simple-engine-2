@@ -115,7 +115,7 @@ PHASE_NAMES = ["Input", "Intent", "Movement", "Collision", "Effects",
 LEVEL_LETTERS = "TDIWEF"
 SLOT_STATES = {0: "free", 1: "live", 2: "exited"}
 EDGE_SOURCES = ["raw-keyboard", "win-message", "gamepad-sampler", "mouse",
-                "replay"]
+                "replay", "cleared"]
 
 BREADCRUMB_RECORD_SIZE = 64
 LOG_RECORD_SIZE = 512

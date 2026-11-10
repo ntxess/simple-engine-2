@@ -318,6 +318,42 @@ void RoleScope::RestoreCpuSet() const noexcept {
 
 #endif
 
+#if defined(_WIN32)
+
+bool SetCurrentThreadQos(Qos qos) {
+  THREAD_POWER_THROTTLING_STATE state{};
+  state.Version = THREAD_POWER_THROTTLING_CURRENT_VERSION;
+  if (qos != Qos::kDefault) {
+    state.ControlMask = THREAD_POWER_THROTTLING_EXECUTION_SPEED;
+    state.StateMask =
+        qos == Qos::kEco ? THREAD_POWER_THROTTLING_EXECUTION_SPEED : 0;
+  }
+  const bool applied =
+      SetThreadInformation(GetCurrentThread(), ThreadPowerThrottling, &state,
+                           sizeof(state)) != FALSE;
+  if (!applied && FirstFailure(SoftFailure::kQos)) {
+    SE_LOG_WARN("could not switch the QoS of this thread (error {})",
+                GetLastError());
+  }
+  return applied;
+}
+
+#else
+
+bool SetCurrentThreadQos(Qos qos) {
+  sched_param param{};
+  param.sched_priority = 0;
+  const int policy = qos == Qos::kEco ? SCHED_BATCH : SCHED_OTHER;
+  const bool applied =
+      pthread_setschedparam(pthread_self(), policy, &param) == 0;
+  if (!applied && FirstFailure(SoftFailure::kQos)) {
+    SE_LOG_WARN("could not switch the scheduling policy of this thread");
+  }
+  return applied;
+}
+
+#endif
+
 std::expected<Thread, Error> ThreadStarter::Start(const ThreadSpec& spec,
                                                   ThreadBody body) {
   if (spec.role == ThreadRole::kMain) {

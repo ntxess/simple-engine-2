@@ -108,6 +108,7 @@ void GameStateStack::Apply(const StateCommand& command) {
     }
     stack_.back().state->OnExit();
     stack_.pop_back();
+    ++revision_;
     if (!stack_.empty()) stack_.back().state->OnResume();
     return;
   }
@@ -126,11 +127,13 @@ void GameStateStack::Apply(const StateCommand& command) {
     }
   }
   stack_.push_back(Entry{command.state_id, std::move(state)});
+  ++revision_;
   stack_.back().state->OnEnter();
 }
 
 void GameStateStack::Clear() {
   queue_.clear();
+  if (!stack_.empty()) ++revision_;
   while (!stack_.empty()) {
     stack_.back().state->OnExit();
     stack_.pop_back();
@@ -185,6 +188,15 @@ WorldHash GameStateStack::Hash() const {
     }
   }
   return combined;
+}
+
+std::vector<StackEntry> GameStateStack::Entries() const {
+  std::vector<StackEntry> entries;
+  entries.reserve(stack_.size());
+  for (const Entry& entry : stack_) {
+    entries.push_back({entry.id, entry.state.get()});
+  }
+  return entries;
 }
 
 std::string_view GameStateStack::TopId() const noexcept {

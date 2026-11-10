@@ -21,6 +21,7 @@
 #include "se_core/thread_safety.h"
 #include "se_core/types.h"
 #include "se_core/world.h"
+#include "se_sim/sim_driver.h"
 
 namespace se::testing {
 
@@ -60,6 +61,8 @@ struct RampageSessionOptions {
   Tick ticks = 3600;
   // Input from this source instead of RampageScriptedInput.
   InputSource* input = nullptr;
+  // The tick's audio events go here instead of a NullAudioSink (M8).
+  AudioSink* audio = nullptr;
   // Record a replay (start bytes: the scene file).
   bool record = false;
   // Called with the sandbox World after the load (tick 0) and after every

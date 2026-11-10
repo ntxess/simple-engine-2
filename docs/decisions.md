@@ -2013,3 +2013,919 @@ it taken at (ADR-066 recorded one; its count did not separate the two).
 **Why.** The spec asks for the statistics' verdict; this gives it with the
 one correction the composed path needs, measured on the run itself, so
 the exit no longer rests on the change of source alone.
+
+## ADR-073 Input edges are latched by stamp per tick; the rule lives in se_core (2026-11-09)
+
+**Context.** M8 replaces M5's BasicInputService, which counted every press
+and release since the previous latch on the next tick, with timestamped
+edges placed on ticks (docs/design/mt-design.md "Placing edges on ticks").
+The spec asks to check StepPlan::tick_window_end_ns (M2) against the
+design and fix it if needed.
+
+**Decision.**
+- The check: FixedStepper::Plan already computed the design's windows
+  (Locked: k equal splits of [prev_start, start), a stall or the first
+  frame spanning one period; Free: start - remainder - (steps - 1 - i) dt,
+  the remainder including debt). Nothing changed numerically; the
+  formulas moved into `se_core/edge_placement.h` (LockedTickWindows,
+  FreeTickWindows), which Plan now calls, beside the placement rule
+  itself: `PlaceEdge` puts a stamp on the first tick whose window end is
+  after it (windows are half-open, so a stamp equal to a window end
+  belongs to the next tick), stamps after the last window on the last
+  tick, and returns kEdgeWaits in a frame without a tick. It is in
+  se_core, not se_runtime, so that M17's InputFolder can apply the same
+  rule against the sim thread's deadlines. tests/kernel/edge_placement_
+  test.cc pins it at 30, 60, 144 and 165 Hz.
+- `InputService` (se_runtime) keeps physical inputs that are down and the
+  changes not yet latched. Arrival order is not trusted: each Latch takes
+  the changes stamped before its window end (all of them on the frame's
+  last tick), sorts them by (stamp, arrival) and applies them to per-action
+  holder counts; an action whose count goes 0 to 1 or 1 to 0 is an edge.
+  Key repeats and duplicate downs of one physical input are dropped on
+  arrival. A change that arrives after its tick was latched goes to the
+  next latch and is counted (`late_changes`); one that arrives in a frame
+  with no tick waits for the next frame's first tick.
+- `InputEdge::order` is the edge's rank among the frame's edges with the
+  same stamp (one key holding two actions gives orders 0 and 1).
+- Up to kMaxEdgesPerTick (32) edges are stored per frame; pressed,
+  released and held count every edge (`edges_not_stored` counts the rest).
+  While nothing latches (a paused game), more than 1024 waiting changes
+  fold into the held state, oldest first, without edges.
+- Clearing held input (focus loss, the modal loop) releases every physical
+  input that is down with a change stamped at the clear and zeroes the
+  axes. Those releases carry a new `EdgeSource::kCleared`, appended after
+  kReplay (replay files store the value; ReplayReader accepts it,
+  read_dump.py names it "cleared").
+- Keys carry kRawKeyboard when SDL's raw keyboard stamps them (Windows,
+  SDL_HINT_WINDOWS_RAW_KEYBOARD=1, the runtime default; `--no-raw-keyboard`
+  turns it off for the editor, M10), else kWinMessage, which on Linux
+  means the window system's event stamps. Mouse buttons are kMouse,
+  gamepads kGamepadSampler.
+- Axes: SDL gamepad axis i is InputFrame::axes[i] (sticks in [-1, 1],
+  triggers [0, 1]), latched per tick by stamp like edges. A bound half
+  axis ("-lefty") presses at 0.5 and releases below 0.35.
+- `--record FILE` writes the session's replay at shutdown (frames with
+  their edges and sources, per-tick hashes; rampage's start bytes are its
+  scene file), and se_replay gains `--edges-out` to list a replay's edges.
+  The test hook `--push-key FRAME:MS:KEY[:up]` pushes a key event at the
+  end of an iterate, stamped MS after that frame's start.
+
+**Why.** Sorting by stamp at latch time is what makes chord order and the
+8 ms test independent of which thread pushed first; holder counts keep
+several keys and pads on one action consistent; a source of its own for
+cleared releases keeps replays honest about where every stamp came from.
+
+## ADR-074 The ActionMap: legacy key names as keycodes, pad defaults per game, unknown names fail the boot (2026-11-09)
+
+**Decision.**
+- `ActionBinding` (se_sim/game_module.h) gains `config_key` (the user
+  setting that rebinds the key) and `pad` (default gamepad inputs, comma
+  separated); both default to empty, so existing bindings compile.
+  ActionId i is binding i, as before.
+- The runtime reads the game's settings file (`GameSetup::settings_file`,
+  config/config.json for rampage) with a small JSON reader of its own
+  (se_runtime/src/json_reader.h; glaze stays in the component units,
+  ADR-010): control-settings / key-bindings and sound-settings. A missing
+  section means defaults; a section of the wrong type is a boot Error.
+- Key names resolve to SDL keycodes, as the spec says (the key that types
+  the character in the current layout, not the physical position the
+  legacy tree's scancodes named): one letter or digit is that character;
+  the legacy config names esc/escape, enter/return, space, tab, backspace,
+  up, down, left and right are accepted; anything else goes through
+  SDL_GetKeyFromName. "mouse-left", "mouse-middle", "mouse-right",
+  "mouse-x1" and "mouse-x2" bind mouse buttons.
+- A key name SDL does not know, a pad name it does not know, and a user
+  binding that no action declares are boot Errors naming the binding and
+  the key (step 10 fails).
+- Pad names are SDL's (a, b, x, y, back, start, dpup, leftshoulder, ...)
+  plus south, east, west and north, and half axes "+leftx" / "-lefty".
+  The default gamepad bindings are code in the game module. rampage's:
+  d-pad and left stick move (up dpup and -lefty, left dpleft and -leftx,
+  down dpdown and +lefty, right dpright and +leftx); jump south; exit back;
+  enter start; back east; a1-a6 west, north, leftshoulder, rightshoulder,
+  leftstick, rightstick.
+
+**Why.** Keycodes are what the spec names and what a user who writes "w"
+means; failing the boot on an unknown name is the spec's rule, and a
+binding nobody declares is almost always a typo. Pad defaults belong to
+the game because only the game knows its actions.
+
+## ADR-075 The input sampler runs inside ADR-047's window; the App opens gamepads (2026-11-09)
+
+**Decision.**
+- `se::InputSampler` (se_platform/input_sampler.h) is one thread, role
+  kInputSampler, HighQoS, started with StartThread. Each period it calls
+  SDL_UpdateGamepads, then waits with SDL_DelayNS for the next point of a
+  grid of whole periods, early by the timer's measured overshoot (an
+  average of the last waits, at most half a period; measured here: a 1 ms
+  SDL_DelayNS wakes about 0.5 ms late, so a plain 1 ms wait polled at
+  about 670 Hz); it checks its stop token every period. A sampler that
+  fell behind, or one that was parked, restarts the grid. With SDL_HINT_AUTO_UPDATE_JOYSTICKS=0 nothing else
+  updates joysticks, so the sampler is also what makes SDL notice a
+  gamepad being plugged in.
+- Parking is an atomic doorbell: SetParked flips a flag and rings a
+  sequence number that the thread waits on with atomic::wait; the stop
+  callback rings it too, so Stop joins a parked thread at once. Main calls
+  SetParked every iterate with Suspended or Idle (a new
+  `Lifecycle::Idle()`), never blocking.
+- The rate: `PowerWatch` on main reads SDL_GetPowerInfo at most every 5 s
+  and publishes 1000 Hz on AC, 250 Hz on battery (SetRate, a relaxed
+  store; the next period uses it). Both numbers stay the design's
+  assumptions until the gates.md rows measure them.
+- ADR-047: SDL_UpdateGamepads pushes SDL events, so the App starts the
+  sampler in its first iterate, right after WakeEventScope::Open, and
+  stops and joins it at the start of shutdown step 4, before
+  WakeEventScope::Close and the filter's removal. The design's shutdown
+  order puts the input sampler at step 9; ADR-047's rule moves it before
+  step 4 (the spec says so too). It is an App member for now; the
+  integration may move it into integration::HelperThreads. It takes a
+  ThreadRegistry slot through StartThread, so EngineThreadsRunning counts
+  it and dumps show its breadcrumb.
+- SDL reports gamepad buttons and axes only for gamepads that are open, so
+  the App opens each one on SDL_EVENT_GAMEPAD_ADDED and closes it on
+  SDL_EVENT_GAMEPAD_REMOVED (se_platform/gamepads.h, main only), after
+  the InputService released what it held; the rest close before shutdown
+  step 15.
+- Tests: the sampler's loop with a fake poll and wait (park, unpark, stop
+  while parked or running, the rate, the role) runs everywhere, TSan
+  included; a desktop test drives an SDL virtual gamepad from a test
+  thread through the real sampler (gamepad_desktop_test.cc).
+
+**Why.** Starting the thread later than boot step 9 is the only way to keep
+its pushes inside the window ADR-047 found safe; parking with a doorbell
+keeps main from ever waiting on the sampler.
+
+## ADR-076 se_audio: one engine on main, voices in a fixed table, the end ring and the sweep (2026-11-09)
+
+**Decision.**
+- se_audio (engine/se_audio; STATIC; ALLOW_ONLY se_core and miniaudio)
+  is the only module that links miniaudio (every other module's FORBID
+  list keeps it out; se_runtime's no longer names it, since it reaches
+  miniaudio through se_audio) and the only one that includes it:
+  check_includes.py's new project-wide `miniaudio` ban, test modules
+  included, with `checks.planted.miniaudio_include`. miniaudio's target is
+  marked SYSTEM, so its header brings no warnings or lint findings.
+- `AudioEngine::Create` on main: kDevice (the default playback device; on
+  failure the null backend, logged with the reason), kNull (miniaudio's
+  null backend: a thread mixes in real time and nothing is heard) or
+  kNoDevice (ma_engine's noDevice: frames pulled with ReadFrames). The
+  engine gets its own ma_resource_manager with no job threads
+  (MA_RESOURCE_MANAGER_FLAG_NO_THREADING): nothing loads through it, so
+  the only miniaudio thread is the device's. 48 kHz stereo f32.
+- Groups Music and Effects are ma_sound_groups; their volumes are
+  config/config.json "sound-settings" / 100. Voice caps are per group (32
+  music, 224 effects; at most 256 together), and a group at its cap
+  stops its oldest voice first.
+- PCM is `std::shared_ptr<const Pcm>` (f32 at the engine's format,
+  decoded by `DecodeSound` with miniaudio's decoder: WAV, FLAC and MP3 are
+  built into miniaudio; no new dependency). DecodeSound touches no engine
+  state, so M9's lane can call it. A voice is one of 256 fixed records
+  (never moved): its ma_sound (MA_SOUND_FLAG_NO_SPATIALIZATION and
+  NO_PITCH; miniaudio still resamples a sound of another rate), the
+  ma_audio_buffer that reads the PCM in place, the PCM reference, group,
+  scope, cosmetic flag and start serial. A voice id is slot and
+  generation.
+- Ends: the end callback (miniaudio's thread) pushes the voice id into an
+  se_core SpscRing of 256 and never waits; a full ring is counted. Sweep()
+  (main, every iterate) drains the ring, then uninitialises every voice
+  whose ma_sound_at_end is true; a ring entry for a slot already reused
+  has the wrong generation and is ignored. A voice's PCM reference is
+  dropped only after ma_sound_uninit has returned.
+- Scopes: Play takes a ScopeId; ReleaseScope stops and uninitialises its
+  voices. SetSound replaces a sound's PCM for new voices only.
+- `--audio device|null|none` and the `SE_AUDIO` environment variable
+  choose the App's output; a headless App defaults to null. Nothing a test
+  runs may be heard: scripts/ci.ps1 sets SE_AUDIO=null, so do
+  tests/platform/run_app.py, the crash and fault drivers and RunTestApp
+  (unless a test chose), and the one real-device test
+  (`audio.The playback device opens at volume 0 for 1 s and closes`)
+  opens the device at master and group volume 0.
+- Shutdown step 7: the App destroys the engine right after the Worlds:
+  every voice uninitialised, the groups, ma_engine_uninit (which joins the
+  device thread), then the PCM.
+
+**Why.** A fixed voice table gives miniaudio stable addresses and the end
+callback something it can read without locks; draining a ring and sweeping
+at_end together means a full ring or a callback that never ran cannot
+leak a voice. The ma_sound_uninit-before-release order is the design's
+fence for PCM lifetime.
+
+## ADR-077 The AudioBridge schedules at anchor + D; rampage's sounds and input buffer leave the hashes alone (2026-11-09)
+
+**Decision.**
+- `AudioEvents` (se_sim/audio_events.h) is a World ctx resource: systems
+  push {sound key (Fnv1a32 of the sound table's name), group, cosmetic,
+  positional, position}; at most 256 per tick, more are counted. The
+  `AudioSink::Drain` contract is now SE_REQUIRES(g_sim_owner) and
+  NullAudioSink clears the events, so headless runs never accumulate
+  them. The ctx is not hashed and nothing reads the events back, so audio
+  never changes simulation state.
+- `AudioBridge` (se_runtime) is the App's AudioSink. Each frame, before
+  the ticks, it recalibrates a `PcmClock` (se_audio/pcm_clock.h) and takes
+  D = B + T/2: B is the frame's StepPlan::budget_b, T the FramePacer's
+  vblank period of that frame (PacerFrame::vblank_period_sec, else the
+  frame clock's period over the present interval). So D already comes
+  from the real FramePacer (the integration's item is done here). After
+  each World's tick it starts each event at the PCM frame of
+  min(anchor + D, now + D), the anchor being the tick's window end; the
+  min caps a start that a synthetic frame clock puts in the future.
+- The PCM clock maps SDL_GetTicksNS to engine frames with the largest
+  offset (frames - t * rate) of the last 64 calibrations: the leading edge
+  of the device's 10 ms mixing staircase. Spacing between mapped times is
+  exact, which is what the 8.33 ms requirement needs.
+- Late: a start already passed plays at once; a cosmetic sound more than
+  100 ms late is dropped and counted. Pan is the event's x against the
+  first running World's camera (center, half its virtual width over zoom).
+- Each World gets a voice scope at its first drain; the scope's token
+  lives in its AudioEvents, so destroying the World releases its voices
+  (through a weak reference to the bridge, so a World that outlives the
+  bridge releases nothing).
+- Sounds load synchronously on main at boot from `GameSetup::sound_table`
+  (config/sound.json, name to file); a missing or undecodable file is
+  logged and its events fail (counted). M9's lane will decode them.
+  (Superseded by ADR-087: sounds decode on the background lane, held by
+  the state's scope; App::LoadSounds is gone.)
+- rampage: tools/audio/make_sounds.py writes assets/sounds/hit.wav and
+  death.wav with integer synthesis (byte-identical everywhere;
+  `checks.sounds_fresh` regenerates and compares them). EffectSystem asks
+  for "hit" when an effect's own application lowers HP; DeathRule asks for
+  the cosmetic "death". The M3 goldens (determinism_rampage, ref.sandbox.*)
+  are unchanged.
+- rampage's IntentSystem buffers the discrete actions (jump 8 ticks; exit,
+  enter, back 6; a1-a6 10) in an `ActionBuffer` component (se_core
+  InputBuffer) added to a player at its first discrete press. It is
+  serialized but not hashed: it is a function of the recorded input and
+  nothing consumes it before M13, whose rules will make it hashed (and
+  rebase the goldens) when they read it.
+
+**Why.** Scheduling against the tick's window end keeps the ticks' own
+spacing in the sound; the cap on early starts keeps synthetic clocks
+(tests, --fixed-frame-dt) from delaying sounds by seconds. Keeping both
+the audio events and the input buffer out of the hash is what lets the M3
+goldens prove that this milestone changed no simulation result.
+
+## ADR-078 Cooked atlas pages: one texture per page, cooked at build time, re-cooked on the lane in dev builds (2026-11-09)
+
+**Decision.**
+- `.seatlas` (se_assets/atlas_page.h): a 64-byte little-endian header
+  (magic, version 1, size, RGBA8 straight alpha, the nominal 256 KB block
+  size, block and region counts, the source's size and hash, a hash of the
+  pixels), a region table (name and rectangle) and a block table (offset,
+  compressed and raw bytes), then independent LZ4 HC blocks. The decoder
+  checks every offset and size, decodes one block per lane step and checks
+  the pixel hash at the end, so a damaged page is an Error, never a wrong
+  image.
+- tools/asset_cook writes one page per texture of config/texture.json, with
+  one region (the texture's name) covering it, at the PNG's path relative
+  to the content root with `.seatlas` for its extension. CMake runs it
+  (`se_cooked_textures`, a dependency of rampage and of the render tests)
+  into `<build>/bin/cooked`, next to the executables, where the runtime
+  looks by default (`--cooked-root` overrides it). A page whose recorded
+  source hash and size match its PNG is left alone.
+- The runtime reads pages only in Release. Dev builds read the source PNG
+  too (in 1 MB steps) and compare its hash with the page's: a page that is
+  missing, damaged or stale is re-cooked on the lane, in memory (stb_image
+  in se_assets' cook.cc, one unsplittable step, as the design allows for
+  import); nothing is written back. Hot reload re-cooks a changed PNG the
+  same way (Urgent).
+- se_render's PNG decoding (image_io.h, LoadTextureTable) stays for tests
+  and tools (render_shot, the golden images, the M7 tests); the App no
+  longer calls it.
+
+**Why.** Packing several textures into a page needs M10's atlas packer; one
+texture per page keeps every sprite's texture key and region as M3 and M7
+made them, so the golden images and the legacy image comparison do not
+move, while the region table means packing changes no format. Re-cooking
+stale pages in dev builds keeps any content root (tests copy theirs)
+working without a build step, and keeps "stb_image only at import": a dev
+build's re-cook is an import.
+
+## ADR-079 The background lane's contract (2026-11-09)
+
+**Decision.**
+- The request and completion rings are se_core's SpscRing of owned
+  pointers (a `Request*` with its job, a `LaneCompletion*`): the ring stays
+  trivially copyable and the payload moves with the pointer; the
+  release/acquire of the ring's index publishes it. A full request ring
+  keeps the job in a main-side queue pushed at the next Submit or drain; a
+  full completion ring keeps the completion on the lane, retried every
+  1 ms; neither side waits.
+- The binary_semaphore has at most one release outstanding: main (and the
+  stop_callback) release only when an atomic flag goes from false to true,
+  and the lane clears it with an exchange after a successful acquire, which
+  also synchronizes with the release that set it. The wait's timeout is
+  the next scan (500 ms) or the earliest retry.
+- Scheduling: after every step the lane picks again: the oldest ready
+  Urgent step, else the oldest ready Background step. Only a strand's
+  oldest job is eligible, and it runs Urgent when an Urgent job of the
+  strand waits behind it (first in, first out wins over class within a
+  strand). The scan is a Background step. A job that asks to retry (a
+  sharing violation) is not ready until its time; the strand behind it
+  waits.
+- QoS per step: `se::SetCurrentThreadQos` (se_os): Windows' power
+  throttling (kHigh off, kEco on); on Linux SCHED_OTHER and SCHED_BATCH,
+  which an unprivileged thread can switch between in both directions (a
+  nice value it raised could not come back). The lane switches only when
+  the class changes.
+- Stop() (shutdown step 8): queued and running jobs that are not Durable
+  end at the next step boundary (the running step finishes), Durable jobs
+  run to the end, then the thread joins; a Durable job pushed just before
+  the stop is still found (the stop synchronizes with the pull that
+  follows it). Completions left on the lane at exit are dropped (main is
+  shutting down); a Durable one's file is already in place. (ADR-092: the
+  Durable submits still queued on main are pushed first, waiting for room;
+  a cancelled save removes its temporary file.)
+- `DurablePending()` counts Durable jobs from Submit until the lane has
+  finished them; `DurableFailures()` counts the ones that ended with an
+  Error. se_runtime's LaneQuitProvider reports kPending while any is
+  pending and kCancel when one failed since its polls began (since this
+  quit's polls began: ADR-092).
+- The lane calls WakeMain after pushing completions; WakeMain pushes only
+  inside the ADR-047 window, so the lane may call it at any time.
+- ADR-006's list of `// se-fault-boundary` files gains
+  engine/se_assets/src/lane_fault_boundary.cc: each step and each
+  TakeResult runs inside one try; a throw (bad_alloc, glaze's) ends the job
+  with an Error (kIo, "lane job '<kind>' threw: ...") and the lane runs on,
+  as the design's failure handling says for background jobs.
+- `--lane-step-trace FILE` (test builds) records every step (ticket, kind,
+  job class, the class it ran at, Durable, strand, Urgent steps ready
+  besides it, start, duration); the App writes it after the teardown.
+
+**Why.** Pointer rings reuse the ring the engine already has and verified
+under TSan, without a second, move-only ring type. The flag makes the
+semaphore's precondition (count at most 1) hold by construction. Boosting
+a strand's head keeps per-path order without letting a Background save
+hold up an Urgent one.
+
+## ADR-080 se::fs for the lane: shared-delete reads, POSIX replaces, the sharing-violation retry, the fault injector (2026-11-09)
+
+**Decision.**
+- se_platform/file_stream.h: `FileReader` (stepwise reads) opens with
+  `FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE` through
+  CreateFileW on Windows (SDL's IOStream shares reading only), an
+  SDL_IOStream elsewhere; `FileWriter` writes in steps and flushes to the
+  device (FlushFileBuffers; SDL_FlushIO).
+- `TryReplace` renames with POSIX semantics on Windows
+  (SetFileInformationByHandle, FileRenameInfoEx with REPLACE_IF_EXISTS |
+  POSIX_SEMANTICS): it replaces a file that readers which allowed
+  FILE_SHARE_DELETE have open (they keep the old contents), so an engine
+  read never blocks a save. A volume without it falls back to MoveFileExW
+  (REPLACE_EXISTING | WRITE_THROUGH). ERROR_SHARING_VIOLATION,
+  ERROR_ACCESS_DENIED and ERROR_LOCK_VIOLATION are `kBusy` (another process
+  holds the file without FILE_SHARE_DELETE); SDL_RenamePath elsewhere.
+- The save job (SaveRequest{path, bytes, revision, durable}) writes a
+  unique temporary file in the destination's directory (1 MB per step),
+  flushes it, and renames; kBusy retries every 20 ms for up to 2 s, then
+  the job fails, removes its temporary file and reports the Error naming
+  the sharing violation (the document stays dirty).
+- Revisions: the lane keeps, per strand, the newest revision renamed into
+  place, for its lifetime; a save older than it removes its temporary file
+  and completes with `SaveOutcome::superseded`. Revisions are not stored in
+  the files (each document type would need a format of its own for it); a
+  new process starts with an empty table.
+- Flushes (replays, SessionLogs, flight recorder) are Background saves on
+  the path's strand with a process-wide increasing revision
+  (`SubmitFlush`).
+- se_platform/fs_faults.h, in every build but Release (SE_FS_TEST_HOOKS):
+  `SetFsFaults{write_step_delay_ms, read_step_delay_ms, rename_busy_ms}`
+  (atomics, set from a test thread while the lane runs): a throttled disk,
+  and a sharing violation on every replace until rename_busy_ms after the
+  first one it refused.
+- `fs::PathInfo` gains `modify_time_ns` (SDL_PathInfo's), which the scan
+  compares with the size.
+
+**Why.** The spec asks for FILE_SHARE_DELETE reads and a 2 s retry; without
+POSIX semantics the engine's own saves would still fail over a file it is
+reading. Keeping revisions in the lane is enough for the order the spec
+tests (one lane writes every file) without changing any file format.
+
+## ADR-081 AssetRegistry, scopes and the hold (2026-11-09)
+
+**Decision.**
+- `Handle<T>{index, generation}` moves to se_core/handle.h (with the
+  `Texture` tag and `TextureHandle`), so se_render's GpuResources and the
+  registry share it; se_assets cannot include GPU headers.
+- The registry's stores: Texture (with its Atlas, the page's regions,
+  which shares the texture's slot and generation), Sound (shared_ptr<const
+  PcmPayload>), Prefab and SceneChunk (shared_ptr to the payloads). An
+  entry is keyed by the texture's name or the file's normalised path, lives
+  while a scope references it, and is removed (its GPU slot retired through
+  GpuResources) when the last scope is released; its handles go stale.
+- The GPU is behind `TextureUploadPort`; se_runtime implements it over
+  GpuResources (AddTexture, QueueUpload, IsResident, ContentGeneration,
+  Remove), so an upload becomes resident when its fence signals (M7) and a
+  reload swaps at a frame start. Headless runs have no port: textures
+  settle without a GPU texture.
+- A load that fails settles (the sprite draws GpuResources' magenta, the
+  Error with path, line and column is logged and kept): it does not hold
+  the scope, as M7's boot did not fail on a missing texture. A reload that
+  fails keeps the old asset.
+- The AssetScope per GameState is se_runtime's (asset_runtime.h): game
+  modules are deterministic and may not link se_assets, so a game declares
+  what a state needs through `GameSetup::state_assets(state_id)`
+  (StateAssets: every texture of the table by default, or named ones,
+  prefabs, scene chunks, sounds). The runtime keeps one scope per state on
+  the stack (GameStateStack::Entries, new) and releases it when the state
+  leaves.
+- The hold: no ticks are planned while the top state's scope is not
+  resident (logged when it starts and ends), and SimDriver's new
+  `TickGate` (se_sim) is asked before each tick of TickInline after the
+  stack's pending changes are applied, so a state pushed by one tick of a
+  frame stops the rest of that frame until its scope is resident. A held
+  tick is not dropped: it runs in a later frame with the same InputFrame
+  sequence, so the per-tick hashes are those of an ungated run
+  (tests/kernel/tick_gate_test.cc). A state whose scope is not resident is
+  not drawn (its textures are not there yet). Frames and ticks therefore
+  drift by the hold: `--readback-tick TICK:FILE` (test builds) reads back
+  the first frame after a tick ran, and M7's fault-injection test
+  (tools/render_shot/fault_test.py) compares the frame after tick 130 of
+  each run instead of frame 140 (a fault on the uploads for 100 frames now
+  holds the sim that long).
+- Sounds: the lane reads the file and decodes it through `SoundDecoder`
+  (se_assets/sound_decoder.h), which M8's se_audio implements with
+  miniaudio's decoder at the integration; miniaudio stays confined to
+  se_audio. Without a decoder a sound fails with kUnsupported.
+- Completions the registry did not submit (saves, flushes) go to a foreign
+  handler; the App's logs failures.
+- se_runtime's FORBID list drops lz4_static: se_runtime links se_assets,
+  whose closure has it; se_assets alone includes lz4.h (every other module
+  bans it).
+
+**Why.** The port keeps the asset module headless (its tests and TSan run
+without a GPU) and the GPU rules in se_render. Holding at the tick gate
+rather than inside RunTick keeps RunTick, which replays and the M17
+threaded driver call, unchanged.
+
+## ADR-082 glaze parses prefabs and scene chunks on the lane, in one translation unit (2026-11-09)
+
+**Decision.** se_assets' payloads_glaze.cc reads prefabs into glaze's
+`generic_u64` (64-bit integers exact, object members in file order) and
+writes each member back as compact JSON, the text the ComponentRegistry's
+JSON hooks take on main. Scene chunks are checked whole by glaze's validator,
+then read by reflection into a struct whose entities are `glz::raw_json`
+(each entity's text kept as written; skipping a raw value checks nothing,
+hence the validator): the generic value and its writing back cost more
+than ten times as much (a 256-entity chunk: median 1.2 ms against about
+0.1 ms in Release), which put the chunk's step near the 2 ms bound under
+load. A scene chunk is
+`{"format": "se-scene-chunk-v1", "chunk": N, "entities": [ {...} ]}`
+(M10's importer splits scenes into chunks, one lane step each). A parse
+error carries the line and column glaze's validator reports.
+tools/checks/check_glaze.py allows glaze headers in a translation unit
+named `*_glaze.cc` besides reflect_glaze.h.
+
+**Why.** The design gives the lane glaze parsing; one named unit per module
+keeps glaze's compile cost (ADR-010) contained and visible to the check.
+
+## ADR-083 SimThread: sessions built and destroyed on the sim thread, M17a's commands, the tick as a fault boundary (2026-11-09)
+
+**Context.** M17a's sim thread (docs/design/dedicated-driver.md "Threads",
+"Lifecycle") owns every running World while it runs and calls
+SimDriver::RunTick unchanged on absolute deadlines. The App does not use
+it before M17b; M17a proves it headless.
+
+**Decision.**
+- `se_sim/sim_thread.h`: `SimThread`, one thread (role kSim, OS name
+  "sim", HighQoS) started through se::StartThread. It holds g_sim_owner for
+  its whole body through the new `SimOwnerScope` (se_core/thread_role.h:
+  the constructor asserts the role kSim; `AssertSimThread()` gives the
+  analysis the capability in code the thread calls back into).
+- What it runs is a `SimSession` (the GameStateStack, SimDriver,
+  SessionLog, ReplayRecorder and AudioSink of one session, plus two hooks:
+  `RecordedFrame(tick)` for recorded input and `FillRender(slot)` for the
+  snapshot's render part), made by a `SimSessionFactory` on the sim thread
+  at StartGame and destroyed there (Quit, StartGame again, a fault, the
+  thread's end): Worlds live and die on their owner thread. se_sim stays
+  free of se_render_core: the render part of a slot is the session's.
+- Commands: an SpscQueue of 256 move-only `SimCommand`s, numbered by
+  `Send` (1, 2, ...), with the Doorbell rung after each push. They apply
+  at tick boundaries in order: StartGame, Pause, Resume (the grid is
+  re-based so the next tick is due now; the epoch changes), Step{n} (only
+  while paused: exactly n ticks at once, then paused again), SetTimeScale,
+  Suspend, Quit, ApplySessionEntry (M2's SessionLog::Enqueue against the
+  next tick). Every snapshot header acks the last applied sequence, and
+  `AckedSeq()` reads it atomically.
+- Input: each tick's InputFrame is the session's recorded frame when it
+  has one (replays: the inline-against-threaded hash checks), otherwise
+  the InputFolder's latch of the InputEvent ring at the tick's own
+  deadline L_k (ADR-084).
+- Publishing: after each tick the reliable section gets a TickRecord
+  (session, tick, hash, Worlds stepped); session events (started, paused,
+  resumed, stepped, suspended, dilated, faulted, ended, start failed) are
+  added as they happen. A burst of catch-up ticks publishes the render part
+  only for its last tick. (Amended by ADR-086: its last 2 ticks, as the
+  design says.) With no free slot the sim skips the publish
+  (counted in the header's dropped publishes) and keeps the deltas; when
+  it goes idle (paused, suspended, no session) with deltas pending it
+  publishes a reliable-only slot first, looking again every 1 ms while no
+  slot is free, so a paused session's last records and events still
+  arrive. Waiting while idle is the Doorbell; while running, PacedClock's
+  WaitForDeadline.
+- Faults: `sim_fault_boundary.cc` is the one file of se_sim that catches
+  (marked `// se-fault-boundary`; it joins ADR-006's list): RunTick runs
+  inside its try, a throw ends the tick, the SimThread destroys the session
+  on its own thread, posts the exception and a FaultRecord (role, the
+  thread's breadcrumb, tick, session, what()) to its FaultBox, publishes
+  the faulted event and waits for Quit.
+- Tests (tests/sim/sim_thread_test.cc, label unit, TSan in WSL): the
+  threaded driver's per-tick hashes equal the inline ones at W = 0 on the
+  kernel golden (determinism_kernel, with its logged edits through the
+  replay's SessionLog) and on rampage's sandbox golden
+  (determinism_rampage) and the three reference scenarios (effects,
+  patrol, stress) over 3600 ticks, on a ManualClock; Pause, Step{5} (five
+  ticks exactly), Resume and Quit; a throwing tick is contained. W = 1 and
+  W = 3 are checks for M14 (docs/gates.md).
+- Not built yet (the M17a agent was cut off; the integration finished the
+  thread, not the platform side): se_render_core's SnapshotRenderSource
+  (the newest three slots, tau = F - D', the pair and alpha, per-entity
+  interpolation, starvation and hard cuts), the extraction of a World into
+  a slot's render part (`SimSession::FillRender` is its seam) and
+  bench.snapshot_publish_10k. M17b needs all three before the App can use
+  the threaded driver. (Built since: ADR-086.)
+
+**Why.** A factory run on the sim thread is the simplest way to keep
+"Worlds are created and destroyed by their owner" true without a handover
+protocol; recorded frames make the threaded driver's equality with the
+inline one a pure function of the tick, as the spec asks (live latching
+differs by design).
+
+## ADR-084 PacedClock and the InputFolder (2026-11-09)
+
+**Decision.** (Written by the M17a agent's code, recorded at the
+integration.)
+- `se_sim/paced_clock.h`: deadlines L_k = T0 + (k - k0) * P + phi with
+  P = 1 s / (rate * scale) in integer nanoseconds (120 ticks take exactly
+  one second at scale 1). `WaitForDeadline(k)` sleeps on a WaitClock to
+  L_k minus max(spin floor 0.3 ms, the measured timer overshoot's p99 over
+  256 samples), then spins with the pause instruction; it never returns
+  before L_k unless stopped. `DueTicks` returns at most 8 ticks per burst;
+  more than 250 ms behind, it re-bases T0 so the next tick is due now and
+  counts a dilation. phi moves towards the platform's target by at most
+  0.1 ms per tick, and only when the display period is a whole multiple of
+  dt. Rebase (resume, time scale, dilation) bumps the epoch the snapshot
+  header carries.
+- The system WaitClock is se_os's `PreciseTimer` (a high-resolution
+  waitable timer on Windows; clock_nanosleep(TIMER_ABSTIME) on Linux) and
+  `MonotonicNowNs`, in waits of at most 10 ms so a stop is seen; se_sim
+  reads no clock itself. `ManualClock` drives the clock deterministically
+  in tests (auto-advance, or blocking on another thread's Advance).
+- `se_sim/input_folder.h`: the InputEvent ring (4096, an SpscQueue of
+  trivially copyable events stamped on the engine's monotonic clock at
+  pump time) is folded per tick: every event stamped at or before L_k
+  (M8's placement rule with the sim's own deadlines as window ends; amended
+  by ADR-086: before L_k, M8's half-open windows),
+  press and release counts saturating at 255 so a tap shorter than a tick
+  is never lost, edges with their sources, axes (the latest wins),
+  ReleaseAll and heartbeats.
+
+**Why.** Absolute deadlines with a measured spin margin are the design's
+answer to timer granularity; a fold against the sim's own deadlines keeps
+the edge-placement rule identical to the inline driver's.
+
+## ADR-085 Snapshot slots and the SnapshotChannel (2026-11-09)
+
+**Decision.** (Written by the M17a agent's code, recorded at the
+integration.)
+- `se_core/snapshot.h`: a slot is a header (session, generation, epoch,
+  tick, anchor L_k + dt, latch L_k, acked command sequence, dropped
+  publishes, tick and build cost, the World hash, the run state, a render
+  flag), trivially copyable 68-byte `RenderItem`s (full entity id and
+  spawn serial, position, rotation, scale, texture key, region, origin,
+  tint, layer, z, teleported/visible/flip bits; the region and origin are
+  SpriteRenderer's floats until M10's atlases give a region index, so not
+  the design's 56 bytes), a sparse entity-index-to-item table per view,
+  up to 4 views (one per drawn World: camera with a cut flag, item and
+  sparse ranges, a stepped flag) and the reliable section (audio cues,
+  session events, scope releases, tick records, an ended session's
+  replay). Everything is reused vectors: a warm slot allocates nothing.
+- `se_core/snapshot_channel.h`: a pool of 8 slots and two SPSC rings of
+  slot indices (published and returned, 16 each, so neither fills), with
+  the design's memory orders: the sim writes a slot, then pushes its index
+  (release); the platform pops it (acquire), reads it through a const
+  `SlotLease` and returns the index after its last read (release); the sim
+  reclaims returned indices (acquire) before reusing a slot.
+  AcquireForWrite returns null when no slot is free; the sim never waits.
+  Debug builds track each slot's owner and assert every transition.
+- `se_core/spsc_queue.h` (move-only values, with a peek), `doorbell.h` (a
+  monotonic sequence with atomic wait, rung by a stop_callback) and
+  `fault_box.h` (exception_ptr, record and replay written, then a release
+  flag; the first post wins) are the other channels.
+
+**Why.** Index rings over a fixed pool give exactly one owner per slot at
+any time with no read-modify-write on shared indices, which the property
+tests (randomized schedules) check.
+
+## ADR-086 SnapshotRenderSource and the World-to-slot fill; the M17a review fixes (2026-11-09)
+
+**Context.** ADR-083 left M17a's platform side unbuilt: the extraction of
+a World into a slot's render part, se_render_core's SnapshotRenderSource
+with its tests, and bench.snapshot_publish_10k (docs/milestone-specs.md
+M17a). The review of M8 + M9 + M17a also found that the InputFolder put a
+stamp equal to a deadline on that tick (M8's windows are half-open), kept
+one held bit per action (M8's InputService counts holders), that a burst
+rendered only its last tick (the design says its last 2), and that the
+PacedClock's spin margin had no upper bound.
+
+**Decision.**
+- `se_render_core/snapshot_fill.h`: `AppendRenderView(world, options,
+  slot)` appends one view per drawn World, on the sim thread after
+  Cleanup (the session's `FillRender`): a RenderItem per entity with a
+  SpriteRenderer, a Transform and a Spawned record (full EnTT id, spawn
+  serial, the Transform's pose, the SpriteRenderer's look, kItemVisible and
+  the flips), the sparse index sized to the largest live index, and the
+  view's camera, cut flag and stepped flag. kItemTeleported marks exactly
+  the entities BuildRenderList would not interpolate at that tick
+  (teleport_tick is the tick, no PrevTransform, or one not from the tick
+  before) plus a move longer than `teleport_distance` (the design's 64 px
+  per tick; 0 turns it off). Nothing is culled or sorted on the sim side.
+- `se_render_core/snapshot_render_source.h`:
+  `BuildSnapshotRenderList(a, b, view, alpha, list)` and
+  `SnapshotRenderSource` (the spec's rules, listed in the header): Receive
+  hands each slot's reliable section to the caller in tick order, returns
+  reliable-only slots at once, keeps the newest 3 render slots, and
+  returns an ended or faulted session's slots when its end arrives; Pick
+  takes tau = F - D' and the pair around it, alpha from the anchors; a
+  pair across a session or generation is a hard cut (S_b alone, the older
+  slots returned, no starvation counted); tau past the newest anchor of a
+  running session holds the newest pair at alpha 1 and raises D' by the
+  gap (tau stays at the anchor), and the raise then shrinks by 5% per
+  frame (to 0 below 1 us); a paused or suspended session holds without a
+  raise; tau before the oldest anchor draws the oldest pair at alpha 0.
+  Per entity: same id and serial without the teleport flag lerps position,
+  scale, rotation (shorter arc) and tint, with the discrete state from S_a
+  below alpha 0.5; a teleport switches at the half-tick; an entity only in
+  S_b (a spawn, a recycled index, a new serial) appears there and one only
+  in S_a disappears there. The camera lerps (centre, zoom) unless S_b's is
+  cut; a view whose World did not step draws at alpha 1. The source reads
+  no clock (the frame start is the caller's) and allocates nothing warm.
+- Both builders share `src/quad_builder.h` (EmitQuad, FinishList: the
+  quad, the cull, the sort key, the radix sort and the batches, moved out
+  of render_list.cc unchanged), so the snapshot list equals
+  `BuildRenderList(World at k, camera, alpha)` bit for bit for slots of
+  ticks k - 1 and k whenever the state matches (the same entities, no
+  teleports, unchanged discrete state and tint, a camera that did not
+  move), and at alpha 1 always. Where the state does not match the two
+  differ by design: the inline builder draws a spawn, a teleport and a new
+  look at once, the snapshot one at the half-tick, and it smooths tint and
+  the camera. EmitQuad is force-inlined (MSVC's own budget left a call per
+  sprite, about 5% of renderlist_10k).
+- The SimThread bumps the header's generation (and posts
+  kGenerationChanged) after any tick that changed the GameStateStack:
+  `GameStateStack::Revision()` counts pushes, pops, replaces and Clear.
+- Bursts render their last 2 ticks (ADR-083 amended), so a burst leaves a
+  pair to interpolate.
+- The InputFolder applies `EdgeBelongsToTick(stamp, L_k, false)`: a stamp
+  equal to a deadline belongs to the next tick (ADR-084 amended), and it
+  keeps a holder count per action like InputService: only the first press
+  and the last release are edges; a release of an action nobody holds is
+  counted (stray_releases) and ignored; ReleaseAll drops every count. The
+  M17b router sends one press and one release per physical input.
+  tests/support/StampedInput uses the same half-open rule (its stamps never
+  fall on a window end, so no golden changes).
+- PacedClock caps the spin margin at max(spin floor, min(max_margin_ns =
+  2 ms, P / 4)) and counts the waits the cap cut (capped_waits); the
+  SimThread logs the first one (PacedClock does not log: its waits are
+  noexcept).
+- Tests: tests/render/snapshot_render_test.cc (label render: equality with
+  BuildRenderList over 300 moving sprites at 12 alphas, the half-tick
+  cases with a recycled index, a new serial on the same id, camera cut and
+  unstepped views, the source's retention, pairing, hard cut, starvation
+  and decay, pause, an ended session, no allocation warm);
+  tests/sim/sim_thread_test.cc "Threaded snapshots draw the inline
+  driver's RenderLists" (the sim thread fills slots for rampage's four
+  scenarios over 3600 ticks, stepped one deadline at a time on a blocking
+  ManualClock; every list at alpha 0.5, 0.75 and 1 equals the inline
+  driver's) and "A catch-up burst publishes render state for its last 2
+  ticks"; tests/sim/input_folder_test.cc (stamps at deadlines against
+  PlaceEdge, chords); tests/sim/paced_clock_test.cc (the cap).
+- `bench.snapshot_publish_10k` (se_bench, msvc-release): fill and publish
+  one warm slot of 10k sprites and take it back; the threshold is the
+  measured p95 with 2x headroom (bench/thresholds.json).
+
+**Why.** Sharing the quad code is what makes "the same RenderList as the
+inline builder" a property the tests can check bit for bit, rather than a
+second implementation kept in step by hand. Flagging on the sim side,
+where PrevTransform is known, keeps the platform's rule a lookup.
+
+## ADR-087 Sounds decode on the background lane into one shared PCM type; the state's scope holds them (2026-11-09)
+
+**Context.** M8 decoded the sound table on main at boot (`App::LoadSounds`,
+ADR-077 said "M9's lane will decode them"); M9 gave the lane a SoundDecoder
+port (se_assets/sound_decoder.h, ADR-081) that se_assets could not
+implement, since miniaudio is confined to se_audio (ADR-076) and se_audio
+may not see se_assets (ALLOW_ONLY se_core). The two modules also each had a
+PCM struct (se_audio's `Pcm`, se_assets' `PcmPayload`), so handing a
+decoded sound from the registry to a voice would have copied it.
+
+**Decision.**
+- `se_core/pcm.h` holds the one PCM type (`se::Pcm`: interleaved f32
+  samples, channels, rate, frames). `se::PcmPayload` (se_assets) and
+  `se::audio::Pcm` (se_audio) are aliases of it, so the lane's payload, the
+  AssetRegistry's `std::shared_ptr<const Pcm>`, the engine's sound table
+  and each voice share one object; no copy is made between the lane and
+  the mixer.
+- se_audio adds `PcmDecoder`: miniaudio's ma_decoder over the file's
+  bytes (it owns them), decoding to the engine's rate and channel count in
+  calls of at most N frames. It touches no engine state.
+- se_runtime's `LaneSoundDecoder` (se_runtime/sound_assets.h) implements
+  se_assets' SoundDecoder over it: each lane step decodes 4096-frame chunks
+  until 1 ms has passed (the lane's steps stay near M9's 2 ms), and counts
+  the steps, the longest one and the role of the thread that ran the last
+  one (kBackground on the lane, which the integration tests check).
+- Boot: the sound table is read at boot step 9 with the texture table
+  (`LoadSoundTable`; a missing or bad table is logged and the game runs
+  silent, as M8 did); its files are every state's default sounds
+  (`StateAssets::all_sounds`, like `all_textures`). At step 10 the App
+  creates the audio engine, then the LaneSoundDecoder at the engine's
+  format (48 kHz stereo when the engine did not start: the sounds still
+  load and are dropped) and gives it to the registry before the start
+  state is pushed. With `--audio none` the sound table is not read: no
+  sound is requested, decoded or waited for, so a headless run without
+  audio ticks from its first frame as before.
+- `AssetRuntime::SetSoundListener`: at iterate start, after the registry
+  drained the lane's completions, every sound whose PCM landed (version
+  changed and resident) is handed to the listener, and a sound whose
+  entry went away (its last scope released) is handed over as null. The
+  App's listener calls `AudioEngine::SetSound(key, pcm)` (null removes it:
+  Play then fails and is counted). So a state's sounds are in the engine
+  before its first tick (the hold of ADR-081 covers them), and a hot
+  reload gives new voices the new PCM while playing voices keep the old
+  object until their ma_sound_uninit has returned.
+- `AudioEngine::VoicePcm(voice)` returns a voice's PCM (tests).
+- Shutdown: the engine goes at step 7, the lane at step 8 (a sound job in
+  flight finishes its step or is cancelled), the scopes at step 10; the
+  decoder outlives them all.
+
+**Why.** One type is what makes "the lane decodes, the voices play it in
+place" true without a copy; the adapter in se_runtime is the only module
+that may see both se_assets and se_audio. Feeding the engine from the
+registry's version counter, at the same point where textures become
+resident, keeps the hold's guarantee (asset timing never changes a tick)
+for sounds too.
+
+## ADR-088 The helper threads' order at the integration; the shutdown trace (2026-11-09)
+
+**Decision.**
+- Boot: the log worker (step 2), the vblank sampler and the watchdog
+  (step 9, `StartHelperThreads`), the background lane right after them
+  (step 9, `AssetRuntime::Start`), then at the first iterate, after
+  `WakeEventScope::Open`, the input sampler (ADR-075). The lane pushes no
+  SDL event itself: it calls WakeMain, which pushes only inside ADR-047's
+  window, so it may start at step 9.
+- Shutdown: the input sampler before step 4 (it calls SDL_UpdateGamepads,
+  which pushes events; ADR-047, ADR-075) and the wake scope closes at step
+  4; the Worlds (step 6); the audio engine (step 7); the lane (step 8,
+  Durable jobs finish); the vblank sampler (step 9); the AssetScopes (step
+  10); then the renderer, the window, SDL, the log worker (16) and the
+  watchdog (17), as before. The design's step 9 joins the input sampler
+  there; ADR-047 moves it before step 4 and this record keeps it there.
+- Every one of them is a named role started through se::StartThread, so
+  the ThreadRegistry has a live slot for each (`bg-lane`, role
+  kBackground; `input-sampler`, role kInputSampler), the dump streams carry
+  their breadcrumbs, and `integration::EngineThreadsRunning()` counts them;
+  `crash.rampage_*` now require the lane's slot and OS thread name in the
+  dumps as well as the input sampler's.
+- App::Teardown records each step it runs in a fixed array (no
+  allocation), and Shutdown logs it after the teardown: "shutdown order:
+  input-sampler, event-filter (4), worlds (6), audio (7), bg-lane (8),
+  vblank-sampler (9), asset-scopes (10), log-worker (16), watchdog (17)"
+  (a step that had nothing to stop is left out). `rampage.frames_300`
+  checks it, and the run reports read the order from it.
+
+**Why.** The order is a contract between four milestones' threads; logging
+it once makes it checkable without hooks in every step.
+
+## ADR-089 Replays go through the lane; the quit's wait is logged; the Durable-save quit test (2026-11-09)
+
+**Decision.**
+- `--record`'s replay is written through the background lane (M9: "replay
+  and SessionLog flushes go through the lane as Background jobs") as a
+  Background-class SaveRequest marked Durable: it is submitted at the
+  start of the shutdown, after the last tick, and shutdown step 8 runs it
+  to the end before joining the lane (a non-Durable flush would be
+  cancelled there). The temp-file-then-rename and the sharing-violation
+  retry of ADR-080 apply. The App logs the lane's Durable failures after
+  the teardown.
+- The two-phase quit logs its wait: LaneQuitProvider says "quit waits for
+  N Durable lane job(s)" when it first answers kPending and "the lane's
+  Durable jobs are done" when it answers kReady; the App logs "quit ready
+  after X ms" (from the request to the exit).
+- Test builds add `--durable-save-test FRAME:KB:MS`: at iterate FRAME the
+  App sets the se::fs injector to MS ms per write step, submits a Durable
+  save of KB KiB of JSON to `<pref>/durable_save_test.json` and requests
+  the quit. `platform.rampage_durable_quit` (label desktop) runs rampage
+  with it (4 MiB at 100 ms per 1 MiB step) and checks the order of the
+  log lines, that the quit waited at least the throttled steps, and that
+  the file is complete, parses and left no temporary file.
+
+**Why.** A replay written by main at shutdown bypassed the lane the design
+gives every write; a Durable save at shutdown is the one form the lane's
+stop is guaranteed to finish. The rampage test proves the quit's wait in
+the real executable, with its window, its helpers and its shutdown order.
+
+## ADR-090 The input sampler idles at 20 Hz while no gamepad is open (2026-11-09)
+
+**Context.** M8's sampler calls SDL_UpdateGamepads at 1000 Hz on AC power
+and 250 Hz on battery (ADR-075). The integration's desktop run found
+`pacing.vrr_deadline` (M6: the self-paced 120 Hz deadline's p99 at most
+0.5 ms) failing about one run in two: p99 0.49 to 0.52 ms. Measured on
+this machine with nothing else changed (no gamepad connected, CPU load
+13-26%): with the sampler at 1000 Hz p99 0.31 to 0.52 ms; at 250 Hz 0.26
+to 0.28 ms; at 20 Hz 0.27 to 0.31 ms; without the sampler 0.26 to 0.31
+ms. The 1 kHz updates stamp nothing while no pad is open.
+
+**Decision.** The App gives the sampler `SamplerRateFor(on_battery,
+open_gamepads)`: `kSamplerHzIdle` (20 Hz) while the App has no gamepad
+open, otherwise 1000 Hz on AC and 250 Hz on battery as before. SDL finds
+new pads through the same update, so a pad plugged in is opened within
+about 50 ms, and the next iterate raises the rate (logged: "input sampler:
+1000 Hz (on AC power, 1 gamepads)"). A virtual joystick is reported at
+once, so the virtual-gamepad tests are unchanged.
+
+**Why.** The spec's rates exist to stamp pad edges about a millisecond
+apart; with no pad open they only cost main's pacing precision. With a pad
+open the cost returns: the real-gamepad row of docs/gates.md now also asks
+for `pacing.vrr_deadline` with a pad connected.
+
+## ADR-091 Modal frames run at the modal loop's own period (2026-11-09)
+
+**Context.** `platform.Ticks continue during a modal loop with Modal set`
+(M5/M6: at least 100 ticks per second of modal time) failed now and then
+in msvc-asan on this machine's 165 Hz display: "65 frames, 65 ticks, at
+most 1 per frame". SDL's WM_TIMER drives the modal loop's iterates at
+about 64 Hz, but the FrameClock's period was the display's (6.06 ms), so
+the stepper's Free cadence gave k_rt = 1 and, when the costs left no room
+for a second tick in 6 ms (k_hi <= 1, as under ASan), k_max = 1: 64 ticks
+a second, the rest dilated. A unit test of the FramePacer on a fake clock
+also showed that a Paced target set before the modal loop pinned every
+modal frame's start to it (EndFrame sets no target while Modal), so no
+time passed for the stepper at all.
+
+**Decision.** While Modal the FramePacer
+- drops the Paced target at each BeginFrame (frames start on the vblank
+  grid at or before now, as Paced does without a target; Paced starts
+  afresh after the loop);
+- reports as the FrameClock's period the modal frames' own interval (an
+  average of their deltas, weight 0.5) when it is longer than the
+  display's, with vblanks_known false. The stepper's formulas are
+  unchanged: T is the presentation period, which in the modal loop is the
+  modal timer's.
+Out of the loop the display's period returns at once. The desktop test
+prints the smallest cap it saw; `pacing.Modal frames at the WM_TIMER rate
+run the tick rate at 165 Hz` reproduces the failure (65 ticks in 65
+frames) without the change.
+
+Two other timing tests the same review found flaky change their bounds,
+not the engine: `present.*.Present statistics advance one present at a
+time` failed on one sample whose sync time was 103 ms old (bound 100 ms,
+machine idle); a sync time over 100 ms old is now counted and reported,
+more than 2 such samples fail unless the machine was busy (ForeignActivity),
+and any over 1 s (frozen statistics) fails. When the stale samples come
+with presents DWM did not show (more than 2 stale samples and fewer than
+issued - 2 shown: seen twice in one night run, 84 and 22 of 119 shown with
+syncs up to 219 and 595 ms old, CPU load 10-13%),
+the compositor was not composing the window and the test skips, as it does
+when the statistics stay at zero (ADR-052). `pacing.paced_misses` in
+msvc-asan resolved 56%, 16% and 72% of its presents in three desktop runs
+right after the commit gate's builds (bound 80%; 88-99% when run alone):
+a present resolves only when the latency wait blocks for it, and ASan's
+slower frames often find the waitable signalled already. In sanitizer
+builds (SE_TEST_SANITIZED) a share under 80% is reported and at least 10%
+is required; the 1% miss gate applies to the presents that resolved.
+Other builds keep the 80%. `audio.Stop, scope release and
+reload are clean while a mixer plays` failed once under a parallel lint
+run; its rounds take about a millisecond, so it now waits (bounded) for
+the mixer thread to mix before them.
+
+**Why.** "The cap still applies" (dedicated-driver.md, Running to Modal)
+is about a cap derived from the frames that actually run; deriving it
+from a refresh rate the modal loop does not follow capped the game below
+its tick rate on any display faster than the tick rate.
+
+## ADR-092 The lane's stop keeps queued Durable submits; quits forget a cancelled quit's baseline (2026-11-09)
+
+**Decision.**
+- `BackgroundLane::Stop` (a shutdown join, where main may wait) cancels the
+  submits still queued on main that are not Durable (counted as
+  cancelled) and pushes the Durable ones into the request ring in order,
+  waking the lane and yielding while the ring is full; the lane pulls the
+  ring after every step until it is asked to stop. A Durable job is never
+  dropped by a full ring (ADR-079's "never cancelled").
+- A SaveJob that ends before its rename (a non-Durable save cancelled at
+  Stop, or dropped) removes its temporary file in its destructor, after
+  closing it; destructors do not log, so a failed removal only leaves the
+  file behind.
+- `QuitProvider::QuitCancelled()` (default empty) is called on every
+  provider when any provider cancels a quit; LaneQuitProvider forgets its
+  failure baseline there, so a Durable failure between two quits never
+  cancels the second.
+- Tests (tests/assets/lane_test.cc): `Stop runs Durable submits still
+  queued on main` (a two-entry request ring behind a busy lane), `A save
+  cancelled at Stop leaves no temporary file` (a throttled 3 MB save),
+  `A Durable failure between two quits does not cancel the second`. Each
+  fails on the code before this ADR.
+
+**Why.** All three are the lane's stated contracts (Durable work is never
+lost, a cancelled save leaves the directory as it was, a quit's failures
+are its own); the old code broke them only at the edges the tests now
+reach.

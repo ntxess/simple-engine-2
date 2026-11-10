@@ -12,8 +12,15 @@
 #include "se_core/thread_role.h"
 #include "se_core/time.h"
 #include "se_core/world.h"
+#include "se_sim/audio_events.h"
 
 namespace se {
+
+void NullAudioSink::Drain(World& world, std::uint64_t /*tick_window_end_ns*/) {
+  // The drain ends the tick: a Play World's gate opens for it.
+  const MutationGate gate = world.OpenGate(GateReason::kTick);
+  if (AudioEvents* events = FindAudioEvents(world)) events->Clear();
+}
 
 TickResult SimDriver::RunTick(GameStateStack& states, const InputFrame& frame,
                               SessionLog& log, ReplayRecorder& recorder,
@@ -57,7 +64,17 @@ void SimDriver::TickInline(GameStateStack& states, const StepPlan& plan,
   SE_PROFILE_PLOT("debt", static_cast<std::int64_t>(plan.debt_ticks));
   SE_PROFILE_PLOT("dilation", plan.dilation_sec);
   frame_results_.clear();
+  held_ = false;
   for (int i = 0; i < plan.steps; ++i) {
+    if (gate_ != nullptr) {
+      // The state changes of the previous tick first (RunTick would apply
+      // them next): the gate sees the stack this tick runs on.
+      states.ApplyPending();
+      if (gate_->HoldTicks(states, next_tick_)) {
+        held_ = true;
+        break;
+      }
+    }
     const std::uint64_t window_end =
         plan.tick_window_end_ns[static_cast<std::size_t>(i)];
     const InputFrame frame =

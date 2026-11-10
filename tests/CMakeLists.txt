@@ -54,10 +54,12 @@ se_add_module(se_tests KIND EXECUTABLE
     smoke/smoke_test.cc
     kernel/detmath_test.cc
     kernel/determinism_test.cc
+    kernel/edge_placement_test.cc
     kernel/fixed_stepper_test.cc
     kernel/game_state_stack_test.cc
     kernel/guid_test.cc
     kernel/hash_test.cc
+    kernel/input_buffer_test.cc
     kernel/input_frame_ring_test.cc
     kernel/log_test.cc
     kernel/parallel_view_test.cc
@@ -71,6 +73,7 @@ se_add_module(se_tests KIND EXECUTABLE
     kernel/spsc_ring_test.cc
     kernel/thread_registry_test.cc
     kernel/thread_role_test.cc
+    kernel/tick_gate_test.cc
     kernel/world_test.cc
     support/tracy_inert_listener.cc
   PRIVATE_DEPS
@@ -94,6 +97,12 @@ add_test(NAME checks.planted.glaze
   COMMAND Python3::Interpreter "${CMAKE_SOURCE_DIR}/tools/checks/check_glaze.py"
           --planted "${CMAKE_SOURCE_DIR}/tools/checks/planted/glaze")
 set_tests_properties(checks.glaze checks.planted.glaze PROPERTIES LABELS checks)
+
+# rampage's sounds are what tools/audio/make_sounds.py writes (M8).
+add_test(NAME checks.sounds_fresh
+  COMMAND Python3::Interpreter "${CMAKE_SOURCE_DIR}/tools/audio/make_sounds.py"
+          --check)
+set_tests_properties(checks.sounds_fresh PROPERTIES LABELS checks)
 
 # Death tests: one executable, one CTest test per scenario; each must end in
 # the failed SE_ASSERT it is about, matched by that assert's message, so a
@@ -177,14 +186,20 @@ endif()
 add_subdirectory(os)
 add_subdirectory(rampage)
 add_subdirectory(render)
+# M17a: the dedicated sim driver, headless.
+add_subdirectory(sim)
 add_subdirectory(crash)
 if(SE_BUILD_PLATFORM)
   add_subdirectory(platform)
   add_subdirectory(present)
   add_subdirectory(pacing)
+  # M8: se_audio and the AudioBridge.
+  add_subdirectory(audio)
   # M7: Renderer2D and GpuResources, then render_shot (which links their
   # support library).
   add_subdirectory(render_gpu)
+  # M9: the background lane and the AssetRegistry.
+  add_subdirectory(assets)
   add_subdirectory("${CMAKE_SOURCE_DIR}/tools/render_shot"
                    "${CMAKE_BINARY_DIR}/tools/render_shot")
 endif()

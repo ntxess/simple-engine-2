@@ -15,35 +15,47 @@
 //    5 content-paths   the content root
 //    6 window          the window and its Win32 subclass
 //    7 gpu-device      the SDL_GPU device, claiming the window with VSYNC;
-//                      Renderer2D and the textures of the game's texture
-//                      table (decoded with stb_image, uploaded before the
-//                      first frame)
+//                      Renderer2D; the game's texture table is read (its
+//                      textures load through the lane, M9)
 //    8 cpu-topology    the CPU topology and the pool sizes it gives
 //    9 helper-threads  the vblank sampler (Windows, a window), then the
-//                      watchdog (boot budget until the first iterate)
-//   10 game            the GameModule's registry and storages, the
-//                      GameStateStack with the start state pushed, the
-//                      SimDriver writing the process's InputFrame ring
+//                      watchdog (boot budget until the first iterate), then
+//                      the background lane and the AssetRegistry (M9,
+//                      asset_runtime.h); the sound table is read (its
+//                      files are every state's default sounds)
+//   10 game            the settings file; the audio engine (M8: miniaudio,
+//                      the null backend when no device opens, --audio) and
+//                      the lane's sound decoder at its format (ADR-087);
+//                      the GameModule's registry and storages, the
+//                      GameStateStack with the start state pushed (its
+//                      AssetScope requests its textures and sounds, which
+//                      the lane loads and decodes), the SimDriver writing
+//                      the process's InputFrame ring and asking the assets'
+//                      TickGate before each tick
 // The main thread runs inside its RoleScope from SDL_AppInit to the end of
 // SDL_AppQuit (integration::EnterMainThread).
 // --headless skips the window and the GPU device (steps 6 and 7 do
 // nothing) and uses SDL's dummy video driver.
 //
 // Each iterate: count the iterate (the watchdog's progress), take the
-// inbox, poll the two-phase quit, update the lifecycle (callback rate, held
-// input, frame-clock reset), FramePacer::BeginFrame (the N-L fence, present
-// statistics, the FrameClock), plan the frame's ticks with the FixedStepper,
-// tick the running Worlds through SimDriver::TickInline with
-// BasicInputService's frames, then render: the GameStateStack's render
-// sources (every state's Worlds, the top one at the plan's alpha) through
-// GameSetup::camera, drawn by Renderer2D into the composite and blitted to
-// the swapchain (M7); then FramePacer::EndFrame (Paced, Standard or VRR;
-// M6b). The pacer presents through RenderPresentPort, the adapter over
-// se::present and Renderer2D, and Renderer2D's GPU timings are FrameCosts'
-// g (the M6/M7 integration). Iterates that do not render still pump the
-// texture uploads. A fault in the render build phase is a fault of the
-// game build: it takes the callbacks' fault path (a dump, the message box,
-// the quit path).
+// inbox, drain the background lane's completions (M9: pages to the upload
+// queue, reloads, the scopes of the stack's states), poll the two-phase
+// quit (the lane's QuitProvider waits for Durable jobs), update the lifecycle
+// (callback rate, held input, frame-clock reset), FramePacer::BeginFrame (the
+// N-L fence, present statistics, the FrameClock), plan the frame's ticks with
+// the FixedStepper (none while the top state's AssetScope is not resident: the
+// sim holds), tick the running Worlds through SimDriver::TickInline with
+// the InputService's frames (M8: stamped edges placed on the plan's tick
+// windows, the ActionMap from the settings file), then render: the
+// GameStateStack's render sources (every state's Worlds, the top one at the
+// plan's alpha) through GameSetup::camera, drawn by Renderer2D into the
+// composite and blitted to the swapchain (M7); then FramePacer::EndFrame
+// (Paced, Standard or VRR; M6b). The pacer presents through RenderPresentPort,
+// the adapter over se::present and Renderer2D, and Renderer2D's GPU timings are
+// FrameCosts' g (the M6/M7 integration). Iterates that do not render still pump
+// the texture uploads. A fault in the render build phase is a fault of the game
+// build: it takes the callbacks' fault path (a dump, the message box, the quit
+// path).
 //
 // Device loss (ADR-068): the device status is read at each iterate's start
 // and after a failed submit. On kRemoved the lifecycle enters DeviceLost:
@@ -56,11 +68,26 @@
 // retried every second, and the fifth failure takes the fault path.
 //
 // Shutdown follows the design's order for the parts that exist: the
-// watchdog's deadline starts when the quit drain ends; remove the event
-// filter, SDL_WaitForGPUIdle, destroy the Worlds, stop the vblank sampler
-// (step 9), release the present port and the device,
+// watchdog's deadline starts when the quit drain ends; stop the input
+// sampler (before step 4, ADR-047), remove the event filter,
+// SDL_WaitForGPUIdle, destroy the Worlds, stop the audio engine (step 7),
+// stop the background lane (step 8: Durable jobs, the --record replay
+// among them, run to the end), stop the vblank sampler (step 9), release
+// every AssetScope (step 10), release the present port and the device,
 // remove the subclass and destroy the window, SDL_QuitSubSystem, stop the
 // log worker (step 16), join the watchdog (step 17), stop the profiler.
+// M8: the audio engine goes at step 7, right after the Worlds (their voice
+// scopes end with them): every voice stopped and uninitialised, then
+// ma_engine_uninit, then the PCM. The input sampler stops before step 4.
+//
+// The steps run are logged after the teardown ("shutdown order: ...",
+// ADR-088).
+//
+// Audio (M8): each frame the AudioBridge recalibrates its PCM clock and
+// takes D = B + T/2 from the plan's budget and the FramePacer's vblank
+// period of the frame (PacerFrame::vblank_period_sec, set by BeginFrame);
+// the World's audio events start after each tick at max(now, anchor + D);
+// the engine's end ring and finished voices are swept every iterate.
 // Game code that runs during shutdown (GameSetup::on_shutdown and every
 // GameState::OnExit) has its throws contained: the fault is logged and
 // dumped and the remaining steps still run (ADR-044).
@@ -69,7 +96,7 @@
 // main right after tick N; --dump-test after-ticks:N has the watchdog write
 // a dump after tick N, holds the ticks until it is written, then quits.
 // M7 adds --inject-frame-fault, --reload-texture and --readback
-// (app_config.h).
+// (app_config.h); M9 --lane-step-trace.
 
 #ifndef SE_RUNTIME_APP_H_
 #define SE_RUNTIME_APP_H_
@@ -77,7 +104,9 @@
 #include <SDL3/SDL_events.h>
 #include <SDL3/SDL_init.h>
 
+#include <array>
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <functional>
@@ -87,12 +116,15 @@
 #include <string_view>
 #include <vector>
 
+#include "se_audio/audio_engine.h"
 #include "se_core/error.h"
 #include "se_core/thread_role.h"
 #include "se_core/thread_safety.h"
 #include "se_core/time.h"
 #include "se_core/types.h"
+#include "se_platform/gamepads.h"
 #include "se_platform/inbox.h"
+#include "se_platform/input_sampler.h"
 #include "se_platform/sdl_context.h"
 #include "se_platform/wake.h"
 #include "se_platform/window.h"
@@ -102,11 +134,14 @@
 #include "se_render/texture_table.h"
 #include "se_render_core/render_components.h"
 #include "se_runtime/app_config.h"
+#include "se_runtime/asset_runtime.h"
 #include "se_runtime/frame_pacer.h"
 #include "se_runtime/integration.h"
 #include "se_runtime/lifecycle.h"
 #include "se_runtime/quit.h"
 #include "se_runtime/render_present_port.h"
+#include "se_runtime/sound_assets.h"
+#include "se_runtime/user_settings.h"
 #include "se_sim/game_module.h"
 
 namespace se {
@@ -121,6 +156,9 @@ struct ContentPaths {
   std::string content_root;
   // The per-user writable directory, with a trailing '/'.
   std::string pref;
+  // The cooked atlas pages (M9; --cooked-root, else <base>cooked), without
+  // a trailing '/'.
+  std::string cooked;
 };
 
 // What one iterate did, for tests and tools (GameSetup::on_frame).
@@ -162,8 +200,24 @@ struct GameSetup {
   int window_height = 720;
   LifecycleConfig lifecycle;
   // The texture table (config/texture.json, ADR-026) relative to the
-  // content root; empty: no textures (every sprite draws magenta).
+  // content root; empty: no textures (every sprite draws magenta). Its
+  // textures load from cooked pages through the background lane (M9).
   std::string texture_table;
+  // What each GameState's AssetScope loads before its Worlds step (M9),
+  // by state id; empty: every texture of the table.
+  std::function<StateAssets(std::string_view state_id)> state_assets;
+  // The settings file (config/config.json) relative to the content root:
+  // the key bindings and sound volumes (user_settings.h, M8); empty: the
+  // module's default bindings and full volumes.
+  std::string settings_file;
+  // The sound table (config/sound.json: name to file, like the texture
+  // table) relative to the content root; empty: no sounds. Its files are
+  // every state's default sounds, decoded on the background lane and handed
+  // to the audio engine when resident (ADR-087).
+  std::string sound_table;
+  // The start bytes of a --record replay (rampage: its scene file); empty:
+  // none.
+  std::function<std::vector<std::byte>(const ContentPaths& paths)> replay_start;
   // The camera a World is drawn with; empty: its primary Camera2D, else a
   // default one.
   std::function<Camera2D(const World& world)> camera;
@@ -227,6 +281,9 @@ class App final : public WindowListener {
   [[nodiscard]] Renderer2D* Renderer() const noexcept {
     return renderer_.get();
   }
+  // The background lane and the AssetRegistry (M9); null before boot step
+  // 9 and after shutdown step 10.
+  [[nodiscard]] AssetRuntime* Assets() const noexcept { return assets_.get(); }
   // The texture table's entries, with paths joined to the content root.
   [[nodiscard]] const std::vector<TextureTableEntry>& Textures()
       const noexcept {
@@ -236,6 +293,29 @@ class App final : public WindowListener {
     return stepper_;
   }
   [[nodiscard]] const FramePacer& Pacer() const noexcept { return pacer_; }
+  // The input sampler (from the first iterate to shutdown step 4), or
+  // nullptr.
+  [[nodiscard]] const InputSampler* Sampler() const noexcept {
+    return input_sampler_.get();
+  }
+  // Gamepads the App has open.
+  [[nodiscard]] std::size_t OpenGamepads() const noexcept {
+    return gamepads_.Count();
+  }
+  // The settings file's contents (M8).
+  [[nodiscard]] const UserSettings& Settings() const noexcept {
+    return settings_;
+  }
+  // The lane's sound decoding so far (ADR-087).
+  [[nodiscard]] SoundDecodeStats SoundDecodes() const noexcept {
+    return sound_decoder_ ? sound_decoder_->Stats() : SoundDecodeStats{};
+  }
+  // The AudioBridge's D of the last frame, in nanoseconds (0: none yet).
+  [[nodiscard]] std::uint64_t AudioDelay() const noexcept;
+  // The audio engine, or nullptr (--audio none, or it could not start).
+  [[nodiscard]] audio::AudioEngine* Audio() const noexcept {
+    return audio_.get();
+  }
   // Device losses recovered so far (ADR-068).
   [[nodiscard]] std::uint64_t DeviceRecoveries() const noexcept {
     return device_recoveries_;
@@ -279,13 +359,15 @@ class App final : public WindowListener {
   void SyncQuitState();
   void ApplyCallbackRate();
   std::expected<void, Error> StartRenderer() SE_REQUIRES(g_main);
+  std::expected<void, Error> StartAssets() SE_REQUIRES(g_main);
   // Renders the frame of |report|'s plan and fills its rendered, presented
   // and render fields; |wait_sec| is the time spent in the swapchain wait.
   // An Error is a fault of the render build phase.
   std::expected<void, Error> RenderFrame(FrameReport& report, double& wait_sec)
       SE_REQUIRES(g_main);
   [[nodiscard]] Camera2D CameraFor(const World& world) const;
-  // The M7 test hooks due at this iterate.
+  // The --reload-texture hooks due at this iterate (through the lane, M9)
+  // and the M7 readbacks.
   void RunTextureReloads() SE_REQUIRES(g_main);
   void RunReadbacks(const FrameReport& report) SE_REQUIRES(g_main);
   void UpdateTitle(std::uint64_t now_ns) SE_REQUIRES(g_main);
@@ -310,6 +392,31 @@ class App final : public WindowListener {
   [[nodiscard]] std::int64_t ExitTestTick() const noexcept;
   void StopPlanAtExitTestTick(StepPlan& plan, Tick first_tick) const;
   void RunExitTests(Tick next_tick) SE_REQUIRES(g_main);
+  // M8: the settings file (boot step 10), the --record replay at shutdown,
+  // and the --push-key hook at the end of an iterate.
+  std::expected<void, Error> LoadSettings();
+  // Boot step 10: the audio engine and the sound table (M8). Never fails
+  // the boot: without an engine the game runs silent.
+  void StartAudio() SE_REQUIRES(g_main);
+  // The AssetRuntime's sound listener: a sound of the table landed, was
+  // reloaded, or (null) was released (ADR-087).
+  void OnSound(std::string_view path, std::shared_ptr<const Pcm> pcm)
+      SE_REQUIRES(g_main);
+  // Before the frame's ticks: D, the PCM clock, the listener.
+  void BeginAudioFrame(const StepPlan& plan, const FrameClock& clock)
+      SE_REQUIRES(g_main);
+  // The --record replay, through the lane as a Durable save (ADR-089).
+  void WriteReplay() SE_REQUIRES(g_main);
+  // --durable-save-test (ADR-089).
+  void RunDurableSaveTest() SE_REQUIRES(g_main);
+  // Records a teardown step for the shutdown-order log (ADR-088).
+  void NoteTeardown(std::string_view step) noexcept;
+  void RunPushKeys(const FrameReport& report) SE_REQUIRES(g_main);
+  // The input sampler (M8): started at the first iterate, inside ADR-047's
+  // window; parked while Suspended or Idle; its rate from the power source
+  // every 5 s; stopped before shutdown step 4.
+  void StartInputSampler() SE_REQUIRES(g_main);
+  void UpdateInputSampler(std::uint64_t now_ns) SE_REQUIRES(g_main);
 
   AppConfig config_;
   GameSetup setup_;
@@ -327,11 +434,45 @@ class App final : public WindowListener {
   std::unique_ptr<RenderPresentPort> present_;
   std::unique_ptr<Renderer2D> renderer_;
   std::vector<TextureTableEntry> textures_;
+  // The table as written (paths relative to the content root).
+  std::vector<TextureTableEntry> texture_table_;
   std::vector<RenderLayer> layers_;
   std::vector<bool> readbacks_done_;
   integration::CpuInfo cpu_;
   std::optional<integration::HelperThreads> helpers_;
+  // The sound table (boot step 9) and the lane's decoder (boot step 10);
+  // the decoder outlives the lane's jobs and the registry (ADR-087).
+  std::vector<SoundTableEntry> sound_table_;
+  std::unique_ptr<LaneSoundDecoder> sound_decoder_;
+  std::unique_ptr<AssetRuntime> assets_;
+  // Taken at shutdown step 8, logged (and the step trace written) after
+  // the teardown.
+  std::optional<LaneStats> lane_stats_;
+  std::vector<LaneStepRecord> lane_trace_;
+  std::uint64_t lane_durable_failures_ = 0;
+  // The --record replay submitted to the lane, and the lane's Durable
+  // failures before it (ADR-089).
+  bool replay_submitted_ = false;
+  std::uint64_t replay_failures_before_ = 0;
+  std::size_t replay_ticks_ = 0;
+  // --durable-save-test.
+  bool durable_save_test_done_ = false;
+  std::string durable_save_test_path_;
+  // When the quit was first seen pending (the "quit ready after" log).
+  std::uint64_t quit_requested_ns_ = 0;
+  // The teardown steps run, in order (ADR-088).
+  std::array<std::string_view, 24> teardown_steps_{};
+  std::size_t teardown_count_ = 0;
+  UserSettings settings_;
+  std::unique_ptr<audio::AudioEngine> audio_;
   std::unique_ptr<GameRuntime> game_;
+  // M8: gamepads are opened on main as SDL reports them; the sampler
+  // updates them.
+  Gamepads gamepads_;
+  std::unique_ptr<InputSampler> input_sampler_;
+  // The rate the sampler was last given (ADR-090).
+  std::uint32_t sampler_rate_ = 0;
+  PowerWatch power_;
 
   Lifecycle lifecycle_;
   QuitController quit_;
