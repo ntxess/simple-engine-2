@@ -177,6 +177,8 @@ endif()
 add_subdirectory(os)
 add_subdirectory(rampage)
 add_subdirectory(render)
+# M17a: the dedicated sim driver, headless.
+add_subdirectory(sim)
 add_subdirectory(crash)
 if(SE_BUILD_PLATFORM)
   add_subdirectory(platform)
