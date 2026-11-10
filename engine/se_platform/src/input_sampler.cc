@@ -53,12 +53,21 @@ struct InputSampler::State {
     std::uint64_t deadline = 0;
     double lead_ns = 0.0;
     while (!stop.stop_requested()) {
-      const std::uint32_t bell = doorbell.load(std::memory_order_acquire);
       if (park.load(std::memory_order_acquire)) {
         parks.fetch_add(1, std::memory_order_relaxed);
         parked.store(true, std::memory_order_release);
-        // Returns once SetParked or the stop rang after |bell| was read.
-        doorbell.wait(bell, std::memory_order_acquire);
+        // Stays parked until the flag clears or a stop: the ring of the
+        // SetParked(true) that parked it may still be pending, and it
+        // wakes the wait without ending the park (one park, counted once).
+        while (park.load(std::memory_order_acquire) && !stop.stop_requested()) {
+          const std::uint32_t bell = doorbell.load(std::memory_order_acquire);
+          // Rechecked after |bell| is read: a SetParked(false) or a stop
+          // before this point is seen here, one after it rings the bell.
+          if (!park.load(std::memory_order_acquire) || stop.stop_requested()) {
+            break;
+          }
+          doorbell.wait(bell, std::memory_order_acquire);
+        }
         parked.store(false, std::memory_order_release);
         unparks.fetch_add(1, std::memory_order_relaxed);
         deadline = 0;
