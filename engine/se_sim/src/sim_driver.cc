@@ -57,7 +57,17 @@ void SimDriver::TickInline(GameStateStack& states, const StepPlan& plan,
   SE_PROFILE_PLOT("debt", static_cast<std::int64_t>(plan.debt_ticks));
   SE_PROFILE_PLOT("dilation", plan.dilation_sec);
   frame_results_.clear();
+  held_ = false;
   for (int i = 0; i < plan.steps; ++i) {
+    if (gate_ != nullptr) {
+      // The state changes of the previous tick first (RunTick would apply
+      // them next): the gate sees the stack this tick runs on.
+      states.ApplyPending();
+      if (gate_->HoldTicks(states, next_tick_)) {
+        held_ = true;
+        break;
+      }
+    }
     const std::uint64_t window_end =
         plan.tick_window_end_ns[static_cast<std::size_t>(i)];
     const InputFrame frame =

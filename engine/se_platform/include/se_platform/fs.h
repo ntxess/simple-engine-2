@@ -30,6 +30,9 @@ struct PathInfo {
   // kNone when the path does not exist (not an error).
   PathType type = PathType::kNone;
   std::uint64_t size = 0;
+  // The last modification, in nanoseconds since the Unix epoch (SDL_Time);
+  // the background lane's hot-reload scan compares it (M9).
+  std::int64_t modify_time_ns = 0;
 };
 
 // The directory of the executable (the content root's default), with a

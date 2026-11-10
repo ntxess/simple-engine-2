@@ -15,25 +15,31 @@
 //    5 content-paths   the content root
 //    6 window          the window and its Win32 subclass
 //    7 gpu-device      the SDL_GPU device, claiming the window with VSYNC;
-//                      Renderer2D and the textures of the game's texture
-//                      table (decoded with stb_image, uploaded before the
-//                      first frame)
+//                      Renderer2D; the game's texture table is read (its
+//                      textures load through the lane, M9)
 //    8 cpu-topology    the CPU topology and the pool sizes it gives
 //    9 helper-threads  the vblank sampler (Windows, a window), then the
-//                      watchdog (boot budget until the first iterate)
+//                      watchdog (boot budget until the first iterate), then
+//                      the background lane and the AssetRegistry (M9,
+//                      asset_runtime.h)
 //   10 game            the GameModule's registry and storages, the
-//                      GameStateStack with the start state pushed, the
-//                      SimDriver writing the process's InputFrame ring
+//                      GameStateStack with the start state pushed (its
+//                      AssetScope requests its assets), the SimDriver
+//                      writing the process's InputFrame ring and asking the
+//                      assets' TickGate before each tick
 // The main thread runs inside its RoleScope from SDL_AppInit to the end of
 // SDL_AppQuit (integration::EnterMainThread).
 // --headless skips the window and the GPU device (steps 6 and 7 do
 // nothing) and uses SDL's dummy video driver.
 //
 // Each iterate: count the iterate (the watchdog's progress), take the
-// inbox, poll the two-phase quit, update the lifecycle (callback rate, held
-// input, frame-clock reset), FramePacer::BeginFrame (the N-L fence, present
-// statistics, the FrameClock), plan the frame's ticks with the FixedStepper,
-// tick the running Worlds through SimDriver::TickInline with
+// inbox, drain the background lane's completions (M9: pages to the upload
+// queue, reloads, the scopes of the stack's states), poll the two-phase
+// quit (the lane's QuitProvider waits for Durable jobs), update the lifecycle
+// (callback rate, held input, frame-clock reset), FramePacer::BeginFrame (the
+// N-L fence, present statistics, the FrameClock), plan the frame's ticks with
+// the FixedStepper (none while the top state's AssetScope is not resident: the
+// sim holds), tick the running Worlds through SimDriver::TickInline with
 // BasicInputService's frames, then render: the GameStateStack's render
 // sources (every state's Worlds, the top one at the plan's alpha) through
 // GameSetup::camera, drawn by Renderer2D into the composite and blitted to
@@ -57,8 +63,9 @@
 //
 // Shutdown follows the design's order for the parts that exist: the
 // watchdog's deadline starts when the quit drain ends; remove the event
-// filter, SDL_WaitForGPUIdle, destroy the Worlds, stop the vblank sampler
-// (step 9), release the present port and the device,
+// filter, SDL_WaitForGPUIdle, destroy the Worlds, stop the background lane
+// (step 8), stop the vblank sampler (step 9), release every AssetScope
+// (step 10), release the present port and the device,
 // remove the subclass and destroy the window, SDL_QuitSubSystem, stop the
 // log worker (step 16), join the watchdog (step 17), stop the profiler.
 // Game code that runs during shutdown (GameSetup::on_shutdown and every
@@ -69,7 +76,7 @@
 // main right after tick N; --dump-test after-ticks:N has the watchdog write
 // a dump after tick N, holds the ticks until it is written, then quits.
 // M7 adds --inject-frame-fault, --reload-texture and --readback
-// (app_config.h).
+// (app_config.h); M9 --lane-step-trace.
 
 #ifndef SE_RUNTIME_APP_H_
 #define SE_RUNTIME_APP_H_
@@ -102,6 +109,7 @@
 #include "se_render/texture_table.h"
 #include "se_render_core/render_components.h"
 #include "se_runtime/app_config.h"
+#include "se_runtime/asset_runtime.h"
 #include "se_runtime/frame_pacer.h"
 #include "se_runtime/integration.h"
 #include "se_runtime/lifecycle.h"
@@ -121,6 +129,9 @@ struct ContentPaths {
   std::string content_root;
   // The per-user writable directory, with a trailing '/'.
   std::string pref;
+  // The cooked atlas pages (M9; --cooked-root, else <base>cooked), without
+  // a trailing '/'.
+  std::string cooked;
 };
 
 // What one iterate did, for tests and tools (GameSetup::on_frame).
@@ -162,8 +173,12 @@ struct GameSetup {
   int window_height = 720;
   LifecycleConfig lifecycle;
   // The texture table (config/texture.json, ADR-026) relative to the
-  // content root; empty: no textures (every sprite draws magenta).
+  // content root; empty: no textures (every sprite draws magenta). Its
+  // textures load from cooked pages through the background lane (M9).
   std::string texture_table;
+  // What each GameState's AssetScope loads before its Worlds step (M9),
+  // by state id; empty: every texture of the table.
+  std::function<StateAssets(std::string_view state_id)> state_assets;
   // The camera a World is drawn with; empty: its primary Camera2D, else a
   // default one.
   std::function<Camera2D(const World& world)> camera;
@@ -227,6 +242,9 @@ class App final : public WindowListener {
   [[nodiscard]] Renderer2D* Renderer() const noexcept {
     return renderer_.get();
   }
+  // The background lane and the AssetRegistry (M9); null before boot step
+  // 9 and after shutdown step 10.
+  [[nodiscard]] AssetRuntime* Assets() const noexcept { return assets_.get(); }
   // The texture table's entries, with paths joined to the content root.
   [[nodiscard]] const std::vector<TextureTableEntry>& Textures()
       const noexcept {
@@ -279,13 +297,15 @@ class App final : public WindowListener {
   void SyncQuitState();
   void ApplyCallbackRate();
   std::expected<void, Error> StartRenderer() SE_REQUIRES(g_main);
+  std::expected<void, Error> StartAssets() SE_REQUIRES(g_main);
   // Renders the frame of |report|'s plan and fills its rendered, presented
   // and render fields; |wait_sec| is the time spent in the swapchain wait.
   // An Error is a fault of the render build phase.
   std::expected<void, Error> RenderFrame(FrameReport& report, double& wait_sec)
       SE_REQUIRES(g_main);
   [[nodiscard]] Camera2D CameraFor(const World& world) const;
-  // The M7 test hooks due at this iterate.
+  // The --reload-texture hooks due at this iterate (through the lane, M9)
+  // and the M7 readbacks.
   void RunTextureReloads() SE_REQUIRES(g_main);
   void RunReadbacks(const FrameReport& report) SE_REQUIRES(g_main);
   void UpdateTitle(std::uint64_t now_ns) SE_REQUIRES(g_main);
@@ -327,10 +347,17 @@ class App final : public WindowListener {
   std::unique_ptr<RenderPresentPort> present_;
   std::unique_ptr<Renderer2D> renderer_;
   std::vector<TextureTableEntry> textures_;
+  // The table as written (paths relative to the content root).
+  std::vector<TextureTableEntry> texture_table_;
   std::vector<RenderLayer> layers_;
   std::vector<bool> readbacks_done_;
   integration::CpuInfo cpu_;
   std::optional<integration::HelperThreads> helpers_;
+  std::unique_ptr<AssetRuntime> assets_;
+  // Taken at shutdown step 8, logged (and the step trace written) after
+  // the teardown.
+  std::optional<LaneStats> lane_stats_;
+  std::vector<LaneStepRecord> lane_trace_;
   std::unique_ptr<GameRuntime> game_;
 
   Lifecycle lifecycle_;

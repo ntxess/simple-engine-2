@@ -34,6 +34,7 @@ target_compile_definitions(se_platform_test_support PRIVATE
 se_add_module(se_platform_tests KIND EXECUTABLE
   SOURCES
     app_desktop_test.cc
+    assets_app_test.cc
     callbacks_test.cc
     fatal_test.cc
     fs_test.cc

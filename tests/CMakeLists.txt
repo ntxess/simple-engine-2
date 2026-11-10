@@ -71,6 +71,7 @@ se_add_module(se_tests KIND EXECUTABLE
     kernel/spsc_ring_test.cc
     kernel/thread_registry_test.cc
     kernel/thread_role_test.cc
+    kernel/tick_gate_test.cc
     kernel/world_test.cc
     support/tracy_inert_listener.cc
   PRIVATE_DEPS
@@ -185,6 +186,8 @@ if(SE_BUILD_PLATFORM)
   # M7: Renderer2D and GpuResources, then render_shot (which links their
   # support library).
   add_subdirectory(render_gpu)
+  # M9: the background lane and the AssetRegistry.
+  add_subdirectory(assets)
   add_subdirectory("${CMAKE_SOURCE_DIR}/tools/render_shot"
                    "${CMAKE_BINARY_DIR}/tools/render_shot")
 endif()

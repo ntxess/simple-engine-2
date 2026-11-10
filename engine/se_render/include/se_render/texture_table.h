@@ -7,10 +7,13 @@
 //   { "player": "assets/player/player.png", "coin": "assets/coin/coin.png" }
 //
 // LoadTextureTable registers every name with GpuResources, decodes its PNG
-// with stb_image on main (M7; M9 moves decoding to the background lane)
-// and queues the upload. A file that is missing or does not decode is an
-// Error naming its path in the report, and sprites of that texture draw
-// magenta; only an unreadable or malformed table fails the call.
+// with stb_image on main and queues the upload (M7). Since M9 the App
+// loads the table's textures from cooked pages through the background
+// lane (se_runtime/asset_runtime.h) and uses only ParseTextureTable;
+// LoadTextureTable serves tests and tools (render_shot). A file that is missing
+// or does not decode is an Error naming its path in the report, and sprites of
+// that texture draw magenta; only an unreadable or malformed table fails the
+// call.
 
 #ifndef SE_RENDER_TEXTURE_TABLE_H_
 #define SE_RENDER_TEXTURE_TABLE_H_

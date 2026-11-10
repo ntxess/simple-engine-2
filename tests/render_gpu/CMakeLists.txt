@@ -42,6 +42,7 @@ se_add_module(se_render_gpu_tests KIND EXECUTABLE
   SOURCES
     desktop_test.cc
     gpu_resources_test.cc
+    hot_reload_test.cc
     image_compare_test.cc
     renderer_test.cc
     shader_reflection_test.cc
@@ -57,8 +58,12 @@ se_add_module(se_render_gpu_tests KIND EXECUTABLE
     se_render
     se_render_test_support
     se_runtime
+    se_assets
     Catch2::Catch2WithMain
   TEST)
+
+# The App-based tests load rampage's textures from the cooked pages (M9).
+add_dependencies(se_render_gpu_tests se_cooked_textures)
 
 catch_discover_tests(se_render_gpu_tests
   TEST_SPEC "~[gpu]~[desktop]"

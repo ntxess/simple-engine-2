@@ -312,6 +312,10 @@ std::expected<void, Error> App::Boot() {
       integration::StartHelperThreads(config_, inputs, boot_start_ns_, vblank);
   if (!helpers) return std::unexpected(std::move(helpers.error()));
   helpers_.emplace(std::move(*helpers));
+  // M9: the background lane and the AssetRegistry.
+  if (auto assets = StartAssets(); !assets) {
+    return assets;
+  }
 
   // 10. The game: registry, storages, states.
   if (auto ok = BootStep(10); !ok) {
@@ -328,6 +332,8 @@ std::expected<void, Error> App::Boot() {
   for (QuitProvider* provider : setup_.quit_providers) {
     quit_.AddProvider(provider);
   }
+  // Durable lane jobs keep the quit pending until they are done.
+  quit_.AddProvider(&assets_->QuitWaiter());
   // The pacer: the present port and the vblank sampler; it chooses the
   // mode (Standard until the sampler has measured, when Paced is possible).
   pacer_.SetDisplayRefresh(PacingRefreshHz());
@@ -361,6 +367,9 @@ std::expected<void, Error> App::ResolvePaths() {
   } else {
     paths_.content_root = fs::Normalize(paths_.base);
   }
+  paths_.cooked = config_.cooked_root.empty()
+                      ? fs::Join(paths_.base, "cooked")
+                      : fs::Normalize(config_.cooked_root);
   return {};
 }
 
@@ -413,13 +422,37 @@ std::expected<void, Error> App::StartGame() {
     return Fail(ErrorCode::kInvalidArgument,
                 std::string(setup_.module->name) + " has no start state");
   }
-  const InlineOwnerScope owner(OnMainThread());
-  game_->states.Request(StackOp::kPush, start);
-  game_->states.ApplyPending();
+  {
+    const InlineOwnerScope owner(OnMainThread());
+    game_->states.Request(StackOp::kPush, start);
+    game_->states.ApplyPending();
+  }
   if (game_->states.Depth() != 1 || game_->states.RejectedCount() != 0) {
     return Fail(ErrorCode::kInvalidArgument,
                 std::format("the start state '{}' could not be pushed", start));
   }
+  // The start state's scope requests its assets now; no tick runs until
+  // they are resident (M9).
+  game_->driver.SetTickGate(assets_.get());
+  assets_->BeginFrame(game_->states);
+  return {};
+}
+
+std::expected<void, Error> App::StartAssets() {
+  AssetRuntimeConfig assets;
+  assets.content_root = paths_.content_root;
+  assets.cooked_root = paths_.cooked;
+  assets.textures = texture_table_;
+  assets.page_mode = kReleaseBuild ? AtlasRequest::Mode::kPage
+                                   : AtlasRequest::Mode::kPageIfFresh;
+  assets.hot_reload = config_.hot_reload;
+  if (kRuntimeTestHooks && !config_.lane_step_trace.empty()) {
+    assets.trace_capacity = 1U << 18;
+  }
+  assets.state_assets = setup_.state_assets;
+  auto runtime = AssetRuntime::Start(assets, renderer_.get());
+  if (!runtime) return std::unexpected(std::move(runtime.error()));
+  assets_ = std::move(*runtime);
   return {};
 }
 
@@ -430,19 +463,25 @@ std::expected<void, Error> App::StartRenderer() {
   if (kRuntimeTestHooks) renderer_->Faults().Configure(config_.frame_fault);
   readbacks_done_.assign(config_.readbacks.size(), false);
   if (setup_.texture_table.empty()) return {};
-  auto report = LoadTextureTable(renderer_->Resources(), paths_.content_root,
-                                 setup_.texture_table);
-  if (!report) return std::unexpected(std::move(report.error()));
-  // A texture that does not load draws magenta; the game still boots.
-  for (const Error& error : report->errors) {
-    SE_LOG_ERROR("{} ({})", error.message, error.path);
+  // The table only: its textures load from cooked pages through the
+  // background lane (M9), requested by the states' AssetScopes.
+  const std::string table = fs::Join(paths_.content_root, setup_.texture_table);
+  auto text = fs::ReadTextFile(table);
+  if (!text) {
+    Error error = std::move(text.error());
+    if (error.path.empty()) error.path = table;
+    return std::unexpected(std::move(error));
   }
-  textures_ = std::move(report->entries);
-  if (auto flushed = renderer_->Resources().FlushUploads(); !flushed) {
-    return flushed;
+  auto entries = ParseTextureTable(*text, table);
+  if (!entries) return std::unexpected(std::move(entries.error()));
+  texture_table_ = std::move(*entries);
+  textures_.clear();
+  for (const TextureTableEntry& entry : texture_table_) {
+    textures_.push_back(
+        {entry.name, fs::Join(paths_.content_root, entry.path)});
   }
-  SE_LOG_INFO("renderer: {} of {} textures from {} resident", report->loaded,
-              textures_.size(), setup_.texture_table);
+  SE_LOG_INFO("renderer: {} textures in {}; pages from {}", textures_.size(),
+              setup_.texture_table, paths_.cooked);
   return {};
 }
 
@@ -712,9 +751,14 @@ std::expected<void, Error> App::RenderFrame(FrameReport& report,
     }
   }
   layers_.clear();
+  // A tick may have changed the stack: the scopes follow it before any
+  // World is asked about (M9).
+  if (assets_) assets_->BeforeRender(game_->states);
   for (const WorldRenderSource& source :
        game_->states.RenderSources(report.plan)) {
     if (source.world == nullptr) continue;
+    // A state whose assets are still loading is not drawn yet (M9).
+    if (assets_ && !assets_->Drawable(source.world)) continue;
     RenderLayer layer;
     layer.world = source.world;
     layer.camera = CameraFor(*source.world);
@@ -750,30 +794,17 @@ std::expected<void, Error> App::RenderFrame(FrameReport& report,
 }
 
 void App::RunTextureReloads() {
-  if (renderer_ == nullptr) return;
+  if (renderer_ == nullptr || !assets_) return;
   for (const TextureReloadHook& reload : config_.texture_reloads) {
     if (reload.frame != static_cast<std::int64_t>(iterates_)) continue;
-    GpuResources& resources = renderer_->Resources();
-    const TextureHandle handle = resources.Find(TextureKeyOf(reload.name));
-    std::string path;
-    if (!reload.file.empty()) {
-      path = fs::Join(paths_.content_root, reload.file);
-    } else {
-      for (const TextureTableEntry& entry : textures_) {
-        if (entry.name == reload.name) path = entry.path;
-      }
-    }
-    if (handle.IsNull() || path.empty()) {
-      SE_LOG_ERROR("--reload-texture: no texture '{}' in the table",
-                   reload.name);
+    // Re-cooked on the lane (Urgent); it swaps at a frame start once
+    // resident.
+    if (!assets_->ReloadTexture(reload.name, reload.file)) {
+      SE_LOG_ERROR("--reload-texture: no texture '{}' loaded", reload.name);
       continue;
     }
-    if (auto loaded = LoadTextureFile(resources, handle, path); !loaded) {
-      SE_LOG_ERROR("--reload-texture {}: {} ({})", reload.name,
-                   loaded.error().message, loaded.error().path);
-      continue;
-    }
-    SE_LOG_INFO("reloading texture '{}' from {} at frame {}", reload.name, path,
+    SE_LOG_INFO("reloading texture '{}'{} on the lane at frame {}", reload.name,
+                reload.file.empty() ? std::string() : " from " + reload.file,
                 iterates_);
   }
 }
@@ -782,10 +813,11 @@ void App::RunReadbacks(const FrameReport& report) {
   if (renderer_ == nullptr || !report.rendered) return;
   for (std::size_t i = 0; i < config_.readbacks.size(); ++i) {
     const ReadbackHook& readback = config_.readbacks[i];
-    if (readbacks_done_[i] ||
-        static_cast<std::int64_t>(iterates_) < readback.frame) {
-      continue;
-    }
+    const auto ran = static_cast<std::int64_t>(report.next_tick) - 1;
+    const bool due = readback.by_tick ? ran >= readback.frame
+                                      : static_cast<std::int64_t>(iterates_) >=
+                                            readback.frame;
+    if (readbacks_done_[i] || !due) continue;
     readbacks_done_[i] = true;
     auto image = renderer_->Readback();
     if (!image) {
@@ -818,8 +850,10 @@ SDL_AppResult App::Iterate() {
     InjectedThrow("SDL_AppIterate");
   }
 
-  // Events diverted off main by the filter, then the two-phase quit.
+  // Events diverted off main by the filter, the background lane's
+  // completions (M9), then the two-phase quit.
   TakeInbox();
+  if (assets_) assets_->BeginFrame(game_->states);
   quit_.Poll();
   SyncQuitState();
   if (quit_.ReadyToExit()) {
@@ -883,8 +917,11 @@ SDL_AppResult App::Iterate() {
   // The N-L fence wait is GPU time, not CPU work: it stays out of R.
   const double fence_wait_sec =
       static_cast<double>(pacer_.LastFrame().fence_wait_ns) * kNsToSec;
+  // The sim holds while the top state's AssetScope is not resident (M9).
+  const bool assets_held = assets_ && assets_->Hold(game_->states);
   report.gameplay_ran = lifecycle_.GameplayRuns() &&
-                        game_->states.SimRunning() && !exit_test_hold_;
+                        game_->states.SimRunning() && !exit_test_hold_ &&
+                        !assets_held;
   report.plan =
       stepper_.Plan(frame_clock, costs_.Current(), report.gameplay_ran,
                     /*debugger=*/false, /*editor_play=*/false);
@@ -895,9 +932,11 @@ SDL_AppResult App::Iterate() {
                            game_->session, game_->recorder, game_->audio);
   const double ticks_sec =
       static_cast<double>(SDL_GetTicksNS() - ticks_start) * kNsToSec;
-  ticks_run_ += static_cast<std::uint64_t>(report.plan.steps);
-  for (int i = 0; i < report.plan.steps; ++i) {
-    costs_.AddTick(ticks_sec / report.plan.steps);
+  // The assets' TickGate may have stopped the frame's ticks early.
+  const auto ran = static_cast<int>(game_->driver.FrameResults().size());
+  ticks_run_ += static_cast<std::uint64_t>(ran);
+  for (int i = 0; i < ran; ++i) {
+    costs_.AddTick(ticks_sec / ran);
   }
   report.next_tick = game_->driver.NextTick();
   if (kRuntimeTestHooks) RunExitTests(report.next_tick);
@@ -1097,6 +1136,16 @@ SDL_AppResult App::Shutdown(SDL_AppResult result) {
   // teardown below only destroys it.
   if (renderer_) renderer_->Shutdown();
   Teardown();
+  if (lane_stats_) AssetRuntime::LogLaneStopped(*lane_stats_);
+  if (kRuntimeTestHooks && !config_.lane_step_trace.empty()) {
+    if (auto written = WriteLaneStepTrace(lane_trace_, config_.lane_step_trace);
+        !written) {
+      SE_LOG_ERROR("--lane-step-trace: {}", written.error().message);
+    } else {
+      SE_LOG_INFO("lane step trace: {} steps written to {}", lane_trace_.size(),
+                  config_.lane_step_trace);
+    }
+  }
   if (vblank_detached_) {
     SE_LOG_WARN(
         "the vblank sampler was still in WaitForVBlank at shutdown: detached "
@@ -1130,10 +1179,32 @@ void App::Teardown() {
     if (!RunGameHook("GameState::OnExit", clear)) shutdown_faulted_ = true;
     game_.reset();
   }
+  // Step 8: the background lane (queued jobs that are not Durable are
+  // cancelled, a running step finishes, Durable jobs run to the end).
+  if (assets_) {
+    assets_->StopLane();
+    lane_stats_ = assets_->Lane().Stats();
+    lane_trace_ = assets_->Lane().TakeStepTrace();
+  }
   // Step 9: the vblank sampler (the pacer lets go of it first).
   pacer_.Detach();
   if (helpers_ && helpers_->StopSamplers() == VblankStop::kDetached) {
     vblank_detached_ = true;
+  }
+  // Step 10: every AssetScope (the GPU slots go through the retire queue
+  // while the renderer still exists).
+  if (assets_) {
+    quit_.RemoveProvider(&assets_->QuitWaiter());
+    // Releasing allocates (the retire queue, the lane's watch list): a
+    // throw is contained like game code's (ADR-044).
+    auto release = [this] {
+      AssertMainThread();
+      assets_->ReleaseScopes();
+    };
+    if (!RunGameHook("AssetRegistry::ReleaseAll", release)) {
+      shutdown_faulted_ = true;
+    }
+    assets_.reset();
   }
   // Step 12: the present port's fences, the renderer's objects (the GPU
   // is idle), then release the window from the device and destroy the

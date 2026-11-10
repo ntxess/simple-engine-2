@@ -2,11 +2,12 @@
 //
 // PNG decoding and writing with stb (docs/milestone-specs.md M7; ADR-060).
 // Decoding uses stb_image (the PNG loader only), the same decoder SFML
-// uses, so the engine samples the legacy tree's texels. Decoding runs on
-// main at boot in M7 (M9 moves it to the background lane). Writing uses
-// stb_image_write and serves the readback test hook, tests and tools
-// (render_shot, goldens); each implementation lives in one translation unit
-// of se_render.
+// uses, so the engine samples the legacy tree's texels. Since M9 the
+// runtime reads cooked pages through the background lane instead (stb
+// runs at import: se_assets' cook); this decoder serves tests and tools.
+// Writing uses stb_image_write and serves the readback test hook, tests and
+// tools (render_shot, goldens); each implementation lives in one translation
+// unit of se_render.
 
 #ifndef SE_RENDER_IMAGE_IO_H_
 #define SE_RENDER_IMAGE_IO_H_
