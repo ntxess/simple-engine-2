@@ -20,8 +20,9 @@
 //
 // Builds without crashpad (SE_CRASH=OFF, and Linux until the gates.md entry
 // "Linux crash capture" is closed) get the same API: Start returns an Error,
-// RegisterStream validates its arguments and keeps nothing, DumpWithoutCrash
-// returns an Error.
+// RegisterStream validates its arguments and reserves the type (and
+// UnregisterStream releases it) but keeps nothing, DumpWithoutCrash returns
+// an Error.
 
 #ifndef SE_CRASH_CRASH_H_
 #define SE_CRASH_CRASH_H_
@@ -47,6 +48,9 @@ enum class StreamType : std::uint32_t {
   kInputFrameRing = 0x53450002,  // the World owner's InputFrame ring (kind 3)
   kSessionLogTail = 0x53450003,  // the SessionLog tail (kind 4, later)
   kFlightRecorder = 0x53450004,  // the pacing flight recorder (kind 5, M6)
+  kSessionHeader = 0x53450005,   // what a replay needs (kind 6, M12)
+  kPlayStartBytes = 0x53450006,  // the editor's Play-start bytes (kind 7,
+                                 // registered while Play runs; M10, M12)
 };
 
 inline constexpr std::uint32_t kFirstStreamType = 0x53450001;
@@ -125,13 +129,23 @@ class CrashGuard {
 // Registers |size| bytes at |data| as a dump stream of |type|. The handler
 // reads the region at dump time, so it must stay valid until the process
 // exits (the ThreadRegistry's rings and breadcrumbs are never freed for this
-// reason). Streams may be registered before Start(). Errors
-// (kInvalidArgument): a type outside the first-party range, a null or empty
-// region, a type already registered. Thread-safe: registration takes a
-// mutex, which only thread start and boot code use.
+// reason) or until UnregisterStream(type) returns. Streams may be
+// registered before Start(). Errors (kInvalidArgument): a type outside the
+// first-party range, a null or empty region, a type already registered.
+// Thread-safe: registration takes a mutex, which only thread start, boot
+// code and the editor's Play transitions use.
 [[nodiscard]] std::expected<void, Error> RegisterStream(StreamType type,
                                                         const void* data,
                                                         std::size_t size);
+
+// Withdraws the stream of |type| (M12, for the editor's Play-start bytes,
+// which live only while Play runs): dumps written after it returns leave the
+// region out, so the caller may free it, and |type| may be registered again.
+// A dump being written when it is called has suspended every thread of the
+// process, this one included, so it sees the stream whole or not at all.
+// kInvalidArgument when |type| is not registered. Thread-safe like
+// RegisterStream.
+[[nodiscard]] std::expected<void, Error> UnregisterStream(StreamType type);
 
 // Asks the handler for a dump of the running process without crashing it
 // and returns once the handler has written it. |reason| goes into the dump

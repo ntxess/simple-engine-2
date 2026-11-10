@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <optional>
 
+#include "se_platform/driver_wait.h"
 #include "se_platform/vblank_sampler.h"
 #include "se_runtime/present_port.h"
 
@@ -116,6 +117,7 @@ bool FakePresentPort::SetFrameLatency(int frames) {
 }
 
 PresentWait FakePresentPort::WaitFrameLatency(std::uint64_t timeout_ns) {
+  if (!InDriverWait()) ++waits_outside_driver;
   if (!caps.frame_latency_waitable) return PresentWait::kUnsupported;
   if (timeout_ns == 0) {
     ++waitable_polls;
@@ -138,6 +140,7 @@ void FakePresentPort::OnFrameSubmitted(
 
 PresentWait FakePresentPort::WaitFrameFence([[maybe_unused]] int frames_back,
                                             std::uint64_t timeout_ns) {
+  if (!InDriverWait()) ++waits_outside_driver;
   if (timeout_ns == 0) {
     ++fence_polls;
     return fence_pending ? PresentWait::kTimeout : PresentWait::kReady;
@@ -155,6 +158,7 @@ bool FakePresentPort::RepresentLast() {
 }
 
 bool FakePresentPort::WaitSwapchain() {
+  if (!InDriverWait()) ++waits_outside_driver;
   ++swapchain_waits;
   WaitForNewestShown();
   return true;

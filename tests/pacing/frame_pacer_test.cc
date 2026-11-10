@@ -24,6 +24,7 @@
 
 #include "se_core/error.h"
 #include "se_core/time.h"
+#include "se_platform/driver_wait.h"
 #include "se_platform/vblank_sampler.h"
 #include "se_runtime/app_config.h"
 #include "se_runtime/pacer_policy.h"
@@ -453,6 +454,39 @@ TEST_CASE("The N-L fence: pending at frame start, then waited for", "[pacer]") {
   REQUIRE(loop.port.fence_waits == 1);
   REQUIRE(loop.pacer.Totals().fence_waits == 1);
   CHECK_FALSE(loop.Step().clock.gpu_fence_pending_at_start);
+}
+
+TEST_CASE("Every wait of the pacer raises the in-driver flag", "[pacer]") {
+  // M12: the watchdog labels a hang inside one a GPU or compositor stall.
+  const testing::MainThreadScope main;
+  for (const bool patched : {true, false}) {
+    INFO("patched " << patched);
+    Loop loop(patched ? Patched() : Unpatched());
+    loop.Attach();
+    for (int i = 0; i < 10; ++i) loop.Step();
+    loop.port.fence_pending = true;
+    for (int i = 0; i < 10; ++i) loop.Step();
+    const FakePresentPort& port = loop.port;
+    REQUIRE(port.waitable_waits + port.waitable_polls + port.swapchain_waits +
+                port.fence_polls + port.fence_waits >
+            10);
+    REQUIRE(port.waits_outside_driver == 0);
+    CHECK_FALSE(InDriverWait());
+  }
+}
+
+TEST_CASE("Driver wait scopes nest and restore the flag", "[pacer]") {
+  REQUIRE_FALSE(InDriverWait());
+  {
+    const DriverWaitScope outer;
+    REQUIRE(InDriverWait());
+    {
+      const DriverWaitScope inner;
+      REQUIRE(DriverWaitFlag().load());
+    }
+    REQUIRE(InDriverWait());
+  }
+  REQUIRE_FALSE(InDriverWait());
 }
 
 TEST_CASE("Frames that present nothing do not wait", "[pacer]") {

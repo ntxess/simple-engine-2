@@ -25,6 +25,7 @@
 #include "se_core/error.h"
 #include "se_core/log.h"
 #include "se_core/profile.h"
+#include "se_platform/driver_wait.h"
 #include "se_render/frame_faults.h"
 #include "se_render/frame_recorder.h"
 #include "se_render/gpu_device.h"
@@ -782,8 +783,13 @@ std::expected<TexturePayload, Error> Renderer2D::Readback(
   SDL_GPUFence* fence = SDL_SubmitGPUCommandBufferAndAcquireFence(commands);
   resources_->CountFence(fence);
   std::expected<TexturePayload, Error> result = std::move(image);
-  if (pass == nullptr || fence == nullptr ||
-      !SDL_WaitForGPUFences(device, true, &fence, 1)) {
+  bool waited = false;
+  if (pass != nullptr && fence != nullptr) {
+    // A fence wait: the watchdog's GPU or compositor stall label (M12).
+    const DriverWaitScope in_driver;
+    waited = SDL_WaitForGPUFences(device, true, &fence, 1);
+  }
+  if (!waited) {
     result = Fail(ErrorCode::kUnsupported, SdlError("the readback"));
   } else {
     const auto* mapped = static_cast<const std::uint8_t*>(

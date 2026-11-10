@@ -61,6 +61,7 @@ se_add_module(se_tests KIND EXECUTABLE
     kernel/hash_test.cc
     kernel/input_buffer_test.cc
     kernel/input_frame_ring_test.cc
+    kernel/session_header_test.cc
     kernel/log_test.cc
     kernel/parallel_view_test.cc
     kernel/profile_test.cc

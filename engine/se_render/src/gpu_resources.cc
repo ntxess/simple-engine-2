@@ -20,6 +20,7 @@
 #include "se_core/assert.h"
 #include "se_core/error.h"
 #include "se_core/log.h"
+#include "se_platform/driver_wait.h"
 #include "se_render/gpu_device.h"
 #include "se_render_core/render_components.h"
 #include "src/gpu_assert.h"
@@ -510,9 +511,14 @@ std::expected<void, Error> GpuResources::FlushUploads() {
     for (std::size_t i = 0; i < in_flight_count_; ++i) {
       fences.push_back(in_flight_[i].fence);
     }
-    if (!fences.empty() &&
-        !SDL_WaitForGPUFences(Native(), true, fences.data(),
-                              static_cast<std::uint32_t>(fences.size()))) {
+    bool waited = true;
+    if (!fences.empty()) {
+      // A fence wait: the watchdog's GPU or compositor stall label (M12).
+      const DriverWaitScope in_driver;
+      waited = SDL_WaitForGPUFences(Native(), true, fences.data(),
+                                    static_cast<std::uint32_t>(fences.size()));
+    }
+    if (!waited) {
       return Fail(ErrorCode::kUnsupported,
                   SdlError("SDL_WaitForGPUFences(uploads)"));
     }

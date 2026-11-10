@@ -831,7 +831,9 @@ flush (se::FlushLog, 1 s) and ends the process with TerminateProcess
 **Why.** The design's watchdog reads only atomics and never waits on main,
 and main never waits on it; a queue main fills and a semaphore it releases
 keep both true. Declaring hangs needs M12's GPU and compositor labels, so
-M4 gives the interface and the boot budget only, as the spec asks.
+M4 gives the interface and the boot budget only, as the spec asks. *(M12
+declares hangs, samples four times a period and stops judging once the
+shutdown deadline starts: ADR-104, ADR-105.)*
 
 ## ADR-044 Game code run during shutdown is contained (2026-11-09)
 
@@ -3026,3 +3028,193 @@ recorded in gates.md for M15.
 settles` appends to a watched file every 25 ms for 400 ms under a 100 ms
 scan: the old rule reported once per scan during the writes, the new one
 reports the finished size once (twice at most on a stalled writer).
+
+## ADR-104 Hangs are counted from the last observed progress; the watchdog samples four times a period (2026-11-10)
+
+**Decision.** M12 turns hang declaration on (`HangDetectorConfig::
+declare_hangs` now defaults to true) with these rules (se_crash/
+hang_detector.h, watchdog.h):
+- A hang is 5 consecutive periods of 1 s on the unbiased clock without
+  progress of main's iterate counter. The periods are counted from the
+  sample that last saw the counter move (or last saw an excuse), not from
+  fixed period boundaries, and the watchdog takes a sample every quarter
+  period (`WatchdogConfig::sample_ms`, 0: period / 4, at least 1 ms). A hang
+  is therefore declared between 5 s and 5 s plus two samples (5.5 s) after
+  main's last progress; on this machine `crash.rampage_hang` measured 5.30
+  s from the hang's log line to "dump written" (the dump itself took 54 ms).
+- Suspended, Modal, the heartbeat and a debugger each excuse a sample: the
+  count starts over from it. The debugger is read only on samples without
+  progress (Linux reads /proc for it).
+- A hang is declared once per episode: one ERROR line ("hang N: main made
+  no progress for X s at tick T (iterate I; main's breadcrumb: tick, phase,
+  system, chunk): requesting a dump") and one DumpWithoutCrash on the
+  watchdog thread with the same text as the dump's `se.dump_reason`. The
+  episode ends at the first sample that sees progress again, logged as
+  "hang N ended: main made progress again after X s (Hung -> Running)",
+  with the length from the last progress before the hang. The hang number
+  ties the log line to its dump; crashpad's simulated-crash call returns no
+  report id to log.
+- Hung is the watchdog's state (HangDetector::InHang, WatchdogStats::
+  in_hang), not a state of main's Lifecycle: main cannot run while it is
+  hung, so it could only ever enter and leave Hung in the same iterate.
+  M5's lifecycle.h listed Hung among the states M12 would add; it does not.
+- WatchdogStats gains hangs, hang_dumps_written, hangs_ended,
+  last_episode_ns, in_hang and last_hang_in_driver; `periods` becomes
+  `samples` (the wakes that sampled), and `stalled_periods` counts whole
+  unexcused periods.
+- The clock and the debugger check are injectable (`WatchdogConfig::clock`,
+  `debugger`), so the thread tests run the real watchdog on a fake unbiased
+  clock with a faked debugger; the waits between samples stay real.
+
+**Why.** The spec asks for 5 periods of 1 s and for an injected hang's dump
+within 6 s of the hang's start. With samples once a second at a phase
+unrelated to the hang, the fifth whole period after the last progress ends
+up to 6 s after the hang began, before the dump is written, so the 6 s
+budget would be missed in a sixth of the runs; counting from the last
+observed progress with quarter-period samples keeps the rule (no hang
+before 5 s without progress) and the budget. Four wakes a second of a
+thread that reads a few atomics is no measurable cost.
+
+**Tests.** `crash_unit.*` (every platform, TSan in WSL): the detector on a
+fake clock (5 periods declare; 4.75 s do not; one hang per episode, a second
+episode after progress; the periods start at the last progress; Modal,
+Suspended, the heartbeat and a debugger each prevent a hang and an excuse
+restarts the count; a slow boot under 30 s; an hour of system sleep during
+which the unbiased clock stands still; the in-driver label; Disarm), and
+the watchdog thread on a fake clock (one dump per episode, the episode's
+end, no dump under each excuse or a faked debugger, a slow boot and sleep,
+the stall label, no judging after the deadline starts) and on the real
+clock (the boot budget, then a hang after 5 periods of 10 ms).
+
+## ADR-105 The in-driver flag, the heartbeat and the shutdown deadline (2026-11-10)
+
+**Decision.**
+- The in-driver flag is one process-wide atomic in se_platform
+  (se_platform/driver_wait.h: `DriverWaitScope`, `DriverWaitFlag()`), set
+  by main only, with scopes that nest. It is raised around
+  SDL_WaitForGPUSwapchain with SDL_AcquireGPUSwapchainTexture and around
+  the submit that presents (FrameRecorder), the upload and readback fence
+  waits (GpuResources, Renderer2D), SDL_WaitForGPUIdle (GpuDevice), and in
+  the FramePacer around every frame-latency, fence and swapchain wait it
+  makes through its PresentPort. It is a WatchdogInputs field
+  (`in_driver`), so a test passes its own. A hang found inside one is
+  labelled: "hang N: GPU or compositor stall, main in an SDL_GPU or pacer
+  wait for X s at tick T", in the log and the dump's reason. The flag never
+  excuses a hang. It lives in se_platform because both se_render and
+  se_runtime raise it and se_crash only reads the pointer it is given.
+- The heartbeat is raised only by `App::KnownLongWork(what)`, an RAII
+  `HeartbeatScope` (se_runtime/heartbeat.h) that nests; the App counts the
+  scopes and logs the longest at shutdown ("known long work (the
+  watchdog's heartbeat): N scopes, the longest 'what' X ms"). The runtime raises it around the recovery hook at
+  session end (WM_QUERYENDSESSION, SDL_EVENT_TERMINATING); M10's large
+  synchronous loads and blocking saves are its other intended callers.
+  Nothing raises it for frames, uploads or device recreation: a hang inside
+  known long work is not declared, so the scope must stay narrow.
+- When the shutdown deadline starts (the quit drain is over) the watchdog
+  stops judging hangs (`HangDetector::Disarm`): the deadline's own dump and
+  termination 5 s later own the end of the process, and a slow teardown
+  would otherwise get a hang dump at 5 s and a deadline dump at the same
+  moment. The deadline itself is unchanged (M4 integration), as is the
+  Release builds' fast exit after the final flush.
+- Test hooks (test builds): `--hang-test after-ticks:N[:for-ms:MS]
+  [:in-driver]` appends a system, HangTest, to the end of the game's
+  Cleanup phase through a wrapped GameModule (se_runtime/src/hang_test.h),
+  which at tick N loops in 1 ms sleeps forever or for MS milliseconds, with
+  in-driver inside a DriverWaitScope; main's breadcrumb then shows tick N,
+  phase Cleanup and HangTest's system id. `--watchdog-period-ms MS` (4 to
+  60000) shortens the hang period for the headless App tests.
+
+**Why.** The spec names the waits to flag and the label, not where the
+flag lives; one atomic that main alone writes is what the design's data
+flow allows the watchdog to read. The in-driver variant of the hang hook is
+a stand-in for a real GPU or compositor stall, which a test cannot cause on
+demand; it checks the label's path from the flag to the log and the dump,
+while the call sites are covered by `pacing.Every wait of the pacer raises
+the in-driver flag` (the fake port counts waits made without it) and by
+review. A deadline that dumps and a hang rule that dumps the same stuck
+teardown would leave two dumps of one event.
+
+**Tests.** `platform.A hang in a tick is declared once and ends when main
+runs again` (headless App, 50 ms period, a 600 ms HangTest loop, with and
+without in-driver: one hang, the dump failing softly without crash
+capture, the episode's end), `platform.Known long work raises the heartbeat
+and no hang is declared` (a 500 ms stall in a frame with and without the
+heartbeat), `crash_unit.After the shutdown deadline starts no hang is
+judged`, and the desktop tests of ADR-106.
+
+## ADR-106 The session header and Play-start streams; replays from a dump; the teardown gate (2026-11-10)
+
+**Decision.**
+- Two dump-stream kinds and stream types: kind 6, the session header
+  (`crash::StreamType::kSessionHeader` 0x53450005), and kind 7, bytes
+  (`kPlayStartBytes` 0x53450006). The session header is one 512-byte
+  `SessionHeaderRecord` (se_core/dump_stream.h pins it): a seqlock stamp,
+  the session count, seed, scene hash (the replay header's hash of the
+  start bytes), math hash, CPU features, start tick, the InputFrame ring
+  index of the start tick's frame, the newest published tick and its hash,
+  the tick rate, and text fields for the module, build, platform, compiler
+  and the scene path relative to the content root. `SessionHeaderStream`
+  (se_core/session_header.h) writes it word by word with relaxed atomics
+  between an odd and an even stamp, like InputFrameRing. One instance per
+  process (`integration::DumpSessionHeader()`) is registered with the other
+  streams; the App begins it at boot step 10 from the same ReplayHeader a
+  `--record` replay gets (GameSetup gains `scene`; rampage sets it) and
+  publishes the last tick's hash after each frame's ticks.
+- `crash::UnregisterStream(type)` withdraws a stream: crashpad cannot
+  unlink a user stream, so its entry is replaced (UpdateUserDataMinidumpStream)
+  by one with no memory, which the handler skips, and kept for the type's
+  next registration; the stub releases the type. A dump in progress has
+  suspended every thread, so a withdrawal is seen whole or not at all.
+  `integration::PlayStartStream` is M10's hook: `Attach(bytes)` when Play
+  starts copies the bytes behind a kind-7 header ("play-start") and
+  registers them, `Detach()` when Play stops (or the destructor) withdraws
+  and frees them; the integration step wires it to the editor.
+- `se_replay --from-dump DUMP [--root DIR] [--hash-out FILE]` reads the
+  dump with a C++ reader of the same layout (tools/se_replay/
+  dump_session.h: the minidump directory, the session header, the ring's
+  complete frames from the session's first, main's breadcrumb in slot 0)
+  and replays the session headless with the rampage module: the scene from
+  `--root` (default the repository) must hash as the dump's did, the seed
+  and frames come from the dump. When the dump's last published tick is
+  before main's breadcrumb tick, main was inside that tick (a hang or a
+  crash in it) and the replay runs the ticks before it; otherwise the tick
+  had finished and the replay runs it too. The published hash is checked;
+  the tool prints the tick reached and the last hashes and writes them all
+  with `--hash-out`. Only rampage sessions starting at tick 1 at 120 Hz
+  replay; a session longer than the ring's 60 s cannot (its first frames
+  are gone) and says so; editor sessions with Play-start bytes are the
+  integration's. read_dump.py decodes kinds 6 and 7 (the bytes as base64
+  in `--json`).
+- The teardown gate: `tests/platform/support/test_app.cc` measures every
+  App test's SDL_AppQuit and fails the run (it returns kSlowTeardown) when
+  it took 2 s or more; the App logs "teardown took X ms" after every
+  shutdown, which the rampage hang test also gates.
+
+**Why.** The spec's session header is "what a replay needs": the replay
+header's fields already say that for `--record` files, so the stream
+carries the same values, plus the first frame's index, because the ring is
+one per process and earlier Apps in a test process leave frames in it, and
+the newest tick hash, so a replay from a dump can prove it reached the same
+state rather than only the same tick. Freeing the Play-start bytes at Stop
+needs a withdrawal crashpad does not have; a zero-size entry is what its
+handler already skips. A C++ reader keeps se_replay free of a JSON parser
+and of Python at replay time; read_dump.py stays the oracle of the tests.
+
+**Tests.** `crash.rampage_hang` (desktop): `--hang-test after-ticks:240`
+gives one dump 5.30 s after the hang's start (at most 6 s), decoded by
+read_dump.py with no problems: the exception on the watchdog thread, the
+reason, main's breadcrumb at tick 240 in HangTest, the session header and
+the ring's 240 frames; `se_replay --from-dump` reaches tick 240 and matches
+tick 239's hash. `crash.rampage_driver_stall` (desktop): a 6.5 s stall in a
+driver wait is labelled, dumped once, ends after about 6.3 s and rampage
+quits with a teardown under 2 s. `replay_unit.*` (every platform):
+synthetic minidumps from a headless rampage session through
+ReadDumpedSession and ReplayDumpedRampage (inside and after a tick, a
+wrong hash and a changed scene, a wrapped ring, torn slots, a session not
+begun). `The session header is a kind-6 dump stream` and `A reader
+thread never takes a torn session header` (se_tests; TSan in WSL),
+`platform.The app begins the session header and publishes its ticks`,
+`platform.The Play-start bytes are a dump stream while they are attached`,
+`crash_unit.A withdrawn stream type can be registered again`,
+`minidump.read_dump` (kinds 6 and 7), and `platform.Every app test tears
+down in under 2 s`.

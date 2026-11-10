@@ -36,10 +36,12 @@
 #include "se_core/jobs.h"
 #include "se_core/log.h"
 #include "se_core/profile.h"
+#include "se_core/session_header.h"
 #include "se_core/thread_role.h"
 #include "se_core/time.h"
 #include "se_core/world.h"
 #include "se_platform/display_output.h"
+#include "se_platform/driver_wait.h"
 #include "se_platform/fatal.h"
 #include "se_platform/fs.h"
 #include "se_platform/fs_faults.h"
@@ -61,6 +63,7 @@
 #include "se_runtime/app_config.h"
 #include "se_runtime/audio_bridge.h"
 #include "se_runtime/frame_pacer.h"
+#include "se_runtime/heartbeat.h"
 #include "se_runtime/input_service.h"
 #include "se_runtime/integration.h"
 #include "se_runtime/lifecycle.h"
@@ -76,6 +79,7 @@
 #include "se_sim/session_log.h"
 #include "se_sim/sim_driver.h"
 #include "src/game_hook.h"
+#include "src/hang_test.h"
 
 namespace se {
 
@@ -355,6 +359,8 @@ std::expected<void, Error> App::Boot() {
   inputs.modal = &modal_flag_;
   inputs.suspended = &suspended_flag_;
   inputs.heartbeat = &heartbeat_flag_;
+  // SDL_GPU and pacer waits label a hang a GPU or compositor stall (M12).
+  inputs.in_driver = &DriverWaitFlag();
   integration::VblankStart vblank;
   vblank.enabled = window_ != nullptr;
   vblank.monitor = monitor_;
@@ -482,9 +488,10 @@ std::expected<void, Error> App::StartGame() {
 #else
   input_config.key_source = EdgeSource::kWinMessage;
 #endif
-  game_ = std::make_unique<GameRuntime>(*setup_.module, env, pool_config,
-                                        std::move(*map), input_config,
-                                        audio_.get());
+  // --hang-test (test builds): the module with the HangTest system (M12).
+  game_ = std::make_unique<GameRuntime>(
+      *HangTestModule(setup_.module, config_.hang_test), env, pool_config,
+      std::move(*map), input_config, audio_.get());
   // Every latched InputFrame goes into the process's ring, a dump stream.
   game_->driver.AttachInputRing(&integration::DumpInputRing());
   if (setup_.configure) {
@@ -507,14 +514,29 @@ std::expected<void, Error> App::StartGame() {
                 std::format("the start state '{}' could not be pushed", start));
   }
   // --record: every tick's InputFrame (edges and their sources included)
-  // and hash, written at shutdown (M8).
+  // and hash, written at shutdown (M8). The session header (M12) carries
+  // the same header for replays from a dump.
+  std::vector<std::byte> start_bytes;
+  if (setup_.replay_start) start_bytes = setup_.replay_start(paths_);
+  const ReplayHeader replay_header =
+      MakeReplayHeader(start_bytes, setup_.seed, setup_.tick_rate);
   if (!config_.record_path.empty()) {
-    std::vector<std::byte> start_bytes;
-    if (setup_.replay_start) start_bytes = setup_.replay_start(paths_);
-    game_->recorder.Begin(
-        MakeReplayHeader(start_bytes, setup_.seed, setup_.tick_rate),
-        start_bytes);
+    game_->recorder.Begin(replay_header, start_bytes);
   }
+  SessionHeaderInfo session;
+  session.module = setup_.module->name;
+  session.scene = setup_.scene;
+  session.scene_hash = replay_header.scene_hash;
+  session.seed = setup_.seed;
+  session.tick_rate = setup_.tick_rate;
+  session.build = replay_header.build;
+  session.platform = replay_header.platform;
+  session.compiler = replay_header.compiler;
+  session.math_hash = replay_header.math_hash;
+  session.cpu_features = replay_header.cpu_features;
+  session.start_tick = game_->driver.NextTick();
+  session.first_frame = integration::DumpInputRing().Head();
+  integration::DumpSessionHeader().Begin(session);
   // The start state's scope requests its assets now; no tick runs until
   // they are resident (M9).
   game_->driver.SetTickGate(assets_.get());
@@ -886,11 +908,14 @@ SDL_AppResult App::HandleEvent(const SDL_Event& event) {
     case SDL_EVENT_QUIT:
       quit_.Request(QuitReason::kQuitEvent);
       break;
-    case SDL_EVENT_TERMINATING:
+    case SDL_EVENT_TERMINATING: {
       SE_LOG_WARN("SDL_EVENT_TERMINATING: running the recovery hook");
+      // A blocking save at session end: known long work (M12).
+      const HeartbeatScope beat = KnownLongWork("recovery at TERMINATING");
       quit_.RequestImmediate(QuitReason::kTerminating);
       std::fflush(stderr);
       break;
+    }
     case SDL_EVENT_LOW_MEMORY:
       ++low_memory_events_;
       SE_LOG_WARN("SDL_EVENT_LOW_MEMORY");
@@ -1288,6 +1313,12 @@ SDL_AppResult App::Iterate() {
       static_cast<double>(SDL_GetTicksNS() - ticks_start) * kNsToSec;
   // The assets' TickGate may have stopped the frame's ticks early.
   const auto ran = static_cast<int>(game_->driver.FrameResults().size());
+  if (ran > 0) {
+    // The session header's newest hash (M12: se_replay --from-dump checks
+    // it).
+    const TickResult& last = game_->driver.FrameResults().back();
+    integration::DumpSessionHeader().PublishTick(last.tick, last.hash);
+  }
   ticks_run_ += static_cast<std::uint64_t>(ran);
   for (int i = 0; i < ran; ++i) {
     costs_.AddTick(ticks_sec / ran);
@@ -1498,6 +1529,13 @@ SDL_AppResult App::Shutdown(SDL_AppResult result) {
   if (device_recoveries_ > 0) {
     SE_LOG_INFO("device losses recovered: {}", device_recoveries_);
   }
+  if (long_work_.scopes > 0) {
+    SE_LOG_INFO(
+        "known long work (the watchdog's heartbeat): {} scopes, the longest "
+        "'{}' {:.1f} ms",
+        long_work_.scopes, long_work_.longest,
+        static_cast<double>(long_work_.longest_ns) * 1e-6);
+  }
   if (game_) {
     const AudioBridgeStats& sound = game_->audio.Stats();
     SE_LOG_INFO(
@@ -1518,7 +1556,11 @@ SDL_AppResult App::Shutdown(SDL_AppResult result) {
   // The renderer's totals and leak check, while logging still runs; the
   // teardown below only destroys it.
   if (renderer_) renderer_->Shutdown();
+  const std::uint64_t teardown_start = SDL_GetTicksNS();
   Teardown();
+  // CI keeps every teardown under 2 s (M12; the callback tests gate it).
+  SE_LOG_INFO("teardown took {:.1f} ms",
+              static_cast<double>(SDL_GetTicksNS() - teardown_start) * 1e-6);
   if (lane_stats_) AssetRuntime::LogLaneStopped(*lane_stats_);
   if (replay_submitted_) {
     if (lane_durable_failures_ > replay_failures_before_) {
@@ -1678,9 +1720,15 @@ SDL_AppResult App::OnCallbackFault(std::string_view where,
   return SDL_APP_FAILURE;
 }
 
+crash::WatchdogStats App::WatchdogStats() const noexcept {
+  return helpers_ ? helpers_->WatchdogStats() : crash::WatchdogStats{};
+}
+
 void App::OnSessionEnd(SessionEnd kind) noexcept {
   // Synchronous: the recovery hook runs before the window procedure
-  // returns to Windows.
+  // returns to Windows. A blocking save at session end: known long work
+  // (M12).
+  const HeartbeatScope beat = KnownLongWork("session-end recovery");
   quit_.RequestImmediate(QuitReason::kSessionEnd);
   std::fflush(stderr);
   static_cast<void>(kind);

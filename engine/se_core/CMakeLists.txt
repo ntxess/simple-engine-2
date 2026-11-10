@@ -35,6 +35,7 @@ se_add_module(se_core KIND STATIC
     src/profile.cc
     src/profile_clock.cc
     src/schedule.cc
+    src/session_header.cc
     src/sim_clock.cc
     src/snapshot_channel.cc
     src/thread_registry.cc

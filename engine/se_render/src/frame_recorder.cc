@@ -22,6 +22,7 @@
 
 #include "se_core/assert.h"
 #include "se_core/error.h"
+#include "se_platform/driver_wait.h"
 #include "se_render/frame_faults.h"
 #include "se_render/gpu_device.h"
 #include "se_render/gpu_resources.h"
@@ -209,10 +210,16 @@ SDL_GPUTexture* FrameRecorder::AcquireSwapchain() noexcept {
     return nullptr;
   }
   const std::uint64_t start = SDL_GetTicksNS();
-  // A failed wait still lets the acquire report NULL or an error.
-  SDL_WaitForGPUSwapchain(device_->Native(), window);
-  if (SDL_AcquireGPUSwapchainTexture(commands_, window, &swapchain_, &width_,
-                                     &height_)) {
+  bool acquired = false;
+  {
+    // The watchdog labels a hang in here a GPU or compositor stall (M12).
+    const DriverWaitScope in_driver;
+    // A failed wait still lets the acquire report NULL or an error.
+    SDL_WaitForGPUSwapchain(device_->Native(), window);
+    acquired = SDL_AcquireGPUSwapchainTexture(commands_, window, &swapchain_,
+                                              &width_, &height_);
+  }
+  if (acquired) {
     record_.swapchain_acquired = true;
   } else {
     ++stats.acquire_failures;
@@ -238,7 +245,12 @@ bool FrameRecorder::Submit() noexcept {
     const std::uint64_t start = SDL_GetTicksNS();
     // Always submit: cancelling after an acquire is forbidden, and a
     // buffer without an acquired texture submits as an offscreen frame.
-    SDL_GPUFence* fence = SDL_SubmitGPUCommandBufferAndAcquireFence(commands_);
+    SDL_GPUFence* fence = nullptr;
+    {
+      // The present (M12: the watchdog's GPU or compositor stall label).
+      const DriverWaitScope in_driver;
+      fence = SDL_SubmitGPUCommandBufferAndAcquireFence(commands_);
+    }
     commands_ = nullptr;
     record_.submit_ns = SDL_GetTicksNS() - start;
     resources_->CountFence(fence);

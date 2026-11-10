@@ -188,6 +188,43 @@ std::expected<std::int64_t, Error> ParseAfterTicks(std::string_view option,
       std::format("{}: bad value '{}' (expected after-ticks:N)", option, text));
 }
 
+// "after-ticks:N[:for-ms:MS][:in-driver]" (--hang-test, M12).
+std::expected<HangTestHook, Error> ParseHangTest(std::string_view text) {
+  const auto bad = [text] {
+    return Bad(
+        std::format("--hang-test: bad value '{}' (expected "
+                    "after-ticks:N[:for-ms:MS][:in-driver])",
+                    text));
+  };
+  constexpr std::string_view kPrefix = "after-ticks:";
+  if (!text.starts_with(kPrefix)) return bad();
+  std::string_view rest = text.substr(kPrefix.size());
+  const auto next = [&rest] {
+    const std::size_t colon = rest.find(':');
+    const std::string_view part = rest.substr(0, colon);
+    rest = colon == std::string_view::npos ? std::string_view()
+                                           : rest.substr(colon + 1);
+    return part;
+  };
+  HangTestHook hook;
+  const auto ticks = ParseNumber<std::int64_t>(next());
+  if (!ticks || *ticks < 1) return bad();
+  hook.after_ticks = *ticks;
+  while (!rest.empty()) {
+    const std::string_view part = next();
+    if (part == "in-driver") {
+      hook.in_driver = true;
+    } else if (part == "for-ms") {
+      const auto ms = ParseNumber<std::uint32_t>(next());
+      if (!ms || *ms == 0) return bad();
+      hook.for_ms = *ms;
+    } else {
+      return bad();
+    }
+  }
+  return hook;
+}
+
 // NAME@FRAME[=FILE].
 std::expected<TextureReloadHook, Error> ParseReload(std::string_view text) {
   const std::size_t at = text.find('@');
@@ -453,6 +490,27 @@ std::expected<AppConfig, Error> ParseAppConfig(
       } else {
         config.dump_test_after_ticks = *ticks;
       }
+    } else if (option == "--hang-test") {
+      if (auto ok = NeedTestHooks(option); !ok) {
+        return std::unexpected(ok.error());
+      }
+      auto value = reader.Value(option);
+      if (!value) return std::unexpected(value.error());
+      auto hook = ParseHangTest(*value);
+      if (!hook) return std::unexpected(hook.error());
+      config.hang_test = *hook;
+    } else if (option == "--watchdog-period-ms") {
+      if (auto ok = NeedTestHooks(option); !ok) {
+        return std::unexpected(ok.error());
+      }
+      auto value = reader.Value(option);
+      if (!value) return std::unexpected(value.error());
+      const auto ms = ParseNumber<std::uint32_t>(*value);
+      if (!ms || *ms < 4 || *ms > 60'000) {
+        return Bad(std::format(
+            "--watchdog-period-ms: bad value '{}' (4 to 60000)", *value));
+      }
+      config.watchdog_period_ms = *ms;
     } else if (option == "--inject-frame-fault") {
       if (auto ok = NeedTestHooks(option); !ok) {
         return std::unexpected(ok.error());

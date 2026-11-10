@@ -109,6 +109,41 @@ TEST_CASE("The M9 options parse", "[app_config]") {
   CHECK_FALSE(hooks->readbacks[1].by_tick);
 }
 
+TEST_CASE("The M12 hang hooks parse", "[app_config]") {
+  auto forever = Parse({"--hang-test", "after-ticks:240"});
+  if (!kRuntimeTestHooks) {
+    CHECK_FALSE(forever);
+    CHECK_FALSE(Parse({"--watchdog-period-ms", "50"}));
+    return;
+  }
+  REQUIRE(forever);
+  REQUIRE(forever->hang_test.after_ticks == 240);
+  REQUIRE(forever->hang_test.for_ms == 0);
+  CHECK_FALSE(forever->hang_test.in_driver);
+  auto stall = Parse({"--hang-test", "after-ticks:20:for-ms:600:in-driver",
+                      "--watchdog-period-ms", "50"});
+  REQUIRE(stall);
+  REQUIRE(stall->hang_test.after_ticks == 20);
+  REQUIRE(stall->hang_test.for_ms == 600);
+  CHECK(stall->hang_test.in_driver);
+  REQUIRE(stall->watchdog_period_ms == 50);
+  auto driver_only = Parse({"--hang-test", "after-ticks:5:in-driver"});
+  REQUIRE(driver_only);
+  CHECK(driver_only->hang_test.in_driver);
+  REQUIRE(driver_only->hang_test.for_ms == 0);
+  CHECK_FALSE(Parse({"--hang-test", "240"}));
+  CHECK_FALSE(Parse({"--hang-test", "after-ticks:0"}));
+  CHECK_FALSE(Parse({"--hang-test", "after-ticks:5:for-ms"}));
+  CHECK_FALSE(Parse({"--hang-test", "after-ticks:5:for-ms:0"}));
+  CHECK_FALSE(Parse({"--hang-test", "after-ticks:5:sideways"}));
+  CHECK_FALSE(Parse({"--watchdog-period-ms", "2"}));
+  CHECK_FALSE(Parse({"--watchdog-period-ms", "fast"}));
+  auto defaults = Parse({});
+  REQUIRE(defaults);
+  REQUIRE(defaults->hang_test.after_ticks == 0);
+  REQUIRE(defaults->watchdog_period_ms == 0);
+}
+
 TEST_CASE("The frame clock follows SDL's clock and the display period",
           "[frame_clock]") {
   FrameClockSource source;

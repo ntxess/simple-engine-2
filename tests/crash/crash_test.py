@@ -14,7 +14,9 @@ Scenarios (CTest crash.<scenario>):
       a noexcept function
   dump_without_crash
       the probe's worker thread asks for two dumps and the probe exits 0;
-      the second shows the log records and breadcrumb written in between
+      the second shows the log records and breadcrumb written in between;
+      the first holds the Play-start bytes stream, which the probe
+      withdraws (UnregisterStream, M12) before the second
   missing_handler, bad_handler
       the handler executable does not exist, or is not an executable: Start
       fails with an Error and leaves the fault handlers as they were, the
@@ -27,6 +29,7 @@ usage:
 """
 
 import argparse
+import base64
 import json
 import pathlib
 import re
@@ -39,6 +42,8 @@ EXCEPTION_ACCESS_VIOLATION = 0xC0000005
 EXCEPTION_STACK_OVERFLOW = 0xC00000FD
 STATUS_FATAL_APP_EXIT = 0x40000015  # crashpad's abort() handler
 SIMULATED = 0x0517A7ED  # crashpad's DumpWithoutCrash
+# The probe's Play-start bytes in its first dump (crash_probe.cc).
+PLAY_START_BYTES = b"probe play-start bytes"
 
 CRASHES = {
     "access_violation": ("access-violation", EXCEPTION_ACCESS_VIOLATION),
@@ -236,8 +241,24 @@ def check_flight(failures, dump):
                    "flight recorder bytes")
 
 
+def check_play_start(failures, dump, present):
+    """The Play-start bytes of the first dump (M12), withdrawn by the second."""
+    play = stream(dump, 0x53450006)
+    if not present:
+        failures.check(play is None, "the withdrawn Play-start stream is in "
+                       "the dump")
+        return
+    if not failures.check(play is not None, "no Play-start bytes stream"):
+        return
+    failures.equal((play["kind"], play["record_size"], play["name"]),
+                   (7, 1, "play-start"), "Play-start stream header")
+    record = play["records"][0] if play["records"] else {}
+    failures.equal(base64.b64decode(record.get("base64", "")),
+                   PLAY_START_BYTES, "Play-start bytes")
+
+
 def check_dump(failures, dump, ids, scenario, code, thread, main_tick,
-               main_head):
+               main_head, extra_types=()):
     failures.equal(dump["problems"], [], "read_dump problems")
     exception = dump["exception"]
     if failures.check(exception is not None, "no exception record"):
@@ -261,8 +282,9 @@ def check_dump(failures, dump, ids, scenario, code, thread, main_tick,
     check_input_ring(failures, dump, ids)
     check_flight(failures, dump)
     types = sorted(s["type"] for s in dump["se_streams"])
-    failures.equal(types, [0x53450001, 0x53450002, 0x53450004, 0x53450100,
-                           0x53450101], "first-party stream types")
+    failures.equal(types, sorted([0x53450001, 0x53450002, 0x53450004,
+                                  0x53450100, 0x53450101, *extra_types]),
+                   "first-party stream types")
 
 
 def run_crash(args, failures, scenario):
@@ -319,11 +341,13 @@ def run_dump_without_crash(args, failures):
                  for d in decoded}
     failures.equal(sorted(by_reason, key=str),
                    ["probe dump 1", "probe dump 2"], "dump reasons")
-    for reason, tick, head in (("probe dump 1", 240, 80),
-                               ("probe dump 2", 241, 90)):
+    for reason, tick, head, play in (("probe dump 1", 240, 80, True),
+                                     ("probe dump 2", 241, 90, False)):
         if reason in by_reason:
             check_dump(failures, by_reason[reason], ids,
-                       "dump-without-crash", SIMULATED, "worker", tick, head)
+                       "dump-without-crash", SIMULATED, "worker", tick, head,
+                       (0x53450006,) if play else ())
+            check_play_start(failures, by_reason[reason], play)
 
 
 def run_start_failure(args, failures, handler, message):

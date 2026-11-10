@@ -25,6 +25,10 @@ namespace se::crash::internal {
 // register the stream after all.
 void ReleaseStream(StreamType type) noexcept;
 
+// Releases a reserved type for UnregisterStream: kInvalidArgument when
+// |type| is outside the first-party range or not reserved. Thread-safe.
+[[nodiscard]] std::expected<void, Error> UnreserveStream(StreamType type);
+
 // Installs the terminate handler (terminate_handler.cc): it records why
 // std::terminate was called with RecordTerminateReason, then calls the
 // handler that was installed before, or std::abort, which the crash handler

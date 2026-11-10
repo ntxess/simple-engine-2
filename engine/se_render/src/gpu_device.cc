@@ -15,6 +15,7 @@
 #include "se_core/error.h"
 #include "se_core/log.h"
 #include "se_core/thread_role.h"
+#include "se_platform/driver_wait.h"
 #include "src/gpu_assert.h"
 
 namespace se {
@@ -134,6 +135,7 @@ void GpuDevice::ReleaseWindow() noexcept {
 void GpuDevice::WaitForIdle() noexcept {
   if (device_ == nullptr) return;
   SE_ASSERT_GPU_THREAD();
+  const DriverWaitScope in_driver;
   SDL_WaitForGPUIdle(device_);
 }
 
