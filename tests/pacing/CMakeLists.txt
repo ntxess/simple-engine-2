@@ -43,6 +43,13 @@ target_include_directories(se_pacing_tests PRIVATE
 target_compile_definitions(se_pacing_tests PRIVATE
   SE_TEST_OUT_DIR="${_se_pacing_out}"
   SE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+# paced_misses reports, rather than requires, the share of presents the
+# latency wait resolves in sanitizer builds (ADR-091).
+if(SE_SANITIZER STREQUAL "")
+  target_compile_definitions(se_pacing_tests PRIVATE SE_TEST_SANITIZED=0)
+else()
+  target_compile_definitions(se_pacing_tests PRIVATE SE_TEST_SANITIZED=1)
+endif()
 
 catch_discover_tests(se_pacing_tests
   TEST_SPEC "~[desktop]"
