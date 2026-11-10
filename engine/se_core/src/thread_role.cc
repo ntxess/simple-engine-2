@@ -19,6 +19,8 @@ namespace {
 std::atomic<std::thread::id> g_main_thread_id{};
 thread_local ThreadRole t_role = ThreadRole::kLibrary;
 thread_local int t_inline_owner_depth = 0;
+// SimOwnerScope depth on this thread (the sim thread).
+thread_local int t_sim_owner_depth = 0;
 
 }  // namespace
 
@@ -90,8 +92,26 @@ bool InlineOwnerScope::HeldOnThisThread() noexcept {
   return t_inline_owner_depth > 0;
 }
 
+SimOwnerScope::SimOwnerScope() noexcept SE_NO_THREAD_SAFETY_ANALYSIS {
+  SE_ASSERT_MSG(CurrentRole() == ThreadRole::kSim,
+                "SimOwnerScope outside the sim thread");
+  ++t_sim_owner_depth;
+}
+
+SimOwnerScope::~SimOwnerScope() SE_NO_THREAD_SAFETY_ANALYSIS {
+  --t_sim_owner_depth;
+}
+
+bool SimOwnerScope::HeldOnThisThread() noexcept {
+  return t_sim_owner_depth > 0;
+}
+
 void AssertMainThread() noexcept {
   SE_ASSERT_MSG(IsMainThread(), "not on the main thread");
+}
+
+void AssertSimThread() noexcept {
+  SE_ASSERT_MSG(CurrentRole() == ThreadRole::kSim, "not on the sim thread");
 }
 
 }  // namespace se

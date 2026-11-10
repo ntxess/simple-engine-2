@@ -2472,6 +2472,142 @@ named `*_glaze.cc` besides reflect_glaze.h.
 **Why.** The design gives the lane glaze parsing; one named unit per module
 keeps glaze's compile cost (ADR-010) contained and visible to the check.
 
+## ADR-083 SimThread: sessions built and destroyed on the sim thread, M17a's commands, the tick as a fault boundary (2026-11-09)
+
+**Context.** M17a's sim thread (docs/design/dedicated-driver.md "Threads",
+"Lifecycle") owns every running World while it runs and calls
+SimDriver::RunTick unchanged on absolute deadlines. The App does not use
+it before M17b; M17a proves it headless.
+
+**Decision.**
+- `se_sim/sim_thread.h`: `SimThread`, one thread (role kSim, OS name
+  "sim", HighQoS) started through se::StartThread. It holds g_sim_owner for
+  its whole body through the new `SimOwnerScope` (se_core/thread_role.h:
+  the constructor asserts the role kSim; `AssertSimThread()` gives the
+  analysis the capability in code the thread calls back into).
+- What it runs is a `SimSession` (the GameStateStack, SimDriver,
+  SessionLog, ReplayRecorder and AudioSink of one session, plus two hooks:
+  `RecordedFrame(tick)` for recorded input and `FillRender(slot)` for the
+  snapshot's render part), made by a `SimSessionFactory` on the sim thread
+  at StartGame and destroyed there (Quit, StartGame again, a fault, the
+  thread's end): Worlds live and die on their owner thread. se_sim stays
+  free of se_render_core: the render part of a slot is the session's.
+- Commands: an SpscQueue of 256 move-only `SimCommand`s, numbered by
+  `Send` (1, 2, ...), with the Doorbell rung after each push. They apply
+  at tick boundaries in order: StartGame, Pause, Resume (the grid is
+  re-based so the next tick is due now; the epoch changes), Step{n} (only
+  while paused: exactly n ticks at once, then paused again), SetTimeScale,
+  Suspend, Quit, ApplySessionEntry (M2's SessionLog::Enqueue against the
+  next tick). Every snapshot header acks the last applied sequence, and
+  `AckedSeq()` reads it atomically.
+- Input: each tick's InputFrame is the session's recorded frame when it
+  has one (replays: the inline-against-threaded hash checks), otherwise
+  the InputFolder's latch of the InputEvent ring at the tick's own
+  deadline L_k (ADR-084).
+- Publishing: after each tick the reliable section gets a TickRecord
+  (session, tick, hash, Worlds stepped); session events (started, paused,
+  resumed, stepped, suspended, dilated, faulted, ended, start failed) are
+  added as they happen. A burst of catch-up ticks publishes the render part
+  only for its last tick. With no free slot the sim skips the publish
+  (counted in the header's dropped publishes) and keeps the deltas; when
+  it goes idle (paused, suspended, no session) with deltas pending it
+  publishes a reliable-only slot first, looking again every 1 ms while no
+  slot is free, so a paused session's last records and events still
+  arrive. Waiting while idle is the Doorbell; while running, PacedClock's
+  WaitForDeadline.
+- Faults: `sim_fault_boundary.cc` is the one file of se_sim that catches
+  (marked `// se-fault-boundary`; it joins ADR-006's list): RunTick runs
+  inside its try, a throw ends the tick, the SimThread destroys the session
+  on its own thread, posts the exception and a FaultRecord (role, the
+  thread's breadcrumb, tick, session, what()) to its FaultBox, publishes
+  the faulted event and waits for Quit.
+- Tests (tests/sim/sim_thread_test.cc, label unit, TSan in WSL): the
+  threaded driver's per-tick hashes equal the inline ones at W = 0 on the
+  kernel golden (determinism_kernel, with its logged edits through the
+  replay's SessionLog) and on rampage's sandbox golden
+  (determinism_rampage) and the three reference scenarios (effects,
+  patrol, stress) over 3600 ticks, on a ManualClock; Pause, Step{5} (five
+  ticks exactly), Resume and Quit; a throwing tick is contained. W = 1 and
+  W = 3 are checks for M14 (docs/gates.md).
+- Not built yet (the M17a agent was cut off; the integration finished the
+  thread, not the platform side): se_render_core's SnapshotRenderSource
+  (the newest three slots, tau = F - D', the pair and alpha, per-entity
+  interpolation, starvation and hard cuts), the extraction of a World into
+  a slot's render part (`SimSession::FillRender` is its seam) and
+  bench.snapshot_publish_10k. M17b needs all three before the App can use
+  the threaded driver.
+
+**Why.** A factory run on the sim thread is the simplest way to keep
+"Worlds are created and destroyed by their owner" true without a handover
+protocol; recorded frames make the threaded driver's equality with the
+inline one a pure function of the tick, as the spec asks (live latching
+differs by design).
+
+## ADR-084 PacedClock and the InputFolder (2026-11-09)
+
+**Decision.** (Written by the M17a agent's code, recorded at the
+integration.)
+- `se_sim/paced_clock.h`: deadlines L_k = T0 + (k - k0) * P + phi with
+  P = 1 s / (rate * scale) in integer nanoseconds (120 ticks take exactly
+  one second at scale 1). `WaitForDeadline(k)` sleeps on a WaitClock to
+  L_k minus max(spin floor 0.3 ms, the measured timer overshoot's p99 over
+  256 samples), then spins with the pause instruction; it never returns
+  before L_k unless stopped. `DueTicks` returns at most 8 ticks per burst;
+  more than 250 ms behind, it re-bases T0 so the next tick is due now and
+  counts a dilation. phi moves towards the platform's target by at most
+  0.1 ms per tick, and only when the display period is a whole multiple of
+  dt. Rebase (resume, time scale, dilation) bumps the epoch the snapshot
+  header carries.
+- The system WaitClock is se_os's `PreciseTimer` (a high-resolution
+  waitable timer on Windows; clock_nanosleep(TIMER_ABSTIME) on Linux) and
+  `MonotonicNowNs`, in waits of at most 10 ms so a stop is seen; se_sim
+  reads no clock itself. `ManualClock` drives the clock deterministically
+  in tests (auto-advance, or blocking on another thread's Advance).
+- `se_sim/input_folder.h`: the InputEvent ring (4096, an SpscQueue of
+  trivially copyable events stamped on the engine's monotonic clock at
+  pump time) is folded per tick: every event stamped at or before L_k
+  (M8's placement rule with the sim's own deadlines as window ends),
+  press and release counts saturating at 255 so a tap shorter than a tick
+  is never lost, edges with their sources, axes (the latest wins),
+  ReleaseAll and heartbeats.
+
+**Why.** Absolute deadlines with a measured spin margin are the design's
+answer to timer granularity; a fold against the sim's own deadlines keeps
+the edge-placement rule identical to the inline driver's.
+
+## ADR-085 Snapshot slots and the SnapshotChannel (2026-11-09)
+
+**Decision.** (Written by the M17a agent's code, recorded at the
+integration.)
+- `se_core/snapshot.h`: a slot is a header (session, generation, epoch,
+  tick, anchor L_k + dt, latch L_k, acked command sequence, dropped
+  publishes, tick and build cost, the World hash, the run state, a render
+  flag), trivially copyable 68-byte `RenderItem`s (full entity id and
+  spawn serial, position, rotation, scale, texture key, region, origin,
+  tint, layer, z, teleported/visible/flip bits; the region and origin are
+  SpriteRenderer's floats until M10's atlases give a region index, so not
+  the design's 56 bytes), a sparse entity-index-to-item table per view,
+  up to 4 views (one per drawn World: camera with a cut flag, item and
+  sparse ranges, a stepped flag) and the reliable section (audio cues,
+  session events, scope releases, tick records, an ended session's
+  replay). Everything is reused vectors: a warm slot allocates nothing.
+- `se_core/snapshot_channel.h`: a pool of 8 slots and two SPSC rings of
+  slot indices (published and returned, 16 each, so neither fills), with
+  the design's memory orders: the sim writes a slot, then pushes its index
+  (release); the platform pops it (acquire), reads it through a const
+  `SlotLease` and returns the index after its last read (release); the sim
+  reclaims returned indices (acquire) before reusing a slot.
+  AcquireForWrite returns null when no slot is free; the sim never waits.
+  Debug builds track each slot's owner and assert every transition.
+- `se_core/spsc_queue.h` (move-only values, with a peek), `doorbell.h` (a
+  monotonic sequence with atomic wait, rung by a stop_callback) and
+  `fault_box.h` (exception_ptr, record and replay written, then a release
+  flag; the first post wins) are the other channels.
+
+**Why.** Index rings over a fixed pool give exactly one owner per slot at
+any time with no read-modify-write on shared indices, which the property
+tests (randomized schedules) check.
+
 ## ADR-087 Sounds decode on the background lane into one shared PCM type; the state's scope holds them (2026-11-09)
 
 **Context.** M8 decoded the sound table on main at boot (`App::LoadSounds`,

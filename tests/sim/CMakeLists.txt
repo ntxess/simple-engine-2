@@ -3,8 +3,11 @@
 #
 #   se_sim_tests          Catch2: SpscQueue, Doorbell, FaultBox, the
 #                         PacedClock on a ManualClock (and the real clock,
-#                         [slow]), the InputFolder's placement, and the
-#                         SnapshotChannel and its seeded property runs
+#                         [slow]), the InputFolder's placement, the
+#                         SnapshotChannel and its seeded property runs, and
+#                         the SimThread: inline against threaded hashes on
+#                         the kernel and rampage goldens and scenarios, the
+#                         commands, a faulting tick (ADR-083)
 
 se_add_module(se_sim_tests KIND EXECUTABLE
   SOURCES
@@ -12,6 +15,7 @@ se_add_module(se_sim_tests KIND EXECUTABLE
     fault_box_test.cc
     input_folder_test.cc
     paced_clock_test.cc
+    sim_thread_test.cc
     snapshot_channel_test.cc
     spsc_queue_test.cc
     ../support/tracy_inert_listener.cc
@@ -19,6 +23,8 @@ se_add_module(se_sim_tests KIND EXECUTABLE
     se_core
     se_sim
     se_test_support
+    game_rampage
+    rampage_test_support
     Catch2::Catch2WithMain
   DETERMINISTIC
   TEST)

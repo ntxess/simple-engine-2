@@ -67,6 +67,12 @@ void SetCurrentRole(ThreadRole role) noexcept;
 // treats g_main as held.
 void AssertMainThread() noexcept SE_ASSERT_CAPABILITY(g_main);
 
+// Checks at run time that this is the dedicated sim thread (role kSim, M17a);
+// afterwards the analysis treats g_sim_owner as held, as the thread's
+// SimOwnerScope holds it (code the sim thread calls back into, such as a
+// session factory).
+void AssertSimThread() noexcept SE_ASSERT_CAPABILITY(g_sim_owner);
+
 // Wakes the main thread's event wait. Declared here and defined by
 // se_platform (an SDL user event); test binaries link a null definition.
 void WakeMain() noexcept;
@@ -103,6 +109,22 @@ class SE_SCOPED_CAPABILITY InlineOwnerScope {
 
   InlineOwnerScope(const InlineOwnerScope&) = delete;
   InlineOwnerScope& operator=(const InlineOwnerScope&) = delete;
+};
+
+// Holds g_sim_owner on the dedicated sim thread (M17a, se_sim/sim_thread.h)
+// for the thread's whole body: the constructor asserts that the calling
+// thread's role is kSim (its RoleScope set it). The Worlds the sim thread
+// builds check their owner thread themselves.
+class SE_SCOPED_CAPABILITY SimOwnerScope {
+ public:
+  SimOwnerScope() noexcept SE_ACQUIRE(g_sim_owner);
+  ~SimOwnerScope() SE_RELEASE(g_sim_owner);
+
+  // True while the calling thread is inside a SimOwnerScope.
+  [[nodiscard]] static bool HeldOnThisThread() noexcept;
+
+  SimOwnerScope(const SimOwnerScope&) = delete;
+  SimOwnerScope& operator=(const SimOwnerScope&) = delete;
 };
 
 }  // namespace se
