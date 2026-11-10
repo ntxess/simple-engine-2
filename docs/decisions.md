@@ -2986,6 +2986,24 @@ for cadences other than Locked k <= 2.
   against the mode with one active display; with more than one, it
   requires only that the rate is above 0.6 of the mode (well above SDL's
   misreported 60 Hz, the case ADR-055 was about) and reports the rate.
+- `paced_misses` keeps the latency-wait miss gate (under 1%) everywhere;
+  its present-statistics consistency check (one composition delay for 80%
+  of presents, ADR-072) applies with one active display and is reported
+  with more (71% under ASan with two 165 Hz outputs, the run's misses
+  0.76%). Its "most presents resolved" check counts full-rate frames
+  only: HalfRate frames find the waitable signalled by design, and with
+  two outputs clusters of misses (1.2% over 2 s, presents submitted 0.8-3.3
+  ms early) put the pacer in HalfRate for 4-12 s of a 20 s run, leaving 57%
+  of all presents resolved but about 98% of the full-rate ones. A gated
+  run that ends in such a burst (1% or more missed, or HalfRate for most
+  of it) runs once more and the second run is judged: in 8 alternating
+  runs each, the m7 build and the M8/M9/M17a build missed 0-8 of about
+  3300 presents with the same bursts (one m7 run at 1.23%), so the bursts
+  are the display setup, and a real regression fails both runs.
+- `display_rates` reports, instead of failing, a regular sampler period
+  that disagrees with the mode when more than one display is active (the
+  window's output measured steadily at 148 Hz against its 165 Hz mode,
+  plain VSYNC at 142 Hz); with one display the check stays.
 
 **Why.** The merged M8/M9/M17a matrix (2026-11-10) failed three tests on
 the environment, not the code:
