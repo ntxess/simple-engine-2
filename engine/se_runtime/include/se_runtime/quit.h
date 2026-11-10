@@ -9,7 +9,8 @@
 //   kPending  work is still draining (M9's Durable jobs, M10's prompt and
 //             dialogs); ask again next iterate;
 //   kCancel   the quit is called off (the user cancelled, a Durable save
-//             failed); the app runs on;
+//             failed); the app runs on, and every provider hears it
+//             (QuitCancelled);
 //   kReady    nothing left.
 // ReadyToExit() turns true only after a Poll in which every provider was
 // ready: the drain is over, the next iterate returns SDL_APP_SUCCESS, and
@@ -52,6 +53,9 @@ class QuitProvider {
   virtual ~QuitProvider() = default;
   // Called once per iterate while a quit is pending.
   virtual QuitPoll PollQuit(QuitReason reason) = 0;
+  // Called on every provider when a quit is called off (by any provider's
+  // kCancel), so state kept for that quit starts afresh with the next.
+  virtual void QuitCancelled() {}
   [[nodiscard]] virtual std::string_view Name() const = 0;
 };
 

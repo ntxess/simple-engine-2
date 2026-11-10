@@ -36,4 +36,9 @@ QuitPoll LaneQuitProvider::PollQuit(QuitReason /*reason*/) {
   return QuitPoll::kReady;
 }
 
+void LaneQuitProvider::QuitCancelled() {
+  polling_ = false;
+  waiting_logged_ = false;
+}
+
 }  // namespace se

@@ -133,6 +133,29 @@ class ThrowingJob final : public LaneJob {
   }
 };
 
+// A step that waits until |release| is set (the lane is busy in it).
+class GateJob final : public LaneJob {
+ public:
+  GateJob(std::atomic<bool>* entered, std::atomic<bool>* release)
+      : entered_(entered), release_(release) {}
+  [[nodiscard]] std::string_view Kind() const noexcept override {
+    return "gate";
+  }
+  StepResult Step(LaneContext& /*lane*/) override {
+    entered_->store(true);
+    entered_->notify_all();
+    release_->wait(false);
+    return StepResult::Done();
+  }
+  std::expected<LanePayload, Error> TakeResult() override {
+    return LanePayload(std::monostate{});
+  }
+
+ private:
+  std::atomic<bool>* entered_;
+  std::atomic<bool>* release_;
+};
+
 JobDesc Desc(JobClass job_class, bool durable = false) {
   JobDesc desc;
   desc.job_class = job_class;
@@ -551,6 +574,61 @@ TEST_CASE("Durable saves survive quit on a throttled disk", "[lane][durable]") {
   CHECK(parsed->entities.size() == entities.size());
 }
 
+// A quit provider standing for the user's answer to a prompt.
+class AnswerProvider final : public QuitProvider {
+ public:
+  QuitPoll PollQuit(QuitReason /*reason*/) override {
+    return cancel ? QuitPoll::kCancel : QuitPoll::kReady;
+  }
+  [[nodiscard]] std::string_view Name() const override { return "the user"; }
+  bool cancel = true;
+};
+
+TEST_CASE("A Durable failure between two quits does not cancel the second",
+          "[lane][durable]") {
+  const MainThreadScope main;
+  auto lane = StartLane(TestConfig());
+  LaneQuitProvider provider(*lane);
+  AnswerProvider user;
+  QuitController quit;
+  quit.AddProvider(&provider);
+  quit.AddProvider(&user);
+  // A Durable job holds the lane, so the first quit waits for it ...
+  std::atomic<bool> entered{false};
+  std::atomic<bool> release{false};
+  lane->Submit(Desc(JobClass::kBackground, /*durable=*/true),
+               std::make_unique<GateJob>(&entered, &release));
+  entered.wait(false);
+  // ... and a Durable save behind it will fail (no such directory).
+  SaveRequest save;
+  save.path = fs::Join(ScratchDir("between_quits"), "missing/save.bin");
+  save.revision = 1;
+  save.durable = true;
+  save.bytes = TextBytes("lost");
+  SubmitSave(*lane, std::move(save));
+  // The lane's provider is polled first (pending), then the user calls the
+  // quit off.
+  quit.Request(QuitReason::kRequested);
+  quit.Poll();
+  REQUIRE(quit.Cancellations() == 1);
+  REQUIRE(quit.Blocker() == "the user");
+  REQUIRE_FALSE(quit.Pending());
+  // Between the quits the save fails.
+  release.store(true);
+  release.notify_all();
+  std::vector<LaneCompletion> done;
+  REQUIRE(DrainCount(*lane, done, 2));
+  REQUIRE(lane->DurableFailures() == 1);
+  REQUIRE(lane->DurablePending() == 0);
+  // The second quit finds nothing pending and nothing failed during it.
+  user.cancel = false;
+  quit.Request(QuitReason::kRequested);
+  quit.Poll();
+  CHECK(quit.ReadyToExit());
+  REQUIRE(quit.Cancellations() == 1);
+  lane->Stop();
+}
+
 TEST_CASE("Stop finishes Durable jobs and cancels the others",
           "[lane][durable]") {
   const MainThreadScope main;
@@ -572,6 +650,89 @@ TEST_CASE("Stop finishes Durable jobs and cancels the others",
   REQUIRE(lane->DurableFailures() == 0);
   REQUIRE(lane->Stats().cancelled == 1);
   CHECK(ReadBytes(path) == expected);
+}
+
+TEST_CASE("Stop runs Durable submits still queued on main", "[lane][durable]") {
+  const MainThreadScope main;
+  const std::string dir = ScratchDir("durable_queued");
+  LaneConfig config = TestConfig();
+  // A two-entry request ring, so submits queue on main behind it.
+  config.request_capacity = 2;
+  auto lane = StartLane(config);
+  std::atomic<bool> entered{false};
+  std::atomic<bool> release{false};
+  lane->Submit(Desc(JobClass::kBackground),
+               std::make_unique<GateJob>(&entered, &release));
+  entered.wait(false);
+  // The lane is inside the gate's step: nothing pulls the ring.
+  constexpr int kSaves = 8;
+  for (int i = 0; i < kSaves; ++i) {
+    SaveRequest save;
+    save.path = fs::Join(dir, std::format("save{}.bin", i));
+    save.revision = 1;
+    save.durable = true;
+    save.bytes = PatternBytes(4096, static_cast<std::uint32_t>(i));
+    SubmitSave(*lane, std::move(save));
+  }
+  // Not Durable: cancelled by the stop, wherever it waits.
+  lane->Submit(Desc(JobClass::kBackground), std::make_unique<SlowJob>(5, 1));
+  REQUIRE(lane->Stats().submits_queued >= kSaves - 2);
+  REQUIRE(lane->DurablePending() == kSaves);
+  // The gate opens while Stop waits for room in the ring.
+  std::jthread opener([&release] {
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    release.store(true);
+    release.notify_all();
+  });
+  lane->Stop();
+  opener.join();
+  REQUIRE(lane->DurableFailures() == 0);
+  REQUIRE(lane->DurablePending() == 0);
+  REQUIRE(lane->Stats().cancelled >= 1);
+  for (int i = 0; i < kSaves; ++i) {
+    INFO("save " << i);
+    CHECK(ReadBytes(fs::Join(dir, std::format("save{}.bin", i))) ==
+          PatternBytes(4096, static_cast<std::uint32_t>(i)));
+  }
+}
+
+TEST_CASE("A save cancelled at Stop leaves no temporary file",
+          "[lane][durable]") {
+  if constexpr (!fs::kFsFaultHooks) {
+    SKIP("the se::fs fault injector is compiled out of Release builds");
+  }
+  const MainThreadScope main;
+  const std::string dir = ScratchDir("cancelled_save");
+  const std::string path = fs::Join(dir, "flush.bin");
+  // 3 MB at 30 ms per 1 MB write step: the stop lands mid-write.
+  fs::SetFsFaults(fs::FsFaults{.write_step_delay_ms = 30});
+  auto lane = StartLane(TestConfig());
+  SaveRequest save;
+  save.path = path;
+  save.revision = 1;
+  save.durable = false;
+  save.bytes = PatternBytes(std::size_t{3} << 20, 5);
+  SubmitSave(*lane, std::move(save));
+  // Wait for the temporary file: the save is writing.
+  bool writing = false;
+  const std::uint64_t start = NowNs();
+  while (!writing && NowNs() - start < 10'000'000'000ULL) {
+    auto entries = fs::ListDirectory(dir);
+    REQUIRE(entries.has_value());
+    writing = !entries->empty();
+    if (!writing) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  REQUIRE(writing);
+  lane->Stop();
+  fs::ClearFsFaults();
+  REQUIRE(lane->Stats().cancelled == 1);
+  // Neither the target nor the temporary file is there.
+  auto entries = fs::ListDirectory(dir);
+  REQUIRE(entries.has_value());
+  std::string left;
+  for (const std::string& entry : *entries) left += entry + " ";
+  INFO("left: " << left);
+  CHECK(entries->empty());
 }
 
 TEST_CASE("A sharing violation on rename retries for up to 2 s",

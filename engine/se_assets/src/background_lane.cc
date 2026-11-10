@@ -19,6 +19,7 @@
 #include <stop_token>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -529,20 +530,28 @@ void BackgroundLane::FlushQueuedSubmits() {
 
 void BackgroundLane::Stop() noexcept {
   if (!thread_.Joinable()) return;
-  // Submits still queued on main go in first where there is room; the
-  // rest are dropped below (Durable ones count as failures).
-  while (!queued_submits_.empty() &&
-         requests_.TryPush(queued_submits_.front())) {
-    queued_submits_.pop_front();
-  }
-  for (Request* request : queued_submits_) {
-    if (request->desc.durable) {
-      durable_failures_.fetch_add(1, std::memory_order_acq_rel);
-      durable_pending_.fetch_sub(1, std::memory_order_acq_rel);
-    }
+  // Submits still queued on main (the request ring was full): the ones
+  // that are not Durable are cancelled here, as the lane cancels its own
+  // at the stop. Durable jobs are never cancelled, so those go in, in
+  // order, waiting for room while the lane, which pulls the ring after
+  // every step until it is asked to stop, makes some. This is a shutdown
+  // join, where main may wait.
+  std::uint64_t cancelled = 0;
+  std::erase_if(queued_submits_, [&cancelled](Request* request) {
+    if (request->desc.durable) return false;
     delete request;
+    ++cancelled;
+    return true;
+  });
+  state_->stats.cancelled.fetch_add(cancelled, std::memory_order_relaxed);
+  while (!queued_submits_.empty()) {
+    if (requests_.TryPush(queued_submits_.front())) {
+      queued_submits_.pop_front();
+      continue;
+    }
+    Wake();
+    std::this_thread::yield();
   }
-  queued_submits_.clear();
   thread_.RequestStop();
   thread_.Join();
 }

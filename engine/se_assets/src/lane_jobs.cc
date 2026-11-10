@@ -76,6 +76,18 @@ class ReadJob final : public LaneJob {
 class SaveJob final : public LaneJob {
  public:
   explicit SaveJob(SaveRequest request) : request_(std::move(request)) {}
+  SaveJob(const SaveJob&) = delete;
+  SaveJob& operator=(const SaveJob&) = delete;
+  // A save that ends before its rename (cancelled at Stop, or dropped by
+  // the lane) leaves no temporary file next to its target. A destructor
+  // does not log (logging may throw), so a failed removal only leaves the
+  // file behind.
+  ~SaveJob() override {
+    writer_.reset();
+    if (temp_exists_) {
+      [[maybe_unused]] const auto removed = fs::Remove(temp_);
+    }
+  }
 
   [[nodiscard]] std::string_view Kind() const noexcept override {
     return "save";
@@ -105,7 +117,8 @@ class SaveJob final : public LaneJob {
 
   StepResult Fail(Error error) {
     writer_.reset();
-    if (!temp_.empty()) RemoveTemporary(temp_);
+    if (temp_exists_) RemoveTemporary(temp_);
+    temp_exists_ = false;
     if (error.path.empty()) error.path = request_.path;
     error_ = std::move(error);
     return StepResult::Done();
@@ -115,6 +128,7 @@ class SaveJob final : public LaneJob {
     temp_ = fs::UniqueTempPath(request_.path);
     auto writer = fs::FileWriter::Create(temp_);
     if (!writer) return Fail(std::move(writer.error()));
+    temp_exists_ = true;
     writer_.emplace(std::move(*writer));
     phase_ = request_.bytes.empty() ? Phase::kFlush : Phase::kWrite;
     return StepResult::Continue();
@@ -152,6 +166,7 @@ class SaveJob final : public LaneJob {
     if (strand != 0 && lane.CommittedRevision(strand) > request_.revision) {
       // A newer revision is in place: never rename over it.
       RemoveTemporary(temp_);
+      temp_exists_ = false;
       outcome_.superseded = true;
       SE_LOG_DEBUG("save of {} revision {} superseded by revision {}",
                    request_.path, request_.revision,
@@ -176,6 +191,8 @@ class SaveJob final : public LaneJob {
       ++outcome_.busy_retries;
       return StepResult::RetryAfter(kReplaceRetryNs);
     }
+    // The temporary file is the target now.
+    temp_exists_ = false;
     if (strand != 0) lane.CommitRevision(strand, request_.revision);
     return StepResult::Done();
   }
@@ -183,6 +200,8 @@ class SaveJob final : public LaneJob {
   SaveRequest request_;
   Phase phase_ = Phase::kOpen;
   std::string temp_;
+  // temp_ was created and is neither renamed into place nor removed.
+  bool temp_exists_ = false;
   std::optional<fs::FileWriter> writer_;
   std::size_t written_ = 0;
   std::uint64_t first_busy_ns_ = 0;

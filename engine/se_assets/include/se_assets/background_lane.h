@@ -260,7 +260,9 @@ class BackgroundLane {
 
   // Requests a stop and joins: queued and running jobs that are not
   // Durable end at the next step boundary, Durable ones run to the end.
-  // Idempotent; main (shutdown step 8).
+  // Durable submits still queued on main (a full request ring) are pushed
+  // first, waiting for room; the others are cancelled. Idempotent; main
+  // (shutdown step 8).
   void Stop() noexcept;
   [[nodiscard]] bool Running() const noexcept { return thread_.Joinable(); }
 

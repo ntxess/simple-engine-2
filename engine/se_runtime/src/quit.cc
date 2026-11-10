@@ -68,6 +68,7 @@ void QuitController::Poll() {
       pending_ = false;
       reason_ = QuitReason::kNone;
       ++cancellations_;
+      for (QuitProvider* each : providers_) each->QuitCancelled();
       return;
     }
     if (poll == QuitPoll::kPending && all_ready) {

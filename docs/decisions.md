@@ -2243,6 +2243,8 @@ fence for PCM lifetime.
 - Sounds load synchronously on main at boot from `GameSetup::sound_table`
   (config/sound.json, name to file); a missing or undecodable file is
   logged and its events fail (counted). M9's lane will decode them.
+  (Superseded by ADR-087: sounds decode on the background lane, held by
+  the state's scope; App::LoadSounds is gone.)
 - rampage: tools/audio/make_sounds.py writes assets/sounds/hit.wav and
   death.wav with integer synthesis (byte-identical everywhere;
   `checks.sounds_fresh` regenerates and compares them). EffectSystem asks
@@ -2330,11 +2332,14 @@ build's re-cook is an import.
   run to the end, then the thread joins; a Durable job pushed just before
   the stop is still found (the stop synchronizes with the pull that
   follows it). Completions left on the lane at exit are dropped (main is
-  shutting down); a Durable one's file is already in place.
+  shutting down); a Durable one's file is already in place. (ADR-092: the
+  Durable submits still queued on main are pushed first, waiting for room;
+  a cancelled save removes its temporary file.)
 - `DurablePending()` counts Durable jobs from Submit until the lane has
   finished them; `DurableFailures()` counts the ones that ended with an
   Error. se_runtime's LaneQuitProvider reports kPending while any is
-  pending and kCancel when one failed since its polls began.
+  pending and kCancel when one failed since its polls began (since this
+  quit's polls began: ADR-092).
 - The lane calls WakeMain after pushing completions; WakeMain pushes only
   inside the ADR-047 window, so the lane may call it at any time.
 - ADR-006's list of `// se-fault-boundary` files gains
@@ -2884,3 +2889,31 @@ the mixer thread to mix before them.
 is about a cap derived from the frames that actually run; deriving it
 from a refresh rate the modal loop does not follow capped the game below
 its tick rate on any display faster than the tick rate.
+
+## ADR-092 The lane's stop keeps queued Durable submits; quits forget a cancelled quit's baseline (2026-11-09)
+
+**Decision.**
+- `BackgroundLane::Stop` (a shutdown join, where main may wait) cancels the
+  submits still queued on main that are not Durable (counted as
+  cancelled) and pushes the Durable ones into the request ring in order,
+  waking the lane and yielding while the ring is full; the lane pulls the
+  ring after every step until it is asked to stop. A Durable job is never
+  dropped by a full ring (ADR-079's "never cancelled").
+- A SaveJob that ends before its rename (a non-Durable save cancelled at
+  Stop, or dropped) removes its temporary file in its destructor, after
+  closing it; destructors do not log, so a failed removal only leaves the
+  file behind.
+- `QuitProvider::QuitCancelled()` (default empty) is called on every
+  provider when any provider cancels a quit; LaneQuitProvider forgets its
+  failure baseline there, so a Durable failure between two quits never
+  cancels the second.
+- Tests (tests/assets/lane_test.cc): `Stop runs Durable submits still
+  queued on main` (a two-entry request ring behind a busy lane), `A save
+  cancelled at Stop leaves no temporary file` (a throttled 3 MB save),
+  `A Durable failure between two quits does not cancel the second`. Each
+  fails on the code before this ADR.
+
+**Why.** All three are the lane's stated contracts (Durable work is never
+lost, a cancelled save leaves the directory as it was, a quit's failures
+are its own); the old code broke them only at the edges the tests now
+reach.
