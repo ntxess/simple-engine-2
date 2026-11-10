@@ -7,11 +7,16 @@
 // max(now, tick anchor + D):
 //
 //   - the anchor is the tick's input window end (TickInline passes it);
-//   - D = B + T/2 comes from the frame's plan and the pacer: B the plan's
-//     budget (StepPlan::budget_b), T the display's vblank period; 13.8 ms
-//     at 60 Hz Paced Locked. It is the time from a tick's window end to its
-//     frame at mid-screen, so the two ticks of a 60 Hz frame sound 8.33 ms
-//     apart;
+//   - D comes from the frame's plan and the pacer (PlanAudioDelayNs,
+//     ADR-093): B + max(T/2, L), with B the plan's budget
+//     (StepPlan::budget_b), T the display's vblank period and L the longest
+//     a tick's input window can end before its frame starts. At 60 Hz Paced
+//     Locked that is the design's B + T/2, 13.8 ms, the time from a tick's
+//     window end to its frame at mid-screen, so the two ticks of a 60 Hz
+//     frame sound 8.33 ms apart. Above the tick rate (Free cadence) a
+//     tick's window ends up to one tick before its frame, and D grows to
+//     B + dt, so no tick's sound has started late when it drains and every
+//     tick's sounds stay one tick apart;
 //   - the platform time (SDL_GetTicksNS) maps to the engine's PCM clock
 //     through a PcmClock recalibrated every frame (BeginFrame);
 //   - a sound whose start has passed is late: gameplay sounds play at once,
@@ -36,6 +41,7 @@
 #include "se_audio/pcm_clock.h"
 #include "se_core/thread_role.h"
 #include "se_core/thread_safety.h"
+#include "se_core/time.h"
 #include "se_core/world.h"
 #include "se_sim/audio_events.h"
 #include "se_sim/sim_driver.h"
@@ -45,9 +51,20 @@ namespace se {
 // Cosmetic sounds later than this are dropped.
 inline constexpr std::uint64_t kCosmeticDropNs = 100'000'000;
 
-// D = B + T/2 in nanoseconds.
+// The design's D = B + T/2 in nanoseconds.
 [[nodiscard]] std::uint64_t AudioDelayNs(double budget_b_sec,
                                          double vblank_period_sec) noexcept;
+
+// D for a frame (ADR-093): B + max(T/2, L) in nanoseconds, with T the
+// vblank period and L the longest a tick's input window can end before its
+// frame starts, from the plan's cadence: (k - 1) / k of the frame period P
+// in Locked cadence with k ticks per frame, and ceil(P / dt) ticks in Free
+// cadence. Equal to AudioDelayNs whenever Locked k <= 2. Constant while the
+// cadence and costs hold, so sounds keep their ticks' spacing.
+[[nodiscard]] std::uint64_t PlanAudioDelayNs(const StepPlan& plan,
+                                             double vblank_period_sec,
+                                             double frame_period_sec,
+                                             double tick_dt_sec) noexcept;
 
 // When one event starts: |play| false for a dropped cosmetic sound;
 // start_frame 0 for "at once".

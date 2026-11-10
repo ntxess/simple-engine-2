@@ -672,14 +672,17 @@ std::uint64_t App::AudioDelay() const noexcept {
 }
 
 void App::BeginAudioFrame(const StepPlan& plan, const FrameClock& clock) {
-  // D = B + T/2: the plan's budget and the display's vblank period of this
-  // frame, which FramePacer::BeginFrame has just set.
+  // D = B + max(T/2, L) (ADR-093): the plan's budget and cadence, the
+  // display's vblank period of this frame, which FramePacer::BeginFrame has
+  // just set, and the frame period.
   double vblank_sec = pacer_.LastFrame().vblank_period_sec;
   if (!(vblank_sec > 0.0)) {
     vblank_sec = clock.period_sec / std::max(1, pacer_.PresentInterval());
   }
-  game_->audio.BeginFrame(SDL_GetTicksNS(),
-                          AudioDelayNs(plan.budget_b, vblank_sec));
+  game_->audio.BeginFrame(
+      SDL_GetTicksNS(),
+      PlanAudioDelayNs(plan, vblank_sec, clock.period_sec,
+                       1.0 / static_cast<double>(setup_.tick_rate)));
   // Pan follows the camera of the first running World.
   const InlineOwnerScope owner(OnMainThread());
   for (const World* world : game_->states.RunningWorlds()) {

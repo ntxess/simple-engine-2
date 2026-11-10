@@ -2222,7 +2222,8 @@ fence for PCM lifetime.
   never changes simulation state.
 - `AudioBridge` (se_runtime) is the App's AudioSink. Each frame, before
   the ticks, it recalibrates a `PcmClock` (se_audio/pcm_clock.h) and takes
-  D = B + T/2: B is the frame's StepPlan::budget_b, T the FramePacer's
+  D = B + T/2 (ADR-093 generalises it beyond Locked with two ticks: D = B +
+  max(T/2, L)): B is the frame's StepPlan::budget_b, T the FramePacer's
   vblank period of that frame (PacerFrame::vblank_period_sec, else the
   frame clock's period over the present interval). So D already comes
   from the real FramePacer (the integration's item is done here). After
@@ -2929,3 +2930,39 @@ its tick rate on any display faster than the tick rate.
 lost, a cancelled save leaves the directory as it was, a quit's failures
 are its own); the old code broke them only at the edges the tests now
 reach.
+
+## ADR-093 Audio D covers the longest tick-window lead of the cadence (2026-11-10)
+
+**Decision.** The AudioBridge's D is `B + max(T/2, L)` (`PlanAudioDelayNs`,
+se_runtime/audio_bridge.h), with B the frame plan's budget, T the vblank
+period, P the frame period, dt the tick and L the longest a tick's input
+window can end before its frame starts:
+- Locked cadence, k ticks per frame: L = (k - 1)/k * P. For k <= 2 this is
+  at most T/2, so D is the design's B + T/2 (13.8 ms at 60 Hz Paced) and
+  `audio.Two ticks' sounds start 8.33 ms apart` is unchanged.
+- Free cadence: L = ceil(P/dt) * dt. Above the tick rate (P < dt) that is
+  one tick, so D = B + dt: at 165 Hz about 8 ms more than B + T/2.
+D is constant while the cadence and the costs hold, so every tick's sound
+starts exactly one tick after the previous tick's.
+
+**Why.** Review finding F4 (M8/M9/M17a): with B + T/2 on this machine's
+165 Hz display (Free cadence, 120 Hz ticks), a tick's window ends up to one
+tick before its frame starts, so anchor + D had passed when the tick's
+events drained, and every gameplay sound played at once: a 10 s rampage run
+counted 6 of 6 late, and their spacing followed frames, not ticks. The
+design defines D as the time from a tick's window end to its frame at
+mid-screen and computed it only for 60 Hz Locked with two ticks; this is
+that definition applied to every cadence. The cost is up to one tick of
+extra audio latency, only where the cadence is Free (and above two ticks
+per frame in Locked, below 60 Hz).
+
+**Tests.** `audio.D is the design's B + T/2 in Locked cadence up to two
+ticks` (60 Hz k = 2, 120 Hz k = 1, and 30 Hz k = 4 where L = 3/4 P);
+`audio.Above the tick rate every tick's sound is on time, a tick apart`
+drives the real FixedStepper at 165 Hz for 2000 frames: no tick's sound is
+late, consecutive ticks start 400 frames (8.33 ms at 48 kHz) apart within
+one frame, while the design's B + T/2 is late for 362 of the same 1449
+ticks in that model.
+The desktop test `The audio delay D comes from the FramePacer's frame` checks
+the App's D against `PlanAudioDelayNs`. ADR-077's D bullet is superseded
+for cadences other than Locked k <= 2.

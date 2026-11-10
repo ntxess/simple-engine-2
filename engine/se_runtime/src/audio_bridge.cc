@@ -60,6 +60,28 @@ std::uint64_t AudioDelayNs(double budget_b_sec,
   return static_cast<std::uint64_t>(std::llround(d * 1e9));
 }
 
+std::uint64_t PlanAudioDelayNs(const StepPlan& plan, double vblank_period_sec,
+                               double frame_period_sec,
+                               double tick_dt_sec) noexcept {
+  const double vblank = std::max(vblank_period_sec, 0.0);
+  const double frame = std::max(frame_period_sec, 0.0);
+  const double dt = std::max(tick_dt_sec, 0.0);
+  double lead = 0.0;
+  if (plan.cadence == Cadence::kLocked && plan.locked_k >= 1) {
+    // k equal windows split the frame: the first ends (k - 1) / k of it
+    // before the frame starts.
+    const double k = static_cast<double>(plan.locked_k);
+    lead = frame * (k - 1.0) / k;
+  } else if (dt > 0.0) {
+    // A tick's window ends `remainder + (steps - 1 - i) * dt` before the
+    // frame starts, with remainder < dt and at most ceil(P / dt) steps in a
+    // frame that is not catching up. The epsilon keeps P = n * dt at n.
+    lead = std::max(1.0, std::ceil(frame / dt - 1e-6)) * dt;
+  }
+  const double d = std::max(plan.budget_b, 0.0) + std::max(vblank * 0.5, lead);
+  return static_cast<std::uint64_t>(std::llround(d * 1e9));
+}
+
 AudioStart ScheduleAudio(std::uint64_t anchor_ns, std::uint64_t delay_ns,
                          std::uint64_t now_ns, bool cosmetic,
                          const audio::PcmClock& clock) noexcept {

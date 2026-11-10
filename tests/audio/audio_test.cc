@@ -35,6 +35,7 @@
 #include "se_core/component_registry.h"
 #include "se_core/core_components.h"
 #include "se_core/thread_role.h"
+#include "se_core/time.h"
 #include "se_core/world.h"
 #include "se_runtime/audio_bridge.h"
 #include "se_sim/audio_events.h"
@@ -144,6 +145,98 @@ TEST_CASE("Two ticks' sounds start 8.33 ms apart in the mixed output",
   // The first starts D after its anchor (frame 0 is now).
   const std::int64_t first = static_cast<std::int64_t>(onsets[0]);
   REQUIRE(std::abs(first - (13'833'333 - 8'333'333) * 48 / 1'000'000) <= 1);
+}
+
+TEST_CASE("D is the design's B + T/2 in Locked cadence up to two ticks",
+          "[audio]") {
+  StepPlan plan;
+  plan.cadence = Cadence::kLocked;
+  plan.budget_b = 5.5e-3;
+  // 60 Hz, two ticks per frame: the first window ends T/2 before the frame.
+  plan.locked_k = 2;
+  REQUIRE(PlanAudioDelayNs(plan, 1.0 / 60.0, 1.0 / 60.0, 1.0 / 120.0) ==
+          AudioDelayNs(5.5e-3, 1.0 / 60.0));
+  // 120 Hz, one tick per frame.
+  plan.locked_k = 1;
+  REQUIRE(PlanAudioDelayNs(plan, 1.0 / 120.0, 1.0 / 120.0, 1.0 / 120.0) ==
+          AudioDelayNs(5.5e-3, 1.0 / 120.0));
+  // 30 Hz, four ticks per frame: the first window ends 3/4 of the frame
+  // before it, more than T/2 (ADR-093).
+  plan.locked_k = 4;
+  REQUIRE(PlanAudioDelayNs(plan, 1.0 / 30.0, 1.0 / 30.0, 1.0 / 120.0) ==
+          5'500'000 + 25'000'000);
+}
+
+TEST_CASE("Above the tick rate every tick's sound is on time, a tick apart",
+          "[audio]") {
+  // A 165 Hz display and 120 Hz ticks: Free cadence, zero or one tick a
+  // frame, each tick's window ending up to one tick before its frame
+  // starts. Each tick's events drain after the frame's pump and the ticks
+  // before it, well inside B.
+  FixedStepper stepper(120);
+  FrameCosts costs;
+  costs.tick_hi = 0.5e-3;
+  costs.non_tick_hi = 1.5e-3;
+  costs.gpu_hi = 0.3e-3;
+  costs.tick_95 = 0.4e-3;
+  costs.non_tick_95 = 1.2e-3;
+  costs.gpu_95 = 0.2e-3;
+  const double period = 1.0 / 165.0;
+  const double dt = 1.0 / 120.0;
+  PcmClock clock(kRate);
+  clock.Calibrate(0, 0);
+  std::vector<std::uint64_t> starts;
+  int late_with_design_d = 0;
+  int free_frames = 0;
+  std::uint64_t prev_start_ns = 0;
+  for (int f = 1; f <= 2000; ++f) {
+    FrameClock frame;
+    frame.frame_start_ns =
+        1'000'000'000 + static_cast<std::uint64_t>(std::llround(f * 1e9 / 165));
+    frame.prev_frame_start_ns = prev_start_ns;
+    prev_start_ns = frame.frame_start_ns;
+    frame.period_sec = period;
+    frame.vblanks_known = true;
+    frame.timer_p99_sec = 0.5e-3;
+    const StepPlan plan = stepper.Plan(frame, costs, /*running=*/true,
+                                       /*debugger=*/false,
+                                       /*editor_play=*/false);
+    if (f < 10) continue;  // the stepper's first frames
+    if (plan.cadence == Cadence::kFree) ++free_frames;
+    const std::uint64_t d = PlanAudioDelayNs(plan, period, period, dt);
+    for (int i = 0; i < plan.steps; ++i) {
+      const std::uint64_t anchor =
+          plan.tick_window_end_ns[static_cast<std::size_t>(i)];
+      const std::uint64_t now = frame.frame_start_ns + 1'500'000 +
+                                static_cast<std::uint64_t>(i + 1) * 400'000;
+      const AudioStart start = ScheduleAudio(anchor, d, now, false, clock);
+      INFO("frame " << f << " tick " << i << ": anchor "
+                    << (static_cast<double>(frame.frame_start_ns) -
+                        static_cast<double>(anchor)) /
+                           1e6
+                    << " ms before the frame, D " << d / 1e6 << " ms");
+      REQUIRE_FALSE(start.late);
+      starts.push_back(start.start_frame);
+      if (ScheduleAudio(anchor, AudioDelayNs(plan.budget_b, period), now, false,
+                        clock)
+              .late) {
+        ++late_with_design_d;
+      }
+    }
+  }
+  REQUIRE(free_frames > 1900);
+  REQUIRE(starts.size() > 1000);
+  // One tick (8.33 ms) is 400 frames at 48 kHz, for every pair of ticks.
+  for (std::size_t i = 1; i < starts.size(); ++i) {
+    const std::int64_t apart = static_cast<std::int64_t>(starts[i]) -
+                               static_cast<std::int64_t>(starts[i - 1]);
+    INFO("ticks " << i - 1 << " and " << i);
+    REQUIRE(std::abs(apart - 400) <= 1);
+  }
+  // The design's B + T/2 is late for some of these ticks, about a quarter
+  // with this model's drain times (finding F4; all 6 in a real 10 s run).
+  INFO(late_with_design_d << " of " << starts.size() << " late with B + T/2");
+  REQUIRE(late_with_design_d > 0);
 }
 
 TEST_CASE("Late gameplay sounds play at once; late cosmetic ones drop",

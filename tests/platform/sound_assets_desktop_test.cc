@@ -219,14 +219,17 @@ TEST_CASE("The audio delay D comes from the FramePacer's frame",
     std::uint64_t delay_ns = 0;
   } seen;
   GameSetup setup = TestGameSetup();
-  setup.on_frame = [&seen](App& app, const FrameReport& report) {
+  const double tick_dt = 1.0 / static_cast<double>(setup.tick_rate);
+  setup.on_frame = [&seen, tick_dt](App& app, const FrameReport& report) {
     AssertMainThread();
-    // D = B + T/2 with B of this frame's plan and T the vblank period the
-    // pacer's BeginFrame chose for this frame.
+    // D = B + max(T/2, L) (ADR-093) with B and the cadence of this frame's
+    // plan, T the vblank period the pacer's BeginFrame chose for this frame
+    // and the frame clock's period.
     if (report.iterate > 2 && report.pacer.vblank_period_sec > 0.0) {
       ++seen.frames;
       if (app.AudioDelay() ==
-          AudioDelayNs(report.plan.budget_b, report.pacer.vblank_period_sec)) {
+          PlanAudioDelayNs(report.plan, report.pacer.vblank_period_sec,
+                           report.clock.period_sec, tick_dt)) {
         ++seen.matched;
       }
       if (report.pacer.period_source != PeriodSource::kFallback) {
