@@ -40,6 +40,8 @@ TEST_CASE("Unknown actions and wrong argument counts are errors", "[script]") {
   REQUIRE_FALSE(ParseScript("wait-ticks\n").has_value());
   REQUIRE_FALSE(ParseScript("undo now\n").has_value());
   REQUIRE(ParseScript("step\nstep 4\n").has_value());
+  REQUIRE(ParseScript("key ctrl+z\n").has_value());
+  REQUIRE_FALSE(ParseScript("key\n").has_value());
 }
 
 }  // namespace

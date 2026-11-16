@@ -40,6 +40,10 @@
 //   terminate                      SDL_EVENT_TERMINATING (recovery files are
 //                                  written synchronously, then the exit)
 //   wait-ms N                      N milliseconds of real time
+//   key CHORD                      a key press for the UI's hotkeys, fed to
+//                                  ImGui as key events (never OS input):
+//                                  "ctrl+z", "shift+f5", "f10"; pressed
+//                                  for one frame, released in the next
 //   recovery accept|discard        the answer to the recovery offer
 //   expect-hash document|play V    V: 16 hex digits, "initial" (the
 //                                  document's at the script's start) or

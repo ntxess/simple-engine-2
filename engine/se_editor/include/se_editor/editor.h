@@ -233,6 +233,11 @@ class Editor final : public AppExtension, public QuitProvider {
   void DrawUi(App& app, const FrameReport& report) SE_REQUIRES(g_main);
   void DrawDockSpace() SE_REQUIRES(g_main);
   void DrawMenus(App& app) SE_REQUIRES(g_main);
+  // The hotkeys the menus name (Ctrl+S, Ctrl+Z, Ctrl+Y, F5, Shift+F5,
+  // F10), as ImGui global shortcuts: a focused text field keeps its own.
+  void HandleShortcuts(App& app) SE_REQUIRES(g_main);
+  // Edit > Undo and Redo (and their hotkeys).
+  void UndoRedo(bool undo) SE_REQUIRES(g_main);
   void DrawModals(App& app) SE_REQUIRES(g_main);
   void DrawBuiltInPanels(const PanelContext& context) SE_REQUIRES(g_main);
   void FillStats(App& app, const FrameReport& report) SE_REQUIRES(g_main);
@@ -357,6 +362,9 @@ class Editor final : public AppExtension, public QuitProvider {
   std::uint64_t dialogs_during_quit_ = 0;
   int steps_left_ = 0;
   bool stepping_ = false;
+  // key: the chord (an ImGuiKeyChord) held since the last frame.
+  int script_chord_ = 0;
+  bool script_key_down_ = false;
   std::string recovery_answer_;
 };
 

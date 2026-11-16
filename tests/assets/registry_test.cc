@@ -369,6 +369,66 @@ TEST_CASE("Hot reload swaps a changed texture once it is resident",
   CHECK(f.registry->LastError(handle) != nullptr);
 }
 
+TEST_CASE("A gameplay freeze defers prefabs and reports visual swaps",
+          "[registry][hot_reload]") {
+  // M10a: editor Play freezes gameplay assets until Stop; textures still
+  // reload, and each such change reaches the swap listener (the play
+  // session's SessionLog).
+  const MainThreadScope main;
+  const std::string dir = ScratchDir("registry_freeze");
+  Fixture f(/*hot_reload=*/true, /*scan_ns=*/50'000'000);
+  const TextureSource source = WriteTexture(dir, "player", 10);
+  const std::string prefab_path = fs::Join(dir, "enemy.prefab.json");
+  REQUIRE(WriteBytes(prefab_path, TextBytes(R"({"name": "enemy"})")));
+  const AssetScope scope = f.registry->CreateScope("sandbox");
+  const auto texture = f.registry->RequestTexture(scope, source);
+  const auto prefab = f.registry->RequestPrefab(scope, prefab_path);
+  REQUIRE(f.Frames([&] { return f.port.uploads == 1; }));
+  f.port.SignalFences();
+  REQUIRE(f.Frames([&] { return f.registry->ScopeResident(scope); }));
+  // Let the lane take its first look at the watched files.
+  std::this_thread::sleep_for(std::chrono::milliseconds(120));
+  f.registry->BeginFrame();
+
+  std::vector<std::string> swaps;
+  f.registry->SetSwapListener(
+      [&swaps](std::string_view key, std::uint64_t /*content_hash*/) {
+        swaps.emplace_back(key);
+      });
+  f.registry->SetGameplayFrozen(true);
+  REQUIRE(f.registry->GameplayFrozen());
+  REQUIRE(WriteBytes(prefab_path, TextBytes(R"({"name": "boss", "hp": 9})")));
+  REQUIRE(WriteBytes(source.source_path,
+                     testing::EncodeTestPng(8, 8, Solid(8, 200).pixels)));
+  REQUIRE(f.Frames([&] {
+    return f.port.uploads == 2 && f.registry->DeferredChanges() == 1;
+  }));
+  // The texture reloads and was reported; the prefab is still the old one.
+  f.port.SignalFences();
+  f.registry->BeginFrame();
+  REQUIRE(f.registry->Version(texture) == 2);
+  REQUIRE_FALSE(swaps.empty());
+  for (const std::string& key : swaps) {
+    CHECK(key == swaps.front());
+    CHECK(key.find("player") != std::string::npos);
+  }
+  REQUIRE(f.registry->Prefab(prefab) != nullptr);
+  REQUIRE(f.registry->Prefab(prefab)->members.size() == 1);
+  REQUIRE(f.registry->Prefab(prefab)->members[0].json == "\"enemy\"");
+
+  // Stop: the deferred change reloads the prefab; nothing more is reported.
+  const std::size_t reported = swaps.size();
+  f.registry->SetSwapListener({});
+  f.registry->SetGameplayFrozen(false);
+  REQUIRE(f.registry->DeferredChanges() == 0);
+  REQUIRE(f.Frames([&] {
+    const auto reloaded = f.registry->Prefab(prefab);
+    return reloaded != nullptr && reloaded->members.size() == 2;
+  }));
+  REQUIRE(f.registry->Prefab(prefab)->members[0].json == "\"boss\"");
+  REQUIRE(swaps.size() == reported);
+}
+
 TEST_CASE("Prefabs and scene chunks are parsed on the lane", "[registry]") {
   const MainThreadScope main;
   const std::string dir = ScratchDir("registry_json");

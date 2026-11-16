@@ -28,6 +28,7 @@
 #include <span>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include "se_core/dump_stream.h"
 #include "se_core/log_ring.h"
@@ -118,8 +119,16 @@ class ThreadRegistry {
     visit(*library_ring_);
   }
 
-  // The kind-1 dump stream: the header and the 64 records.
+  // The kind-1 dump stream: the header and the 64 records. Live memory:
+  // its threads write their records while it is read, which is what a
+  // crash handler in another process wants; code in this process copies it
+  // with CopyBreadcrumbStream().
   [[nodiscard]] std::span<const std::byte> BreadcrumbStream() const noexcept;
+  // A copy of the stream taken field by field with atomic loads (each
+  // record as Read() sees it), in the stream's layout: for readers in this
+  // process, where copying the live bytes would race with the threads'
+  // breadcrumb writes (M10a: the editor's fault files).
+  [[nodiscard]] std::vector<std::byte> CopyBreadcrumbStream() const;
 
   // Slots ever used (the header's head: records 0 .. head - 1 are valid).
   [[nodiscard]] std::uint32_t SlotsUsed() const noexcept;

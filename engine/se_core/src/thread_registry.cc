@@ -8,12 +8,14 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <mutex>
 #include <new>
 #include <optional>
 #include <span>
 #include <string_view>
+#include <vector>
 
 #include "se_core/assert.h"
 #include "se_core/breadcrumb.h"
@@ -143,6 +145,41 @@ ThreadSlotInfo ThreadRegistry::Read(std::uint32_t slot) const noexcept {
 
 std::span<const std::byte> ThreadRegistry::BreadcrumbStream() const noexcept {
   return AsBytes(&table_, sizeof(table_));
+}
+
+std::vector<std::byte> ThreadRegistry::CopyBreadcrumbStream() const {
+  std::vector<std::byte> bytes(sizeof(Table));
+  // The header's other fields never change after construction.
+  DumpStreamHeader header;
+  InitDumpStreamHeader(header, DumpStreamKind::kBreadcrumbs,
+                       sizeof(BreadcrumbRecord), kThreadSlotCount,
+                       "breadcrumbs");
+  header.head = AtomicLoad(table_.header.head, std::memory_order_relaxed);
+  header.dropped = AtomicLoad(table_.header.dropped, std::memory_order_relaxed);
+  std::memcpy(bytes.data(), &header, sizeof(header));
+  for (std::uint32_t slot = 0; slot < kThreadSlotCount; ++slot) {
+    const BreadcrumbRecord& live = table_.records[slot];
+    // Field by field into the zeroed bytes: no padding is copied.
+    std::byte* out = bytes.data() + offsetof(Table, records) +
+                     slot * sizeof(BreadcrumbRecord);
+    const std::uint8_t state =
+        AtomicLoad(live.state, std::memory_order_acquire);
+    const std::uint8_t role = AtomicLoad(live.role, std::memory_order_relaxed);
+    const std::uint64_t os_thread_id =
+        AtomicLoad(live.os_thread_id, std::memory_order_relaxed);
+    const std::uint64_t packed =
+        AtomicLoad(live.packed, std::memory_order_relaxed);
+    const auto name = LoadDumpName(live.name);
+    std::memcpy(out + offsetof(BreadcrumbRecord, packed), &packed,
+                sizeof(packed));
+    std::memcpy(out + offsetof(BreadcrumbRecord, os_thread_id), &os_thread_id,
+                sizeof(os_thread_id));
+    std::memcpy(out + offsetof(BreadcrumbRecord, role), &role, sizeof(role));
+    std::memcpy(out + offsetof(BreadcrumbRecord, state), &state, sizeof(state));
+    std::memcpy(out + offsetof(BreadcrumbRecord, name), name.data(),
+                sizeof(live.name));
+  }
+  return bytes;
 }
 
 std::uint32_t ThreadRegistry::SlotsUsed() const noexcept {

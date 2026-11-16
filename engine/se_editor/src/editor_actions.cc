@@ -6,6 +6,7 @@
 #include <SDL3/SDL_error.h>
 #include <SDL3/SDL_events.h>
 #include <SDL3/SDL_timer.h>
+#include <imgui.h>
 
 #include <algorithm>
 #include <atomic>
@@ -137,7 +138,56 @@ constexpr VerbSpec kVerbs[] = {
     {"expect-recovery", 0, 1, false},
     {"expect-quit-pending", 0, 1, false},
     {"terminate", 0, 0, false},
+    {"key", 1, 1, false},
 };
+
+// "ctrl+z", "shift+f5", "f10": modifiers, then one of ImGui's named keys
+// (ImGui::GetKeyName, any letter case). 0: not a chord.
+ImGuiKeyChord ParseKeyChord(std::string_view text) {
+  auto lower = [](std::string_view word) {
+    std::string out(word);
+    for (char& ch : out) {
+      if (ch >= 'A' && ch <= 'Z') ch = static_cast<char>(ch - 'A' + 'a');
+    }
+    return out;
+  };
+  ImGuiKeyChord chord = 0;
+  while (true) {
+    const std::size_t plus = text.find('+');
+    const std::string word = lower(text.substr(0, plus));
+    if (plus == std::string_view::npos) {
+      for (int key = ImGuiKey_NamedKey_BEGIN; key < ImGuiKey_NamedKey_END;
+           ++key) {
+        if (lower(ImGui::GetKeyName(static_cast<ImGuiKey>(key))) == word) {
+          return chord | key;
+        }
+      }
+      return 0;
+    }
+    if (word == "ctrl") {
+      chord |= ImGuiMod_Ctrl;
+    } else if (word == "shift") {
+      chord |= ImGuiMod_Shift;
+    } else if (word == "alt") {
+      chord |= ImGuiMod_Alt;
+    } else {
+      return 0;
+    }
+    text = text.substr(plus + 1);
+  }
+}
+
+// The chord's key events for ImGui's queue (never OS input): modifiers
+// down before the key, up after it.
+void FeedKeyChord(ImGuiKeyChord chord, bool down) {
+  ImGuiIO& io = ImGui::GetIO();
+  const auto key = static_cast<ImGuiKey>(chord & ~ImGuiMod_Mask_);
+  if (!down) io.AddKeyEvent(key, false);
+  for (const ImGuiKey mod : {ImGuiMod_Ctrl, ImGuiMod_Shift, ImGuiMod_Alt}) {
+    if ((chord & mod) != 0) io.AddKeyEvent(mod, down);
+  }
+  if (down) io.AddKeyEvent(key, true);
+}
 
 }  // namespace
 
@@ -1041,6 +1091,22 @@ bool Editor::RunAction(App& app, const ScriptAction& action) {
     event.type = SDL_EVENT_TERMINATING;
     if (!SDL_PushEvent(&event)) ScriptFailure(action, SDL_GetError());
     return true;
+  }
+  if (verb == "key") {
+    if (script_key_down_) {
+      // The frame after the press: the UI saw it; release.
+      FeedKeyChord(script_chord_, /*down=*/false);
+      script_key_down_ = false;
+      return true;
+    }
+    script_chord_ = ParseKeyChord(args[0]);
+    if (script_chord_ == 0) {
+      ScriptFailure(action, "unknown key '" + args[0] + "'");
+      return true;
+    }
+    FeedKeyChord(script_chord_, /*down=*/true);
+    script_key_down_ = true;
+    return false;
   }
   if (verb == "wait-ms") {
     const auto ms = ParseU64(args[0]);

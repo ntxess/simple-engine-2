@@ -3266,6 +3266,13 @@ file goes through it.
   failure. The script tests run headless (SDL's dummy video and
   `--fixed-frame-dt 8.3333`: one tick a frame, so a 300-tick play takes
   well under a second) and in an unfocused window (label desktop).
+- The editor's hotkeys are ImGui global shortcuts (`ImGui::Shortcut` with
+  `ImGuiInputFlags_RouteGlobal`, submitted from the menu bar): Ctrl+S
+  saves, Ctrl+Z and Ctrl+Y undo and redo (Edit mode only; a focused text
+  field keeps its own), F5 plays or resumes, Shift+F5 stops, F10 steps.
+  The script's `key CHORD` feeds a chord to ImGui's event queue
+  (io.AddKeyEvent, pressed for one frame; never OS input), which is how
+  `editor.script.hotkeys` tests them headless.
 
 **Why.** The design names Play tick and render isolation as fault
 boundaries; building the play World's lists in the editor's own boundary

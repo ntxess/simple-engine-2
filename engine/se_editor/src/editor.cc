@@ -708,10 +708,10 @@ void Editor::SaveFaultFiles(App& app) {
               /*durable=*/true);
   SubmitWrite(app, directory + "session.selog", play_->Log().Write(),
               /*durable=*/true);
-  const std::span<const std::byte> crumbs =
-      ThreadRegistry::Instance().BreadcrumbStream();
+  // A copy by atomic loads: the other threads keep writing their
+  // breadcrumbs (copying the live stream's bytes races with them).
   SubmitWrite(app, directory + "breadcrumbs.bin",
-              std::vector<std::byte>(crumbs.begin(), crumbs.end()),
+              ThreadRegistry::Instance().CopyBreadcrumbStream(),
               /*durable=*/true);
   const std::string text = std::format(
       "where: {}\ntick: {}\nsystem: {}\nphase: {}\nwhat: {}\n", fault.where,

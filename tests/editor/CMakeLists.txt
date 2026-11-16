@@ -70,6 +70,10 @@ if(NOT CMAKE_BUILD_TYPE STREQUAL "Release" AND TARGET simple_editor)
   endfunction()
 
   _se_editor_script(edit_commands edit_commands --scene-copy "${_se_sandbox}")
+  # The hotkeys as ImGui key events: Ctrl+Z, Ctrl+Y, Ctrl+S (saved through
+  # the lane), F5, F10, Shift+F5.
+  _se_editor_script(hotkeys hotkeys --scene-copy "${_se_sandbox}"
+    --expect-scene-contains "321" --expect "play: step to tick")
   # The editor session replays headless to the same per-tick hashes.
   _se_editor_script(play_session_replays play_session
     --replay $<TARGET_FILE:se_replay>)

@@ -3,6 +3,7 @@
 #include "se_core/thread_registry.h"
 
 #include <algorithm>
+#include <atomic>
 #include <catch2/catch_test_macros.hpp>
 #include <cstddef>
 #include <cstdint>
@@ -185,6 +186,63 @@ TEST_CASE("The breadcrumb table is one kind-1 dump stream",
   CHECK(header.head == registry.SlotsUsed());
   REQUIRE(header.head >= 2);
   REQUIRE(std::string_view(header.name) == "breadcrumbs");
+}
+
+TEST_CASE("A copy of the breadcrumb stream reads like the stream",
+          "[thread_registry][dump_stream]") {
+  ThreadRegistry& registry = ThreadRegistry::Instance();
+  // A thread keeps writing its breadcrumb while the copies are taken (the
+  // copy is by atomic loads: clean under TSan).
+  std::atomic<bool> stop{false};
+  std::atomic<std::uint32_t> writer_slot{kThreadSlotCount};
+  std::thread writer([&] {
+    const std::optional<std::uint32_t> slot =
+        registry.Acquire(ThreadRole::kBackground, "copy-writer", 77);
+    if (!slot) {
+      // No slot: the test fails on the value below.
+      writer_slot.store(kThreadSlotCount + 1, std::memory_order_release);
+      return;
+    }
+    writer_slot.store(*slot, std::memory_order_release);
+    std::uint64_t value = 1;
+    while (!stop.load(std::memory_order_acquire)) {
+      AtomicStore(*registry.BreadcrumbWord(*slot), value++,
+                  std::memory_order_relaxed);
+    }
+    registry.Release(*slot);
+  });
+  while (writer_slot.load(std::memory_order_acquire) == kThreadSlotCount) {
+    std::this_thread::yield();
+  }
+  const std::uint32_t slot = writer_slot.load(std::memory_order_acquire);
+  if (slot >= kThreadSlotCount) writer.join();
+  REQUIRE(slot < kThreadSlotCount);
+  std::uint64_t last = 0;
+  for (int i = 0; i < 200; ++i) {
+    const std::vector<std::byte> copy = registry.CopyBreadcrumbStream();
+    REQUIRE(copy.size() == registry.BreadcrumbStream().size());
+    DumpStreamHeader header;
+    std::memcpy(&header, copy.data(), sizeof(header));
+    REQUIRE(header.magic == kDumpStreamMagic);
+    REQUIRE(header.kind ==
+            static_cast<std::uint16_t>(DumpStreamKind::kBreadcrumbs));
+    REQUIRE(header.record_size == sizeof(BreadcrumbRecord));
+    REQUIRE(header.capacity == kThreadSlotCount);
+    REQUIRE(header.head > slot);
+    REQUIRE(std::string_view(header.name) == "breadcrumbs");
+    BreadcrumbRecord record;
+    std::memcpy(&record,
+                copy.data() + sizeof(header) + slot * sizeof(BreadcrumbRecord),
+                sizeof(record));
+    REQUIRE(record.state == static_cast<std::uint8_t>(ThreadSlotState::kLive));
+    REQUIRE(record.os_thread_id == 77);
+    REQUIRE(std::string_view(record.name) == "copy-writer");
+    // The writer's word only grows.
+    REQUIRE(record.packed >= last);
+    last = record.packed;
+  }
+  stop.store(true, std::memory_order_release);
+  writer.join();
 }
 
 struct HookLog {

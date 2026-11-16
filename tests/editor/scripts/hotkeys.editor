@@ -1,0 +1,27 @@
+# The editor's hotkeys, fed to ImGui as key events (never OS input): undo,
+# redo and save in Edit mode; Play, Step and Stop (M10a).
+set 5a4db0c5-0000-4000-8000-000000000000 Transform {"pos":{"x":321,"y":234},"rot":0,"scale":{"x":1,"y":1},"teleport_tick":0}
+expect-dirty yes
+key ctrl+z
+expect-hash document initial
+key ctrl+y
+expect-dirty yes
+key ctrl+s
+wait-ms 500
+expect-dirty no
+key f5
+wait-frames 2
+expect-state playing
+wait-ticks 10
+pause
+wait-frames 1
+expect-state paused
+key f10
+wait-frames 2
+expect-state paused
+key ctrl+z
+key shift+f5
+wait-frames 2
+expect-state edit
+expect-dirty no
+quit discard

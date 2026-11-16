@@ -95,8 +95,48 @@ void Editor::DrawDockSpace() {
                                ImGuiDockNodeFlags_PassthruCentralNode);
 }
 
+void Editor::UndoRedo(bool undo) {
+  if (!document_ || play_) return;
+  const InlineOwnerScope owner(OnMainThread());
+  if (auto done = undo ? document_->Undo() : document_->Redo(); !done) {
+    last_edit_error_ = done.error().message;
+  }
+}
+
+void Editor::HandleShortcuts(App& app) {
+  // Global routes: an active item that uses the chord (a text field's own
+  // Ctrl+Z and Ctrl+Y) takes it first.
+  constexpr ImGuiInputFlags kGlobal = ImGuiInputFlags_RouteGlobal;
+  constexpr ImGuiInputFlags kRepeat = kGlobal | ImGuiInputFlags_Repeat;
+  const EditorMode mode = Mode();
+  const bool editing = mode == EditorMode::kEdit && document_ != nullptr;
+  if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_S, kGlobal) && editing) {
+    if (auto saved = SaveDocument(app, {}, /*durable=*/true); !saved) {
+      save_error_ = saved.error().message;
+    }
+  }
+  if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_Z, kRepeat) && editing) {
+    UndoRedo(/*undo=*/true);
+  }
+  if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_Y, kRepeat) && editing) {
+    UndoRedo(/*undo=*/false);
+  }
+  if (ImGui::Shortcut(ImGuiKey_F5, kGlobal) &&
+      (mode == EditorMode::kEdit || mode == EditorMode::kPaused)) {
+    request_ = Request::kPlay;
+  }
+  if (ImGui::Shortcut(ImGuiMod_Shift | ImGuiKey_F5, kGlobal) &&
+      mode != EditorMode::kEdit) {
+    request_ = Request::kStop;
+  }
+  if (ImGui::Shortcut(ImGuiKey_F10, kGlobal) && mode == EditorMode::kPaused) {
+    request_ = Request::kStep;
+  }
+}
+
 void Editor::DrawMenus(App& app) {
   if (!ImGui::BeginMainMenuBar()) return;
+  HandleShortcuts(app);
   const bool editing = !play_;
   SDL_Window* window =
       app.GetWindow() != nullptr ? app.GetWindow()->Native() : nullptr;
@@ -120,16 +160,10 @@ void Editor::DrawMenus(App& app) {
     const bool can_undo = editing && document_ && document_->UndoCount() > 0;
     const bool can_redo = editing && document_ && document_->RedoCount() > 0;
     if (ImGui::MenuItem("Undo", "Ctrl+Z", false, can_undo)) {
-      const InlineOwnerScope owner(OnMainThread());
-      if (auto undone = document_->Undo(); !undone) {
-        last_edit_error_ = undone.error().message;
-      }
+      UndoRedo(/*undo=*/true);
     }
     if (ImGui::MenuItem("Redo", "Ctrl+Y", false, can_redo)) {
-      const InlineOwnerScope owner(OnMainThread());
-      if (auto redone = document_->Redo(); !redone) {
-        last_edit_error_ = redone.error().message;
-      }
+      UndoRedo(/*undo=*/false);
     }
     ImGui::EndMenu();
   }
