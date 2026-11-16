@@ -96,6 +96,13 @@ const jobs::ForkSiteDecl& TestSite() {
   return kSite;
 }
 
+// The fallback tests' clock: chunks advance it, so a join lasts exactly
+// what its chunks add; a battery poll of TestWorkerThreads takes
+// g_test_poll_ns of it.
+std::atomic<std::uint64_t> g_test_now{1'000'000'000};
+std::atomic<std::uint64_t> g_test_poll_ns{0};
+std::uint64_t TestNow() { return g_test_now.load(); }
+
 // Worker threads with chosen efficiency classes and battery state, started
 // with se_os StartThread.
 class TestWorkerThreads final : public jobs::WorkerThreads {
@@ -138,7 +145,10 @@ class TestWorkerThreads final : public jobs::WorkerThreads {
     for (Thread& thread : threads_) thread.Join();
     threads_.clear();
   }
-  [[nodiscard]] bool OnBattery() const override { return on_battery_; }
+  [[nodiscard]] bool OnBattery() const override {
+    g_test_now.fetch_add(g_test_poll_ns.load());
+    return on_battery_;
+  }
 
  private:
   std::vector<std::uint8_t> classes_;
@@ -564,11 +574,6 @@ TEST_CASE("ForkStats count participants and join percentiles", "[jobs][pool]") {
   REQUIRE(pool_stats.threaded_forks == 200);
 }
 
-// The fallback test's clock: chunks advance it, so a join lasts exactly
-// what its chunks add.
-std::atomic<std::uint64_t> g_test_now{1'000'000'000};
-std::uint64_t TestNow() { return g_test_now.load(); }
-
 TEST_CASE("A join slower than 4x its median runs the site inline for 5 s",
           "[jobs][pool]") {
   const testing::MainThreadScope main;
@@ -604,6 +609,36 @@ TEST_CASE("A join slower than 4x its median runs the site inline for 5 s",
   fork(10'000);
   CHECK(site.stats.threaded_forks == threaded + 1);
   REQUIRE(site.stats.fallbacks == 1);
+}
+
+TEST_CASE("The battery poll is not counted in the join", "[jobs][pool]") {
+  const testing::MainThreadScope main;
+  const InlineOwnerScope owner(OnMainThread());
+  jobs::ForkJoinPool::Config config = TestHostConfig({0, 0, 0}, false, 0);
+  config.fallback_factor = 4;
+  config.now_ns = &TestNow;
+  jobs::ForkJoinPool pool(config);
+  jobs::ForkSite& site = pool.Site(TestSite());
+  const auto fork = [&](std::uint64_t join_ns) SE_REQUIRES(g_sim_owner) {
+    pool.ParallelFor(site, 16, [join_ns](jobs::ChunkRange r) {
+      if (r.chunk == 0) g_test_now.fetch_add(join_ns);
+    });
+  };
+  for (int i = 0; i < 64; ++i) fork(10'000);
+  REQUIRE(site.stats.threaded_forks == 64);
+  REQUIRE(site.median_ns == 10'000);
+  // A second later the next fork polls the battery state, which takes 1 ms
+  // here: 100 times the median, and none of the join.
+  g_test_poll_ns.store(1'000'000);
+  g_test_now.fetch_add(1'000'000'000);
+  const std::uint64_t before = g_test_now.load();
+  fork(10'000);
+  g_test_poll_ns.store(0);
+  REQUIRE(g_test_now.load() == before + 1'010'000);
+  REQUIRE(site.stats.fallbacks == 0);
+  CHECK(site.stats.join_max_us < 11.0);
+  fork(10'000);
+  REQUIRE(site.stats.threaded_forks == 66);
 }
 
 TEST_CASE("Workers spin after a join only when a fork is predicted",

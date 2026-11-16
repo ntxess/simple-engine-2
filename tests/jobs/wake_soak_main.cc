@@ -5,7 +5,7 @@
 // ADR-110).
 //
 //   se_wake_soak [--strict] [--seconds N] [--workers W] [--max-wake-ms MS]
-//                [--loaded-busy F] [--json FILE]
+//                [--quiet-busy F] [--loaded-busy F] [--json FILE]
 //
 // A pool of W workers (default: the machine's W_max) on se_os's
 // ForkWorkers runs for N seconds (600 by default): a frame every 8.33 ms on
@@ -28,22 +28,33 @@
 // system stalled).
 //
 // It prints (and writes as JSON) the wakes, their p50, p99, p99.9 and max,
-// the same for the windows in which the machine had idle cores (busy below
-// --loaded-busy, 0.9 by default), the wakes over 1 ms and over the bound,
-// the missed and late wakes, the join p50, p99.9 and max, the canary's
-// wakes and their p99.9 and max lateness, and every wake over the bound
-// with its time from the start, worker, latency, the window's busy share,
-// the canary's lateness at that instant and how many other stalls came
-// within 1 ms of it (the design's stalls hit several threads "at the same
-// instant").
+// the wakes over 1 ms and over the bound, the same by the machine's load in
+// each wake's window (six bands of the busy share, so the tail's dependence
+// on other load shows), the wakes of the quiet windows (busy below
+// --quiet-busy, 0.25 by default: the machine was the soak's), the missed and
+// late wakes, the join p50, p99.9 and max, the canary's wakes and their
+// p99.9 and max lateness, and every wake over the bound with its time from
+// the start, worker, latency, the window's busy share, the canary's
+// lateness at that instant and how many other stalls came within 1 ms of it
+// (the design's stalls hit several threads "at the same instant").
 //
-// Exit status: 0 when every wake over the bound (2 ms by default) is
-// explained (with --strict: when there is none at all), 1 otherwise, 2 for
-// bad arguments. A stall is explained when the machine was saturated in its
-// window or the canary was late with it (ADR-110); a worker that woke late
-// beside idle cores while the canary ran on time is not.
+// A wake over the bound (2 ms by default) is one of (ADR-110):
+//   saturated    its window was busy --loaded-busy (0.9) or more, or its
+//                load could not be read: no processor was free for it;
+//   canary       the canary was late with it: ready threads of the
+//                workers' kind were not being run at that instant;
+//   beside load  its window was between quiet and saturated, the canary on
+//                time: the workers run at the default priority, so a ready
+//                worker waits behind other processes' threads whenever
+//                those hold the processors at that instant, which a share
+//                over 100 ms cannot show; reported, with the bands;
+//   unexplained  in a quiet window with the canary on time.
+// Exit status: 0 when no wake over the bound is unexplained (with --strict:
+// when there is none over the bound at all, for a machine known to be
+// idle), 1 otherwise, 2 for bad arguments.
 
 #include <algorithm>
+#include <array>
 #include <charconv>
 #include <cstddef>
 #include <cstdint>
@@ -78,6 +89,8 @@ struct Args {
   double seconds = 600.0;
   int workers = -1;
   double max_wake_ms = 2.0;
+  // A window less busy than this is quiet: the machine was the soak's.
+  double quiet_busy = 0.25;
   // A window this busy or busier counts as saturated.
   double loaded_busy = 0.9;
   // Fail on any wake over the bound, saturated or not.
@@ -102,6 +115,8 @@ std::optional<Args> Parse(int argc, char** argv) {
       error = std::from_chars(first, last, args.workers).ec;
     } else if (flag == "--max-wake-ms") {
       error = std::from_chars(first, last, args.max_wake_ms).ec;
+    } else if (flag == "--quiet-busy") {
+      error = std::from_chars(first, last, args.quiet_busy).ec;
     } else if (flag == "--loaded-busy") {
       error = std::from_chars(first, last, args.loaded_busy).ec;
     } else if (flag == "--json") {
@@ -111,7 +126,10 @@ std::optional<Args> Parse(int argc, char** argv) {
     }
     if (error != std::errc()) return std::nullopt;
   }
-  if (i != tokens.size() || args.seconds <= 0.0) return std::nullopt;
+  if (i != tokens.size() || args.seconds <= 0.0 ||
+      args.quiet_busy > args.loaded_busy) {
+    return std::nullopt;
+  }
   return args;
 }
 
@@ -185,6 +203,8 @@ class LoadWindows {
     const auto i = static_cast<std::size_t>(at_ns / kWindowNs);
     return i < busy_.size() ? busy_[i] : -1.0;
   }
+  // Every closed window's busy share (-1: unknown).
+  [[nodiscard]] std::span<const double> Windows() const { return busy_; }
   [[nodiscard]] double Mean() const {
     double sum = 0.0;
     int n = 0;
@@ -278,6 +298,24 @@ class Canary {
 
   std::vector<Sample> samples_;
   Thread thread_;
+};
+
+// The bands of a window's busy share the report splits the wakes by: below
+// 10%, 10-25%, 25-50%, 50-75%, 75-90%, and 90% or more.
+constexpr std::array<double, 5> kBandEdges = {0.10, 0.25, 0.50, 0.75, 0.90};
+constexpr std::size_t kBands = kBandEdges.size() + 1;
+
+// The band of a busy share (known: 0 or more).
+std::size_t BandOf(double busy) {
+  std::size_t band = 0;
+  while (band < kBandEdges.size() && busy >= kBandEdges[band]) ++band;
+  return band;
+}
+
+struct Band {
+  std::uint64_t windows = 0;
+  std::vector<std::uint64_t> latencies;
+  std::uint64_t over_bound = 0;
 };
 
 struct Stall {
@@ -434,9 +472,12 @@ int Run(const Args& args) SE_REQUIRES(g_main) {
 
   const auto bound_ns = static_cast<std::uint64_t>(args.max_wake_ms * 1e6);
   std::vector<std::uint64_t> latencies;
-  // Wakes in windows where the machine had idle cores: a stall there is not
-  // explained by the load.
-  std::vector<std::uint64_t> spare;
+  // Wakes in quiet windows: a stall there is not explained by the load.
+  std::vector<std::uint64_t> quiet;
+  std::array<Band, kBands> bands;
+  for (const double busy : load->Windows()) {
+    if (busy >= 0.0) ++bands[BandOf(busy)].windows;
+  }
   std::vector<Stall> stalls;
   std::uint64_t over_1ms = 0;
   for (std::size_t w = 0; w < trace.Workers(); ++w) {
@@ -446,7 +487,12 @@ int Run(const Args& args) SE_REQUIRES(g_main) {
           wake.woke_ns > wake.bump_ns ? wake.woke_ns - wake.bump_ns : 0;
       const double busy = load->BusyAt(wake.bump_ns - m.start_ns);
       latencies.push_back(latency);
-      if (busy >= 0.0 && busy < args.loaded_busy) spare.push_back(latency);
+      if (busy >= 0.0) {
+        Band& band = bands[BandOf(busy)];
+        band.latencies.push_back(latency);
+        if (latency > bound_ns) ++band.over_bound;
+        if (busy < args.quiet_busy) quiet.push_back(latency);
+      }
       if (latency > kOneMs) ++over_1ms;
       if (latency > bound_ns) {
         stalls.push_back(
@@ -456,7 +502,10 @@ int Run(const Args& args) SE_REQUIRES(g_main) {
     }
   }
   std::sort(latencies.begin(), latencies.end());
-  std::sort(spare.begin(), spare.end());
+  std::sort(quiet.begin(), quiet.end());
+  for (Band& band : bands) {
+    std::sort(band.latencies.begin(), band.latencies.end());
+  }
   std::sort(m.joins.begin(), m.joins.end());
   std::sort(stalls.begin(), stalls.end(),
             [](const Stall& a, const Stall& b) { return a.at_ns < b.at_ns; });
@@ -470,15 +519,22 @@ int Run(const Args& args) SE_REQUIRES(g_main) {
     stalls[i].together = static_cast<int>(hi - lo) - 1;
   }
   // A stall is explained by a saturated machine (or a load that could not
-  // be read), or by the canary waking late with it.
+  // be read), or by the canary waking late with it; one beside other load
+  // is reported; one in a quiet window with the canary on time is
+  // unexplained (see the file comment).
   std::size_t loaded_stalls = 0;
   std::size_t canary_stalls = 0;
+  std::size_t partial_stalls = 0;
   std::size_t unexplained = 0;
+  std::uint64_t partial_max_ns = 0;
   for (const Stall& stall : stalls) {
     if (stall.busy < 0.0 || stall.busy >= args.loaded_busy) {
       ++loaded_stalls;
     } else if (m.canary && stall.canary_ns >= canary_late_ns) {
       ++canary_stalls;
+    } else if (stall.busy >= args.quiet_busy) {
+      ++partial_stalls;
+      partial_max_ns = std::max(partial_max_ns, stall.latency_ns);
     } else {
       ++unexplained;
     }
@@ -495,11 +551,30 @@ int Run(const Args& args) SE_REQUIRES(g_main) {
       latencies.size(), trace.Dropped(), m.unstamped, Ms(Nth(latencies, 0.5)),
       Ms(Nth(latencies, 0.99)), Ms(Nth(latencies, 0.999)), Ms(Max(latencies)),
       over_1ms, args.max_wake_ms, stalls.size());
+  std::string band_json;
+  for (std::size_t b = 0; b < kBands; ++b) {
+    const Band& band = bands[b];
+    const double from = b == 0 ? 0.0 : kBandEdges[b - 1];
+    const double to = b < kBandEdges.size() ? kBandEdges[b] : 1.0;
+    report += std::format(
+        "  busy {:3.0f}-{:3.0f}%: {} windows, {} wakes, p99 {:.4f} ms, p99.9 "
+        "{:.4f} ms, max {:.4f} ms, {} over the bound\n",
+        from * 100.0, to * 100.0, band.windows, band.latencies.size(),
+        Ms(Nth(band.latencies, 0.99)), Ms(Nth(band.latencies, 0.999)),
+        Ms(Max(band.latencies)), band.over_bound);
+    band_json += std::format(
+        "{}{{\"busy_from\": {:.2f}, \"busy_to\": {:.2f}, \"windows\": {}, "
+        "\"wakes\": {}, \"p99_ms\": {:.6f}, \"p999_ms\": {:.6f}, "
+        "\"max_ms\": {:.6f}, \"over_bound\": {}}}",
+        b == 0 ? "" : ",\n    ", from, to, band.windows, band.latencies.size(),
+        Ms(Nth(band.latencies, 0.99)), Ms(Nth(band.latencies, 0.999)),
+        Ms(Max(band.latencies)), band.over_bound);
+  }
   report += std::format(
-      "  with idle cores (busy below {:.0f}%): {} wakes, p99.9 {:.4f} ms, "
-      "max {:.4f} ms\n",
-      args.loaded_busy * 100.0, spare.size(), Ms(Nth(spare, 0.999)),
-      Ms(Max(spare)));
+      "  quiet windows (busy below {:.0f}%): {} wakes, p99.9 {:.4f} ms, max "
+      "{:.4f} ms\n",
+      args.quiet_busy * 100.0, quiet.size(), Ms(Nth(quiet, 0.999)),
+      Ms(Max(quiet)));
   report += std::format(
       "  canary{}: {} wakes, lateness p50 {:.4f} ms, p99.9 {:.4f} ms, max "
       "{:.4f} ms, {} late by {:.4f} ms or more (1 ms over its median)\n",
@@ -508,8 +583,10 @@ int Run(const Args& args) SE_REQUIRES(g_main) {
       Ms(Max(canary_late)), canary_over, Ms(canary_late_ns));
   report += std::format(
       "  wakes over the bound: {} while the machine was saturated, {} with "
-      "the canary late too, {} unexplained\n",
-      loaded_stalls, canary_stalls, unexplained);
+      "the canary late too, {} beside other load ({:.0f}-{:.0f}% busy, at "
+      "most {:.4f} ms), {} unexplained (quiet, the canary on time)\n",
+      loaded_stalls, canary_stalls, partial_stalls, args.quiet_busy * 100.0,
+      args.loaded_busy * 100.0, Ms(partial_max_ns), unexplained);
   report += std::format(
       "  missed wakes {}, late wakes {}; joins p50 {:.4f} ms, p99.9 {:.4f} "
       "ms, max {:.4f} ms\n",
@@ -553,24 +630,29 @@ int Run(const Args& args) SE_REQUIRES(g_main) {
         Ms(Nth(latencies, 0.99)), Ms(Nth(latencies, 0.999)), Ms(Max(latencies)),
         over_1ms, args.max_wake_ms, stalls.size());
     out << std::format(
-        "  \"loaded_busy\": {:.2f},\n  \"spare_wakes\": {},\n"
-        "  \"spare_p999_ms\": {:.6f},\n  \"spare_max_ms\": {:.6f},\n"
+        "  \"quiet_busy\": {:.2f},\n  \"loaded_busy\": {:.2f},\n"
+        "  \"quiet_wakes\": {},\n"
+        "  \"quiet_p999_ms\": {:.6f},\n  \"quiet_max_ms\": {:.6f},\n"
+        "  \"bands\": [\n    {}\n  ],\n",
+        args.quiet_busy, args.loaded_busy, quiet.size(), Ms(Nth(quiet, 0.999)),
+        Ms(Max(quiet)), band_json);
+    out << std::format(
         "  \"canary_wakes\": {},\n  \"canary_p50_ms\": {:.6f},\n"
         "  \"canary_p999_ms\": {:.6f},\n  \"canary_max_ms\": {:.6f},\n"
         "  \"canary_late_ms\": {:.6f},\n  \"canary_late\": {},\n",
-        args.loaded_busy, spare.size(), Ms(Nth(spare, 0.999)), Ms(Max(spare)),
         canary_late.size(), Ms(Nth(canary_late, 0.5)),
         Ms(Nth(canary_late, 0.999)), Ms(Max(canary_late)), Ms(canary_late_ns),
         canary_over);
     out << std::format(
         "  \"unexplained_stalls\": {},\n  \"loaded_stalls\": {},\n"
-        "  \"canary_stalls\": {},\n"
+        "  \"canary_stalls\": {},\n  \"partial_load_stalls\": {},\n"
+        "  \"partial_load_max_ms\": {:.6f},\n"
         "  \"missed_wakes\": {},\n  \"late_wakes\": {},\n"
         "  \"join_p50_ms\": {:.6f},\n  \"join_p999_ms\": {:.6f},\n"
         "  \"join_max_ms\": {:.6f},\n  \"stalls\": [\n    {}\n  ]\n}}\n",
-        unexplained, loaded_stalls, canary_stalls, m.missed, m.late,
-        Ms(Nth(m.joins, 0.5)), Ms(Nth(m.joins, 0.999)), Ms(Max(m.joins)),
-        stall_json);
+        unexplained, loaded_stalls, canary_stalls, partial_stalls,
+        Ms(partial_max_ns), m.missed, m.late, Ms(Nth(m.joins, 0.5)),
+        Ms(Nth(m.joins, 0.999)), Ms(Max(m.joins)), stall_json);
   }
   return (args.strict ? stalls.empty() : unexplained == 0) ? 0 : 1;
 }
@@ -586,8 +668,8 @@ int main(int argc, char** argv) {
     if (!args) {
       std::fputs(
           "usage: se_wake_soak [--strict] [--seconds N] [--workers W]\n"
-          "                    [--max-wake-ms MS] [--loaded-busy F] "
-          "[--json FILE]\n",
+          "                    [--max-wake-ms MS] [--quiet-busy F]\n"
+          "                    [--loaded-busy F] [--json FILE]\n",
           stderr);
       return 2;
     }

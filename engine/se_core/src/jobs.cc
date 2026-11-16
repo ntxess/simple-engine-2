@@ -781,7 +781,7 @@ std::uint32_t ForkJoinPool::Participants(ForkSite& site, const Plan& plan) {
 void ForkJoinPool::RunThreaded(ForkSite& site, const Plan& plan,
                                InvokeFn invoke, const void* body) {
   Shared& s = *shared_;
-  const std::uint64_t start = Now();
+  std::uint64_t start = Now();
   // The spin prediction: did this fork follow the last one quickly?
   if (last_site_ != nullptr) {
     last_site_->followed_quickly =
@@ -792,6 +792,10 @@ void ForkJoinPool::RunThreaded(ForkSite& site, const Plan& plan,
       start - battery_checked_ns_ >= kBatteryPollNs) {
     on_battery_ = threads_->OnBattery();
     battery_checked_ns_ = start == 0 ? 1 : start;
+    // The poll (a system call, or reads of sysfs) is not the fork's time:
+    // counted in the join it could pass 4x a small site's median and send
+    // the site inline once a second, and it would show as wake latency.
+    start = Now();
   }
 
   Descriptor d;

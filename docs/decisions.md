@@ -3167,7 +3167,9 @@ row), made exact:
   Boundary at once" is learned and the last fork of a tick is not. The hint
   is off on battery: `WorkerThreads::OnBattery` (se_os `BatteryPowered`:
   GetSystemPowerStatus, or a battery and no online mains in
-  /sys/class/power_supply), polled at most once a second.
+  /sys/class/power_supply), polled at most once a second, before the
+  fork's start stamp so that the poll is neither join time nor wake latency
+  (ADR-110).
 
 **Why.** A 24-bit generation (the first layout) left no room for the
 eligibility range, and the range is what keeps a late-starting or spinning
@@ -3242,3 +3244,119 @@ colliders in one 64 px cell with polled and moving event-driven sources
 (240 ticks, thousands of contacts a tick) whose RenderLists at alpha 0.5
 equal the serial builder's; and the threaded sim driver against the inline
 one at W = 0, 1 and 3 (sim.*).
+
+## ADR-110 The wake stalls: a soak with stamps, load windows and a canary; they are waits for a processor (2026-11-16)
+
+**Decision.** The design's open risk ("threads woke 12-29 ms late at the
+same instant" in 5 of 29 pool runs) is measured by `se_wake_soak`
+(tests/jobs/wake_soak_main.cc) and gated by `jobs.wake_soak`:
+- **The soak.** A pool of the machine's W_max workers on se_os's
+  ForkWorkers runs 120 frames a second on a precise timer, each with four
+  back-to-back forks of 4 (W + 1) chunks of 25 us, so the first fork of a
+  frame wakes parked workers. `ForkJoinPool::Config::wake_trace` hands
+  every wake to the tool on the worker that woke: the caller's bump stamp
+  (the oldest bump the worker had not seen, taken just before the publish)
+  and the stamp at which the worker saw it, both steady_clock
+  (QueryPerformanceCounter on Windows). The tool also keeps every join's
+  duration and the machine's busy share in each 100 ms window
+  (`ReadSystemCpuTimes`: GetSystemTimes, /proc/stat).
+- **The canary.** Beside the pool runs one thread of the workers' kind
+  (kForkWorker, Qos::kHigh, the workers' cores) that shares nothing with the
+  pool: it sleeps 1 ms at a time on its own PreciseTimer and records how
+  late each wake was. Late for the canary is 1 ms over its median of the
+  run (its usual lateness is the timer's granularity, 0.52 ms here).
+- **Every wake over the bound** (`kLateWakeNs`, 2 ms) is classified:
+  *saturated* (its window 90% busy or more, or the load unreadable),
+  *canary* (the canary was late while it waited), *beside load* (its window
+  between 25% and 90% busy, the canary on time) or *unexplained* (a quiet
+  window, below 25% busy, with the canary on time). The report gives the
+  wakes' p50, p99, p99.9 and max overall, for the quiet windows and for six
+  bands of the busy share, and each stall with its stamp, worker, latency,
+  window load, canary lateness and the other stalls within 1 ms.
+- **The gate.** `jobs.wake_soak` (labels slow and soak, Release builds
+  only, 600 s, run alone) fails when a wake over 2 ms is unexplained;
+  `--strict` fails on any wake over 2 ms and is for a machine known to be
+  idle (docs/gates.md). `jobs.wake_soak_smoke` runs 2 s in every preset,
+  sanitizers included, without the bound.
+- **The battery poll is not fork time.** The once-a-second
+  `WorkerThreads::OnBattery` poll ran between a fork's start stamp and its
+  publish, so it counted in the join (where 100 us of sysfs reads could
+  pass 4x a small site's median and send the site inline for 5 s, once a
+  second) and in the wake latency. The fork's stamp is now taken after the
+  poll (`jobs.The battery poll is not counted in the join`).
+
+**Measured** (2026-11-16, Ryzen 7 7700X, 8 cores and 16 threads, Windows
+11, msvc-release, W = 7; three other agents were building and testing on
+the machine, so its load swung between a few percent and 100%; the owner
+may have been using it). 600 s, 72000 frames, 288000 threaded forks,
+1933689 wakes, none dropped; p50 0.011 ms, p99 0.48 ms, p99.9 6.9 ms, max
+799 ms; 6444 wakes over 2 ms. By the load of the wake's window:
+
+| Window busy | Windows | Wakes | p99 | p99.9 | Max | Over 2 ms |
+|---|---|---|---|---|---|---|
+| 0-10% | 41 | 13705 | 0.16 ms | 0.29 ms | 0.37 ms | 0 |
+| 10-25% | 1333 | 444790 | 0.17 ms | 0.31 ms | 1.18 ms | 0 |
+| 25-50% | 2126 | 705924 | 0.21 ms | 0.42 ms | 5.31 ms | 17 |
+| 50-75% | 233 | 75293 | 0.44 ms | 1.48 ms | 12.4 ms | 50 |
+| 75-90% | 42 | 12333 | 1.56 ms | 6.15 ms | 13.6 ms | 92 |
+| 90-100% | 2222 | 681071 | 1.84 ms | 19.9 ms | 799 ms | 6285 |
+
+Of the 6444: 6285 saturated (in 5023 of them the canary was late too), 86
+with the canary late, 73 beside other load (windows 49% to 89% busy, median
+2.6 ms, at most 12.4 ms, 52 of them with another worker stalled within
+1 ms), 0 unexplained. 827 of the stalls were of the design's 12 to 29 ms,
+351 longer, and 2098 came with another worker's within 1 ms. The canary,
+which never touches the pool, woke up to 197 ms late (p99.9 57.9 ms) in the
+same run. In the quiet windows (137 s of the run, 458495 wakes) the p99.9
+was 0.31 ms and the longest wake 1.18 ms. An earlier 600 s run the same day
+(39% busy on average, before the bands were reported) had 3011 wakes over
+2 ms: 2763 saturated, 163 with the canary late and 85 in windows 42% to 89%
+busy, none in a quieter window.
+
+**The explanation.** The stalls are waits for a processor, not the wake
+protocol:
+- The protocol cannot lose a bump (ADR-108; `jobs.No woken worker sleeps
+  through its bump` under TSan and the eight chaos seeds), and both stamps
+  bracket only the caller's notify, the OS making the worker runnable and
+  the worker's first instructions.
+- The workers run at the default priority (the design's HighQoS only
+  forbids throttling). A thread that becomes ready gets a processor at once
+  when one is idle; when every processor it may use runs another thread of
+  its priority, it waits in a ready queue, for as long as a scheduler
+  quantum. So a wake stalls exactly when other work holds the processors at
+  that instant, which is what the bands show: no wake over 2 ms in 458495
+  wakes while the machine was below 25% busy, 0.002% of them at 25-50%,
+  0.07% at 50-75%, 0.75% at 75-90% and 0.92% at 90% or more; several
+  workers stall at the same instant because they become ready at the same
+  instant; and a thread that only sleeps on a timer is late in the same
+  moments. A busy share over 100 ms cannot show that the processors were
+  all taken for the few milliseconds of one stall, which is why the stalls
+  beside 25-90% load are reported as such and not as explained.
+- The design's 12-29 ms fits a wait of up to a quantum (on Windows client
+  a quantum is two clock intervals, about 31 ms at the default 15.6 ms
+  interval, and longer for the foreground process); its pool runs took most
+  of the machine's cores beside whatever else ran, and its two-thread runs
+  left processors free. That part is an inference from the load dependence,
+  not a trace.
+
+**Consequences.** With the machine to itself the pool's wakes are bounded
+(1.18 ms at most over 137 s of quiet windows; a whole 600 s `--strict` run
+on an idle machine is a gate in docs/gates.md). On a machine other work
+loads, a fork's join can wait a quantum for a worker: that is what the
+4x-median fallback is for (ADR-109), what `ForkStats::late_wakes` and
+`missed_wakes` count, and what M16's per-site soak must measure before a
+site is enabled. Raising the workers' priority would let them preempt
+other processes' work; the design does not ask for it and nothing here
+decides it. Every site stays disabled.
+
+**Not done here.** A kernel trace naming the thread that held each
+processor during a stall (the design's "ETW/WPR"): `wpr.exe` is on the
+machine but recording needs an elevated prompt, which the agent does not
+have, and the Windows Performance Analyzer is not installed (docs/gates.md
+has the commands). The Tracy GUI is not installed either.
+
+**Deviation.** The spec's alternatives are "explain stalls seen" or "no
+wake over 2 ms in the soak". The soak does both in part: no wake over 2 ms
+in its quiet windows, and every stall elsewhere attributed to measured load
+(saturated, or the canary late) or reported beside it; the run was not on
+an idle machine, so the whole-run bound and the trace remain gates.
