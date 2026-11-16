@@ -10,6 +10,7 @@
 //   se_death_tests <scenario>
 
 #include <array>
+#include <atomic>
 #include <csignal>
 #include <cstdint>
 #include <cstdio>
@@ -29,9 +30,12 @@
 #include "se_core/component_registry.h"
 #include "se_core/core_components.h"
 #include "se_core/jobs.h"
+#include "se_core/profile_clock.h"
 #include "se_core/thread_role.h"
 #include "se_core/thread_safety.h"
 #include "se_core/world.h"
+#include "se_sim/audio_events.h"
+#include "support/fork_config.h"
 #include "support/test_roles.h"
 
 namespace se {
@@ -131,6 +135,41 @@ void OwnerForkInsideChunk() {
 void NestedForkOutsideChunk() {
   const jobs::ForkSite site{.name = "death", .grain = 1};
   NestedForkFromOwner(site);
+}
+
+// A World-level sink (M14): AudioEvents takes no pushes from a fork chunk,
+// inline or on a worker.
+void SinkInFork() {
+  const testing::MainThreadScope main_thread;
+  const InlineOwnerScope owner(OnMainThread());
+  AudioEvents events;
+  jobs::ForkJoinPool pool;
+  jobs::ForkSite site{.name = "death", .grain = 1};
+  pool.ParallelFor(site, 1, [&](jobs::ChunkRange) { events.Push({}); });
+}
+
+// Two chunks on a pool of one worker: the caller's chunk waits (at most
+// 10 s) while the worker's pushes, so the assert fails on the worker thread.
+void SinkInWorkerChunk() {
+  const testing::MainThreadScope main_thread;
+  const InlineOwnerScope owner(OnMainThread());
+  AudioEvents events;
+  testing::ForkTestOptions options;
+  options.chunks_per_participant = 1;
+  jobs::ForkJoinPool pool(testing::ForkTestConfig(1, options));
+  jobs::ForkSite site{.name = "death", .grain = 1, .enabled = true};
+  std::atomic<bool> pushed{false};
+  pool.ParallelFor(site, 2, [&](jobs::ChunkRange) {
+    if (jobs::CurrentWorker() >= 0) {
+      events.Push({});
+      pushed.store(true);
+      return;
+    }
+    const std::uint64_t start = ProfileNowNs();
+    while (!pushed.load() && ProfileNowNs() - start < 10'000'000'000) {
+      std::this_thread::yield();
+    }
+  });
 }
 
 void UndeclaredRead() {
@@ -256,6 +295,8 @@ const std::map<std::string, std::function<void()>>& Scenarios() {
       {"world_access_in_fork", WorldAccessInFork},
       {"structural_call_in_fork", StructuralCallInFork},
       {"create_in_fork", CreateInFork},
+      {"sink_in_fork", SinkInFork},
+      {"sink_in_worker_chunk", SinkInWorkerChunk},
       {"owner_fork_inside_chunk", OwnerForkInsideChunk},
       {"nested_fork_outside_chunk", NestedForkOutsideChunk},
       {"undeclared_read", UndeclaredRead},

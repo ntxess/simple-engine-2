@@ -3243,7 +3243,11 @@ each under every W and seed, 3600 at W = 0), and a pile-up of 240
 colliders in one 64 px cell with polled and moving event-driven sources
 (240 ticks, thousands of contacts a tick) whose RenderLists at alpha 0.5
 equal the serial builder's; and the threaded sim driver against the inline
-one at W = 0, 1 and 3 (sim.*).
+one at W = 0, 1 and 3 (sim.*). Death tests (label death, the debug
+presets): `death.sink_in_fork` and `death.sink_in_worker_chunk` push an
+AudioEvent from an inline chunk and from a chunk on a worker thread, and
+both end in the not-in-fork assert (the design's "World-level sink use in
+a fork").
 
 ## ADR-110 The wake stalls: a soak with stamps, load windows and a canary; they are waits for a processor (2026-11-16)
 
