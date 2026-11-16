@@ -3115,3 +3115,153 @@ outside commands (the World's mutation gate, M2, closed while in Edit
 mode outside command application)". Using M2's gate means every path into
 the registry is covered (Reg(), Create, RequestDestroy, the clock), with
 no second mechanism.
+
+## ADR-100 The panels: a module over game_rampage, drawers from the JSON hooks, edits through one sink (2026-11-10)
+
+**Decision.** M10b's panels are one module, se_editor_panels
+(engine/se_editor/panels, ALLOW_ONLY its direct dependencies), over
+se_editor's panel interface (M10a) and game_rampage: the design places the
+editor "over se_runtime and game_rampage" (costfree-end-state.md
+"Editor"), and the ported drawers edit rampage's components (Stats,
+EffectSource, Team, Path), so the panels link the game module instead of
+reaching its types through GameModule. se_editor itself stays
+game-agnostic (it FORBIDs game_rampage, ADR-095); se_editor_panels is the
+one editor module that links the game, and the editor executable links
+both. What needs no ImGui is kept in pure
+functions with their own tests: the waypoint canvas's controls and rules,
+the profiler's series and axis rule, picking, the stress plan, the
+viewport's letterbox math, the gizmo and the overlays.
+
+- The Inspector's reflection drawer is generated from the
+  ComponentRegistry's JSON hooks (glaze's reflection supplies the field
+  names and values): the component's JSON is parsed into game_rampage's JSON
+  model (numbers keep their source text), a widget is drawn per field, and
+  an edit becomes a set-component command whose "before" is the JSON read
+  and whose "after" is the edited document read and rewritten by the
+  component's own hooks (so it is the registry's canonical JSON, and a
+  value the hook rejects is dropped and logged). A number is edited as a
+  float when the read hook accepts 0.5 in its place (probed once per field
+  on a scratch registry), else as an integer. `ComponentInfo::inspect`
+  stays null and unused: game modules may not link ImGui (they FORBID
+  se_imgui), so no module could supply a drawing hook, and a hook that
+  takes a mutable component pointer would contradict "panels never mutate
+  the World".
+- Custom drawers are chosen by registered name ("Stats", "EffectSource",
+  "Team", "Path"); each edits a copy of the typed component and submits a
+  set-component command with the copy's JSON. Stat names come from the
+  World's StatNames, then from names typed in this session (a new stat's
+  name is not in the World's StatNames, which is context, not a component;
+  M11's save path must add it).
+- Text fields commit when the edit ends (Enter or focus lost), never per
+  keystroke: a value derived from the World every frame cannot overwrite
+  what is being typed (TextEdits). Value drags submit a command per frame
+  inside BeginCoalesce/EndCoalesce, so the document shows the drag and the
+  undo stack gets one step.
+- EditSink routes every edit by the play state: EditorCommands in Edit
+  mode, PlayEdits (the SessionLog, next tick) in Play, nothing in
+  Play.Faulted (widgets disabled). Selection goes through
+  EditorCommands::Select or PlayEdits::Select.
+- The waypoint canvas's rules (waypoint_canvas.h) become path commands
+  (path_commands.h): one PathPointCommand (insert, move or delete) when the
+  rule changes exactly one point and nothing else, which is the case in an
+  Edit document (never stepped, so the path's progress is at its start and
+  the entity stands on point 0); otherwise one set-component of the edited
+  Path, one of the Transform when the entity moves to point 0, and a reset
+  of the derived PathCache (the PathSystem rebuilds a cache only when the
+  point count changes, so a moved point would keep stale lengths). The
+  commands of one rule are one undo step. "Remove all" sets the loop flag,
+  as the legacy code re-created the MovementPattern with repeat = true.
+- The Hierarchy is flat, in spawn order: the engine has no parent relation
+  (prefabs and nesting are M11), so its parent column shows none.
+- Panels draw their window's contents only: the shell calls
+  Begin(Name()) and End() around Draw (the tests' harness does the same).
+  The waypoint canvas opens its own window ("WayPoint Editor | <name>",
+  the legacy title).
+- Panels expose a WidgetProbe: when one is attached, they record the screen
+  rectangles of their notable widgets under stable keys, and the headless
+  tests click there with ImGui's own IO events.
+
+**Why.** The JSON hooks exist for every component of every module, so one
+drawer covers them all and its commands are exactly what the undo stack
+and the SessionLog store. Linking game_rampage is what the design's layering
+says and keeps the custom drawers typed.
+
+## ADR-101 Picking: the drawn sprite on top, three paths that agree (2026-11-10)
+
+**Decision.** A sprite's pick box is the axis-aligned bounds of the quad
+BuildRenderList draws for it (origin, scale, flips and rotation, at zoom 1
+in world pixels), hit when min <= p < max. Of the boxes under the cursor
+the last drawn wins: the largest (layer, texture, z, spawn serial), the
+RenderList's draw order. The design's "ordered by layer and z" is that
+order; the texture key sits between layer and z in it, so following it
+exactly picks what the viewport shows.
+
+- Broadphase: a PickScratch (a uniform grid of the boxes, rampage's
+  SpatialHash) is built for a World only at a recorded tick: not an Edit
+  document, `!HashDirty()` and `LastHash().tick == Clock().tick`; it is
+  valid while the World, its tick and its recorded hash are the ones it was
+  built for. Any mutation since (a paused edit) marks the World dirty and
+  picking falls back to the exact path. Edit documents always take the
+  exact path: they are never stepped, and sprites are not hashed, so a
+  recorded hash could not vouch for them. The scratch is the editor's own,
+  not the CollisionSystem's: that one indexes collider boxes, not sprites,
+  and leaves out entities without a collider.
+- Exact: every entity with Transform, SpriteRenderer and Spawned (what the
+  renderer draws).
+- Brute force (Play.Faulted): the IdComponent storage alone, with try_get
+  for the rest, so a World a throw left half-updated is never walked
+  through a multi-component view; an entity without Spawned still picks.
+
+## ADR-102 The stress generator's distributions, Guids and spreading (2026-11-10)
+
+**Decision.** The ledger's open row "Stress generator distributions" is
+closed with explicit distributions. Spawn i of press p draws from
+`rng::Stream(seed, p, StressGuid(seed, p, i), 0x53545200)`: the point
+count is 1 + Below(10) (uniform on 1..10; the legacy loop redrew its bound
+and gave a mean of 3.66), then each point x = Below(width), y =
+Below(height) in whole pixels (uniform; the legacy doubled x = 0 and folded
+y). The entity starts at its first point. The archetype is the legacy
+enemy (Editor.cpp:966-980) as assets/prefabs/enemy.prefab.json has it
+since M3, written as a prefab-like list of component JSON plus the derived
+PathCache and ActiveEffects a loader adds, so a spawned enemy walks from
+its first tick.
+
+- Guids are a fixed hash of (seed, press, index): the same press makes the
+  same entities everywhere. A press whose first Guid the World already
+  holds (a saved earlier session's) is skipped.
+- A press of n spawns is split into batches of "Spawns per tick" (64 by
+  default). In Play each batch goes to the SessionLog against consecutive
+  ticks from the next one, so a large press is spread over ticks and
+  replays exactly; in Edit mode, where nothing ticks, one batch of
+  create-entity commands is submitted per frame inside one coalesce scope
+  (one undo step). Each press is logged with its count and its first tick.
+- Remove (and Replace's first half) destroys every entity on the enemy
+  team, as the legacy buttons did.
+
+## ADR-103 The Viewport: an editor camera, the legacy letterbox, overlays and the gizmo as ImGui (2026-11-10)
+
+**Decision.** The Viewport draws the World through an editor camera of its
+own, never the World's Camera2D: it starts as the game's view
+(rampage::SandboxCamera: the primary camera, else the arena) and pans with
+a right or middle drag and zooms with the wheel (x1.1 per notch, 0.05 to
+40, about the cursor); "Reset view" restores it.
+
+- Layout ports the legacy letterbox math: FitAspectSize (scaleSize,
+  Editor.cpp:632-642) and CenteredTopLeft (getCenteredTLPos, :644-656) place
+  an image of the camera's aspect in the panel; the panel requests its
+  ViewportTarget at that size in whole pixels and draws it 1:1 with
+  ImGui::Image through TextureIds, every frame (no ImTextureID is kept).
+  Mouse to world goes through the same FitCanvas the renderer applies
+  inside the target, so a pick lands where the sprite is drawn.
+- The overlays (ids, boxes, headings, positions; Editor.cpp:538-620) are
+  built from the const World as screen-space primitives and drawn on
+  ImGui's draw list over the image, never into the World's render. The box
+  is the collision box (the Collider of rule R4) when there is one, else the
+  sprite's bounds: the legacy outlined the sprite bounds because they were
+  the hitbox. Red marks a box overlapping the player's. The legacy
+  quad-tree visualizer is not ported (the QuadTree is not kept).
+- The move gizmo (X, Y and both) starts a drag on a press over a handle:
+  BeginCoalesce("Move <name>"), a set-component of the Transform each frame
+  the position changes (the document shows the move: the preview), and
+  EndCoalesce on release: one undo step. A press elsewhere picks
+  (ctrl-click toggles).

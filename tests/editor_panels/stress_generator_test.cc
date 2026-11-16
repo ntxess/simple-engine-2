@@ -98,6 +98,7 @@ TEST_CASE("A spawn is the enemy archetype at its path's first point",
   // Every component reads through the registry's own JSON hooks.
   const ComponentRegistry& registry = w.Registry();
   for (const StressSpawn& spawn : spawns) {
+    const MutationGate gate = w.Get().OpenGate(GateReason::kTest);
     const entt::entity e = w.Get().Create(spawn.guid);
     for (const SpawnComponent& c : spawn.components) {
       const ComponentInfo* info = registry.FindByName(c.component);

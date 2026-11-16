@@ -55,6 +55,7 @@ TEST_CASE("Boxes are colliders, red where they overlap the player's",
   const entt::entity player = w.AddSprite({100.0F, 100.0F});
   const entt::entity touching = w.AddSprite({140.0F, 100.0F});
   const entt::entity apart = w.AddSprite({400.0F, 100.0F});
+  const MutationGate gate = w.Get().OpenGate(GateReason::kTest);
   entt::registry& reg = w.Get().Reg();
   reg.emplace<rampage::PlayerControl>(player);
   reg.emplace<rampage::Collider>(player, Vec2{24.0F, 24.0F});
