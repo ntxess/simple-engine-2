@@ -3317,6 +3317,15 @@ was 0.31 ms and the longest wake 1.18 ms. An earlier 600 s run the same day
 2 ms: 2763 saturated, 163 with the canary late and 85 in windows 42% to 89%
 busy, none in a quieter window.
 
+A third 600 s run, `--strict`, with no build on the machine (2026-11-16;
+the owner's other programs took 17% of the CPU on average, in bursts of up
+to 78% of a 100 ms window): 2003894 wakes, none dropped; p50 0.010 ms, p99
+0.16 ms, p99.9 0.29 ms, max 2.97 ms. Six wakes were over 2 ms (2.0 to
+3.0 ms), all in windows 27% to 78% busy, three of them with the canary late
+too, none unexplained; the 1731767 wakes in windows below 25% busy took at
+most 1.93 ms. None of the design's 12 to 29 ms stalls appeared without the
+builds. `--strict` fails on the six, so the idle gate stays pending.
+
 **The explanation.** The stalls are waits for a processor, not the wake
 protocol:
 - The protocol cannot lose a bump (ADR-108; `jobs.No woken worker sleeps
