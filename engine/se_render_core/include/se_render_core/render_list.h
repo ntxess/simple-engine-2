@@ -21,6 +21,14 @@
 //
 // The list keeps its buffers between builds: once it has held as many
 // sprites as a build needs, building allocates nothing.
+//
+// The per-sprite part (interpolation, culling, sort keys and vertices) is a
+// fork site, "render.RenderList" (M14; disabled unless a pool enables it):
+// BuildRenderListForked runs it per chunk of the
+// SpriteRenderer storage, each chunk writing its own slice of the scratch,
+// and the owner joins the visible items in chunk order before the sort. The
+// sort's order is total, so the list is the same bit for bit for every W
+// and as BuildRenderList's.
 
 #ifndef SE_RENDER_CORE_RENDER_LIST_H_
 #define SE_RENDER_CORE_RENDER_LIST_H_
@@ -30,6 +38,9 @@
 #include <optional>
 #include <vector>
 
+#include "se_core/jobs.h"
+#include "se_core/thread_role.h"
+#include "se_core/thread_safety.h"
 #include "se_core/types.h"
 #include "se_core/world.h"
 #include "se_render_core/render_components.h"
@@ -79,9 +90,23 @@ struct RenderListScratch {
     std::uint32_t quad = 0;
   };
 
+  // One fork chunk's results: its first sprite, its visible items (at
+  // items[begin ..]) and counts, and its sort keys' varying bits.
+  struct Chunk {
+    std::uint32_t begin = 0;
+    std::uint32_t visible = 0;
+    std::uint32_t candidates = 0;
+    std::uint32_t interpolated = 0;
+    std::uint64_t lo_or = 0;
+    std::uint64_t lo_and = 0;
+    std::uint64_t hi_or = 0;
+    std::uint64_t hi_and = 0;
+  };
+
   std::vector<SpriteQuad> quads;
   std::vector<SortItem> items;
   std::vector<SortItem> items_swap;
+  std::vector<Chunk> chunks;
 };
 
 struct RenderList {
@@ -97,6 +122,16 @@ struct RenderList {
 // camera whose zoom is not positive sees nothing.
 void BuildRenderList(const World& world, const Camera2D& camera, float alpha,
                      RenderList& list);
+// BuildRenderList with the per-sprite part on |jobs| as the site
+// RenderListSite() (on the owner thread of the World's simulation); the
+// same list.
+void BuildRenderListForked(const World& world, const Camera2D& camera,
+                           float alpha, RenderList& list,
+                           jobs::ForkJoinPool& jobs) SE_REQUIRES(g_sim_owner);
+
+// "render.RenderList": grain 1024 sprites, reads SpriteRenderer, Transform,
+// PrevTransform and Spawned, writes nothing in the World.
+[[nodiscard]] const jobs::ForkSiteDecl& RenderListSite();
 
 // The primary Camera2D of the World (the one with the lowest spawn serial
 // if several are marked primary), or nullopt.

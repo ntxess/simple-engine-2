@@ -24,6 +24,7 @@ se_add_module(se_core KIND STATIC
     src/detmath.cc
     src/dump_stream.cc
     src/edge_placement.cc
+    src/fork_fault_boundary.cc
     src/fp.cc
     src/guid.cc
     src/hash.cc
@@ -52,6 +53,9 @@ se_add_module(se_core KIND STATIC
 
 target_compile_definitions(se_core PUBLIC
   $<IF:$<CONFIG:Release>,SE_ASSERTS=0,SE_ASSERTS=1>)
+# Internal headers are included as "src/<name>.h" (the threaded pool's fault
+# boundary, M14).
+target_include_directories(se_core PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 if(SE_TRACY)
   target_link_libraries(se_core PRIVATE TracyClient)
   target_compile_definitions(se_core PUBLIC SE_TRACY=1)

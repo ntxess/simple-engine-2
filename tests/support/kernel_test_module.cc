@@ -167,26 +167,25 @@ struct PlayerInputSystem {
   }
 };
 
-jobs::ForkSite& MoverSite() {
+// The pool keeps the site's state (M14): each session's pool has its own.
+const jobs::ForkSiteDecl& MoverSite() {
   static const std::array<entt::id_type, 1> kReads = {
       entt::type_hash<Mover>::value()};
   static const std::array<entt::id_type, 1> kWrites = {
       entt::type_hash<Transform>::value()};
-  static jobs::ForkSite site = [] {
-    jobs::ForkSite s;
-    s.name = "Movers";
-    s.grain = 16;
-    s.reads = kReads;
-    s.writes = kWrites;
-    return s;
-  }();
-  return site;
+  static const jobs::ForkSiteDecl kSite{
+      .name = "kernel_test.Movers",
+      .grain = 16,
+      .reads = kReads,
+      .writes = kWrites,
+  };
+  return kSite;
 }
 
 struct MoverSystem {
   static constexpr std::string_view kName = "Movers";
   void Run(World& world, const TickContext& context) SE_REQUIRES(g_sim_owner) {
-    jobs::ForkSite& site = MoverSite();
+    jobs::ForkSite& site = context.jobs.Site(MoverSite());
     const auto view = world.Parallel<Transform, Mover>(site);
     const double time = context.clock.Time();
     context.jobs.ParallelFor(site, view.size(), [&](jobs::ChunkRange range) {

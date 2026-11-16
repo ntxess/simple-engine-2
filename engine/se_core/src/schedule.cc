@@ -3,8 +3,10 @@
 #include "se_core/schedule.h"
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
+#include <entt/core/type_info.hpp>
 #include <entt/entity/registry.hpp>
 #include <string_view>
 #include <vector>
@@ -12,6 +14,7 @@
 #include "se_core/assert.h"
 #include "se_core/breadcrumb.h"
 #include "se_core/core_components.h"
+#include "se_core/jobs.h"
 #include "se_core/profile.h"
 #include "se_core/profile_clock.h"
 #include "se_core/world.h"
@@ -19,16 +22,23 @@
 namespace se {
 namespace {
 
-// The built-in head of Movement: the pose at the end of the previous tick.
-void CopyPrevTransforms(World& world) SE_REQUIRES(g_sim_owner) {
+// The built-in head of Movement: the pose at the end of the previous tick,
+// a fork site (M14; disabled unless a pool enables it).
+void CopyPrevTransforms(World& world, jobs::ForkJoinPool& jobs)
+    SE_REQUIRES(g_sim_owner) {
   const Tick previous = world.Clock().tick - 1;
-  auto view = world.Reg().view<const Transform, PrevTransform>();
-  for (const auto [entity, transform, prev] : view.each()) {
-    prev.pos = transform.pos;
-    prev.rot = transform.rot;
-    prev.scale = transform.scale;
-    prev.tick = previous;
-  }
+  jobs::ForkSite& site = jobs.Site(PrevTransformCopySite());
+  const auto view = world.Parallel<PrevTransform, Transform>(site);
+  jobs.ParallelFor(site, view.size(), [&view, previous](jobs::ChunkRange r) {
+    view.ForChunk(r, [&view, previous](entt::entity entity) {
+      const Transform& transform = view.Read<Transform>(entity);
+      PrevTransform& prev = view.Write<PrevTransform>(entity);
+      prev.pos = transform.pos;
+      prev.rot = transform.rot;
+      prev.scale = transform.scale;
+      prev.tick = previous;
+    });
+  });
 }
 
 // The built-in end of Cleanup.
@@ -43,6 +53,20 @@ std::uint32_t ClampNs(std::uint64_t ns) {
 }
 
 }  // namespace
+
+const jobs::ForkSiteDecl& PrevTransformCopySite() {
+  static const std::array<entt::id_type, 1> kReads = {
+      entt::type_hash<Transform>::value()};
+  static const std::array<entt::id_type, 1> kWrites = {
+      entt::type_hash<PrevTransform>::value()};
+  static const jobs::ForkSiteDecl kSite{
+      .name = "se.PrevTransformCopy",
+      .grain = 1024,
+      .reads = kReads,
+      .writes = kWrites,
+  };
+  return kSite;
+}
 
 std::string_view PhaseName(Phase phase) noexcept {
   switch (phase) {
@@ -131,7 +155,7 @@ void Schedule::Step(World& world, const InputFrame& input,
       crumb.SetSystem(kPrevTransformCopyId);
       SE_PROFILE_ZONE("PrevTransformCopy");
       const std::uint64_t start = ProfileNowNs();
-      CopyPrevTransforms(world);
+      CopyPrevTransforms(world, jobs);
       stats_[kPrevTransformCopyId].Record(ProfileNowNs() - start);
     }
     while (next < entries_.size() && entries_[next].phase == phase) {

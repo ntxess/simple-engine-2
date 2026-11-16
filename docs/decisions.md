@@ -3026,3 +3026,350 @@ recorded in gates.md for M15.
 settles` appends to a watched file every 25 ms for 400 ms under a 100 ms
 scan: the old rule reported once per scan during the writes, the new one
 reports the finished size once (twice at most on a stalled writer).
+
+## ADR-107 The threaded ForkJoinPool: workers from se_os, sites kept by the pool, chunks as a fault boundary (2026-11-10)
+
+**Decision.** M14's pool replaces M2's inline one behind the same API
+(`ParallelFor(ForkSite&, count, body)`, `NestedParallelFor`, the chunking
+of `ChunkCount`/`ChunkAt`), with these contracts:
+- **Threads.** se_core runs the protocol but creates no thread (ADR-029):
+  `ForkJoinPool::Config::threads` makes a `jobs::WorkerThreads`, and se_os's
+  `ForkWorkers` (se_os/fork_workers.h) starts each worker with StartThread
+  as role kForkWorker, OS name `fork-worker-<i>`, Qos::kHigh, soft affinity.
+  Placement: workers 0 .. PerformanceOnlyCount - 1 prefer main's last-level
+  cache P-cores (`WorkerCpuSet(kPerformanceOnly)`), so a PerformanceOnly
+  site uses exactly those; every other worker prefers the cores of one
+  efficiency class, the cores in order (fastest class and main's cache
+  first) past main's and the PerformanceOnly workers', wrapping when W is
+  above the cores. On a homogeneous CPU every worker prefers every core,
+  M4's `WorkerCpuSet(kAnyPhysical)`. MaxWorkers is ForkPoolSize and
+  PerformanceOnlyWorkers is PerformanceOnlyCount.
+- **W.** `Config::workers`: 0 runs every fork inline (the default, so every
+  pool M2 code builds stays inline); -1 is the WorkerThreads' W_max capped by
+  `max_workers`; N is N (at most 15, and `max_workers` when set), which may
+  exceed the machine (the tests' W = 7 on any machine). The App builds its
+  pool with -1, `max_workers = ForkPoolSize` and se_os's factory; no site is
+  enabled, so no worker starts (the boot log's "none started" stays true).
+- **No worker until a site is enabled.** The workers start when a site
+  becomes enabled: `Site()` of a site `Config::enabled_sites` names,
+  `EnableSite(name, true)`, or the first fork of a caller's own enabled
+  `ForkSite`; the startup calibration (ADR-109) runs then. A start that
+  fails leaves the pool inline (`PoolStats::start_failed`, logged once).
+- **Sites are kept by the pool.** A system declares a `ForkSiteDecl` (name,
+  grain, min_items, core class, read and write sets) in static storage and
+  calls `context.jobs.Site(decl)`, which returns the pool's `ForkSite`
+  record (enabled, the fallback window, ForkStats, the join ring), made at
+  the first call and found again by the declaration's address (then its
+  name). Systems are stateless and game modules may not keep mutable
+  statics, and the inline and threaded drivers (or an editor's Play
+  session beside the game) may run the same module at once, so the state
+  belongs to the session's pool. `Sites()`/`FindSite()` list them for the
+  profiler and schedule panels (the integration). A caller's own
+  `ForkSite` object (M2's tests, se_bench) still works; it is not listed.
+  `Config::enabled_sites` names the sites enabled at registration (`"*"`
+  for every site, tests only); shipped configurations list none.
+- **Results do not depend on W.** A fork runs inline when the site is
+  disabled, in a fallback window, below min_items, at W = 0, with fewer than
+  two participants (participants = min(W' + 1, chunks / 4), W' the workers
+  the site may use) or with more than 2^19 chunks. Either way the chunks are
+  ChunkAt(count, grain, k). Variable outputs go to `jobs::ChunkOutputs<T>`,
+  one arena per chunk, concatenated in chunk order on the owner after the
+  join. Tests may set `Config::grain_override` (every site's grain) and
+  `chunks_per_participant`; every W of a comparison uses the same values.
+- **Fault boundary.** A threaded fork runs every chunk, the caller's too,
+  through `RunChunkContained` in engine/se_core/src/fork_fault_boundary.cc,
+  which joins ADR-006's list of `// se-fault-boundary` files. The first
+  exception is kept, the chunks not yet started are skipped, the caller
+  joins, then rethrows it (`ForkStats::faults` counts it); no thread
+  unwinds while another still reads the fork. An inline fork keeps M2's
+  behaviour: the exception propagates at once, later chunks do not run.
+- **Sinks.** `AudioEvents::Push`, the World-level sink game rules write,
+  asserts not-in-fork (the structural calls already did through Reg()).
+- **Fork sites written.** The Schedule's built-in PrevTransformCopy
+  (`se.PrevTransformCopy`, grain 1024); rampage's KinematicMove, Path and
+  Boundary (grain 1024; the entities a chunk moved are its output, marked
+  Moved by the owner after the join), Broadphase (grain 1024: each
+  candidate's box, source flag and spatial-hash cells, `SpatialHash::
+  AppendCells`, sorted on the owner by `Assemble`) and Narrowphase (grain
+  256 candidates: const `SpatialHash::Query` and the overlap test, contacts
+  per chunk); and the RenderList's cull, keys and vertices
+  (`render.RenderList`, grain 1024, `BuildRenderListForked`). The spatial
+  hash's query now gathers, sorts and drops duplicates instead of stamping
+  (the same ascending, unique indices, and no mutable state, so chunks may
+  query at once). Every site is disabled in every shipped configuration.
+
+**Why.** The spec puts the pool in se_core "behind the same API" and the
+threads in se_os; an interface the pool calls keeps se_core free of thread
+creation and lets tests supply hosts with chosen efficiency classes and
+battery states. Keeping the sites in the pool is the only place a stateless
+system can find per-session state. Rethrowing after the join is what the
+design's "the first exception is rethrown on main after the join" needs:
+an exception unwinding the caller's frame while a worker reads the body
+would be a use-after-free.
+
+**Deviations.** `BuildRenderListForked` has its own name instead of a
+`BuildRenderList` overload: tests/render/no_alloc_test.cc pins the
+builder's signature with `decltype(&BuildRenderList)`. The design's
+per-chunk DebugDraw slices: there is no DebugDraw sink yet; ChunkOutputs is
+the mechanism it will use. The design's "Swept AABB against tiles",
+"Scatter", "Body pushes", "Contact radix sort" and "key sort" candidates
+have no code in rampage or the RenderList to be written as sites (no tiles,
+bodies or radix-sorted contacts; the RenderList's radix sort stays serial).
+
+## ADR-108 The wake protocol, claims and the spin (2026-11-10)
+
+**Decision.** The design's protocol (mt-design "Data Flow", the descriptor
+row), made exact:
+- The caller writes the descriptor (invoke, body, count, grain, chunks,
+  the chaos claim order, its breadcrumb) with plain stores, its full 64-bit
+  generation, the batch hint and remaining = chunks, then
+  `claim.store(pack(...), release)`. The descriptor, the claim word,
+  remaining and the error slot each start a cache line.
+- The claim word packs a 16-bit generation, the range of workers that may
+  claim (two 4-bit indices), the chunk count (20 bits) and the next index
+  (20 bits). A worker loads the word first and adds only when the
+  generation is not one it ran out of, chunks are left and its index is in
+  the range; so next passes the count by at most one batch per claimer and
+  the fields cannot overflow (forks of more than 2^19 chunks run inline;
+  a batch is at most 2^13). The range is [0, W') for a fork (a
+  PerformanceOnly site's workers, or all) and one efficiency class for a
+  calibration fork. A worker that was not woken (spinning, or a thread
+  that started late) may claim from any fork whose range holds it;
+  between its load and its add a newer fork may be published, so rarely
+  a worker outside the range takes chunks, which it then runs (correct,
+  only placement suffers).
+- Claims are `fetch_add(batch, acq_rel)`; batch = clamp(chunks /
+  (participants * 8), 1, 8192), read from a relaxed hint (any value claims
+  a valid disjoint range). After a successful claim the claimer copies the
+  descriptor when its 64-bit generation is new (the fork cannot end while
+  the claim is outstanding, so the generation it reads is the claim's),
+  runs the batch, then `remaining.fetch_sub(n, acq_rel)` as its last access;
+  the decrement that reaches 0 calls `notify_one`. The caller claims like a
+  worker, then waits with `remaining.wait()` until it reads 0 (acquire): it
+  does not spin itself.
+- Each worker has its own padded wake word. The caller wakes participants
+  - 1 workers (the lowest indices): it stores the bump's generation, keeps
+  the stamp of the oldest bump the worker has not seen (a compare-exchange
+  from 0), `fetch_add(1, release)`, then `notify_one`. A worker loads its
+  word, accounts for a new value (it takes the stamp with an exchange to 0:
+  the latency of the oldest unseen bump), claims until none are left, then
+  `wait(old)`: a bump between the load and the wait makes the wait return
+  at once, so no bump is lost. `WorkerWakes()` exposes each word and the
+  value its worker last saw (equal once every bump was seen).
+- A woken worker that ran no chunk of its fork is a missed wake; one that
+  saw its bump more than 2 ms late and still ran a chunk is a late wake.
+  Both are counted per site after the join and per pool.
+- The spin: after running chunks a worker spins (pause instructions,
+  checking its wake word and the claim word) for at most `spin_us` (20) when
+  the caller's hint says another fork is predicted, then parks. The
+  prediction is per pool site: whether the next threaded fork after its last
+  one started within spin_us (`ForkSite::followed_quickly`), so "Path, then
+  Boundary at once" is learned and the last fork of a tick is not. The hint
+  is off on battery: `WorkerThreads::OnBattery` (se_os `BatteryPowered`:
+  GetSystemPowerStatus, or a battery and no online mains in
+  /sys/class/power_supply), polled at most once a second, before the
+  fork's start stamp so that the poll is neither join time nor wake latency
+  (ADR-110).
+
+**Why.** A 24-bit generation (the first layout) left no room for the
+eligibility range, and the range is what keeps a late-starting or spinning
+worker out of a PerformanceOnly site's fork and of another class's
+calibration (both seen in the first test runs). The generation's wrap is
+harmless: it only names the fork a claimer ran out of (a wrap could make a
+worker skip one fork), and the descriptor is matched by the 64-bit
+generation. Keeping the oldest unseen bump's stamp makes a worker that slept
+through several bumps report its whole delay rather than the last bump's.
+
+## ADR-109 ForkStats, the 4x-median fallback, calibration and chaos mode (2026-11-10)
+
+**Decision.**
+- **ForkStats** per site: forks, chunks, inline, threaded, fallbacks and
+  forks run in a fallback window, missed and late wakes, faults, the last
+  and the most participants, and the join (publish to join, the pool's
+  clock) p50, p99, p99.9 over the last 2048 threaded joins and the max
+  over all. The percentiles refresh after the 32nd threaded join, every 64
+  joins and on `RefreshStats()` (a sort of the 2048, every 64 forks).
+  `PoolStats` adds the bumps, wakes, unstamped wakes, the largest wake
+  latency, the workers' chunks and the spins.
+- **Fallback.** A threaded join slower than 4x the site's cached median
+  (from the last refresh) opens a 5 s window on the pool's clock in which
+  the site runs inline (`fallback_forks`), then it retries; each window
+  counts in `fallbacks`. `fallback_factor = 0` turns the rule off (the
+  tests and benches that must stay threaded). The clock is
+  `Config::now_ns` (ProfileNowNs; a test clock in the fallback test).
+- **Calibration.** When the workers start, for each efficiency class among
+  them (fastest first) one dummy fork of 200 chunks per worker of about
+  50 us each (about 10 ms; the caller sizes the chunk from its own speed
+  first and does not claim), which only that class's workers may claim.
+  `Calibrations()` keeps each class's workers, chunks, p50 and max chunk
+  time, wall time and its speed relative to the caller's; the pool logs
+  them. Nothing schedules on them yet: using them (claim weights, which
+  class a site may use) is M16's, with the measurements on a hybrid laptop
+  (docs/gates.md).
+- **Chaos mode** (`Config::chaos_seed`; `SE_CHAOS_SEED`, decimal or 0x hex,
+  read by se_os `ChaosSeedFromEnv`, which the App and the tests' pool
+  configurations use): a seeded permutation of the claim order per fork;
+  a yield before a quarter of the claims; a delay of up to 20 us between
+  a quarter of the claims and their descriptor read, and between a quarter
+  of the batches' last write and their decrement; injected late wakes: a
+  worker waits up to 100 us after an eighth of its wakes before it claims,
+  and the caller sends a quarter of its notifies up to 100 us after the
+  bump (before its own claims, so a fork whose chunks wait for each other
+  cannot deadlock). Results never depend on it.
+
+**Why.** The design's tails (a 29.2 ms forked tick against a 0.53 ms
+median) are why stats keep p99.9 and max, and why a slow join falls back
+rather than hoping. The calibration's results are recorded because the
+only hybrid machine is not here; acting on them without measurements would
+be guesswork.
+
+**Tests** (tests/jobs, `jobs.*`, label unit, every one under TSan in
+linux-clang-tsan): exactly-once chunks and per-item writes for W = 1/3/7
+and no chaos plus the eight seeds of `testing::kChaosSeeds`; visibility of
+one fork's writes in the join and in the next fork on other threads; no
+lost wake (forks of W + 1 chunks that wait for each other, 60 per W and
+seed, and every wake word seen); exceptions (two throwing chunks, the
+pool usable after; a worker's throw reaching the caller); destroying pools
+of 7 workers parked or spinning (a 50 ms spin) joins them all; nested forks
+inline on the worker; per-chunk outputs equal the serial result for W =
+0/1/3/7 and every seed; a PerformanceOnly site uses 1 of 4 workers; the
+stats, the fallback window and its expiry; the spin after predicted forks
+only and never on battery; calibration of two classes on a test host and
+of this machine's one class. Determinism: identical per-tick hashes for W =
+0 and W = 1/3/7 under each of the eight seeds, every site enabled at grain
+2 (8 for the pile-up), on the kernel golden (600 ticks), rampage's sandbox
+golden and the effects, patrol and stress reference scenarios (900 ticks
+each under every W and seed, 3600 at W = 0), and a pile-up of 240
+colliders in one 64 px cell with polled and moving event-driven sources
+(240 ticks, thousands of contacts a tick) whose RenderLists at alpha 0.5
+equal the serial builder's; and the threaded sim driver against the inline
+one at W = 0, 1 and 3 (sim.*). Death tests (label death, the debug
+presets): `death.sink_in_fork` and `death.sink_in_worker_chunk` push an
+AudioEvent from an inline chunk and from a chunk on a worker thread, and
+both end in the not-in-fork assert (the design's "World-level sink use in
+a fork").
+
+## ADR-110 The wake stalls: a soak with stamps, load windows and a canary; they are waits for a processor (2026-11-16)
+
+**Decision.** The design's open risk ("threads woke 12-29 ms late at the
+same instant" in 5 of 29 pool runs) is measured by `se_wake_soak`
+(tests/jobs/wake_soak_main.cc) and gated by `jobs.wake_soak`:
+- **The soak.** A pool of the machine's W_max workers on se_os's
+  ForkWorkers runs 120 frames a second on a precise timer, each with four
+  back-to-back forks of 4 (W + 1) chunks of 25 us, so the first fork of a
+  frame wakes parked workers. `ForkJoinPool::Config::wake_trace` hands
+  every wake to the tool on the worker that woke: the caller's bump stamp
+  (the oldest bump the worker had not seen, taken just before the publish)
+  and the stamp at which the worker saw it, both steady_clock
+  (QueryPerformanceCounter on Windows). The tool also keeps every join's
+  duration and the machine's busy share in each 100 ms window
+  (`ReadSystemCpuTimes`: GetSystemTimes, /proc/stat).
+- **The canary.** Beside the pool runs one thread of the workers' kind
+  (kForkWorker, Qos::kHigh, the workers' cores) that shares nothing with the
+  pool: it sleeps 1 ms at a time on its own PreciseTimer and records how
+  late each wake was. Late for the canary is 1 ms over its median of the
+  run (its usual lateness is the timer's granularity, 0.52 ms here).
+- **Every wake over the bound** (`kLateWakeNs`, 2 ms) is classified:
+  *saturated* (its window 90% busy or more, or the load unreadable),
+  *canary* (the canary was late while it waited), *beside load* (its window
+  between 25% and 90% busy, the canary on time) or *unexplained* (a quiet
+  window, below 25% busy, with the canary on time). The report gives the
+  wakes' p50, p99, p99.9 and max overall, for the quiet windows and for six
+  bands of the busy share, and each stall with its stamp, worker, latency,
+  window load, canary lateness and the other stalls within 1 ms.
+- **The gate.** `jobs.wake_soak` (labels slow and soak, Release builds
+  only, 600 s, run alone) fails when a wake over 2 ms is unexplained;
+  `--strict` fails on any wake over 2 ms and is for a machine known to be
+  idle (docs/gates.md). `jobs.wake_soak_smoke` runs 2 s in every preset,
+  sanitizers included, without the bound.
+- **The battery poll is not fork time.** The once-a-second
+  `WorkerThreads::OnBattery` poll ran between a fork's start stamp and its
+  publish, so it counted in the join (where 100 us of sysfs reads could
+  pass 4x a small site's median and send the site inline for 5 s, once a
+  second) and in the wake latency. The fork's stamp is now taken after the
+  poll (`jobs.The battery poll is not counted in the join`).
+
+**Measured** (2026-11-16, Ryzen 7 7700X, 8 cores and 16 threads, Windows
+11, msvc-release, W = 7; three other agents were building and testing on
+the machine, so its load swung between a few percent and 100%; the owner
+may have been using it). 600 s, 72000 frames, 288000 threaded forks,
+1933689 wakes, none dropped; p50 0.011 ms, p99 0.48 ms, p99.9 6.9 ms, max
+799 ms; 6444 wakes over 2 ms. By the load of the wake's window:
+
+| Window busy | Windows | Wakes | p99 | p99.9 | Max | Over 2 ms |
+|---|---|---|---|---|---|---|
+| 0-10% | 41 | 13705 | 0.16 ms | 0.29 ms | 0.37 ms | 0 |
+| 10-25% | 1333 | 444790 | 0.17 ms | 0.31 ms | 1.18 ms | 0 |
+| 25-50% | 2126 | 705924 | 0.21 ms | 0.42 ms | 5.31 ms | 17 |
+| 50-75% | 233 | 75293 | 0.44 ms | 1.48 ms | 12.4 ms | 50 |
+| 75-90% | 42 | 12333 | 1.56 ms | 6.15 ms | 13.6 ms | 92 |
+| 90-100% | 2222 | 681071 | 1.84 ms | 19.9 ms | 799 ms | 6285 |
+
+Of the 6444: 6285 saturated (in 5023 of them the canary was late too), 86
+with the canary late, 73 beside other load (windows 49% to 89% busy, median
+2.6 ms, at most 12.4 ms, 52 of them with another worker stalled within
+1 ms), 0 unexplained. 827 of the stalls were of the design's 12 to 29 ms,
+351 longer, and 2098 came with another worker's within 1 ms. The canary,
+which never touches the pool, woke up to 197 ms late (p99.9 57.9 ms) in the
+same run. In the quiet windows (137 s of the run, 458495 wakes) the p99.9
+was 0.31 ms and the longest wake 1.18 ms. An earlier 600 s run the same day
+(39% busy on average, before the bands were reported) had 3011 wakes over
+2 ms: 2763 saturated, 163 with the canary late and 85 in windows 42% to 89%
+busy, none in a quieter window.
+
+A third 600 s run, `--strict`, with no build on the machine (2026-11-16;
+the owner's other programs took 17% of the CPU on average, in bursts of up
+to 78% of a 100 ms window): 2003894 wakes, none dropped; p50 0.010 ms, p99
+0.16 ms, p99.9 0.29 ms, max 2.97 ms. Six wakes were over 2 ms (2.0 to
+3.0 ms), all in windows 27% to 78% busy, three of them with the canary late
+too, none unexplained; the 1731767 wakes in windows below 25% busy took at
+most 1.93 ms. None of the design's 12 to 29 ms stalls appeared without the
+builds. `--strict` fails on the six, so the idle gate stays pending.
+
+**The explanation.** The stalls are waits for a processor, not the wake
+protocol:
+- The protocol cannot lose a bump (ADR-108; `jobs.No woken worker sleeps
+  through its bump` under TSan and the eight chaos seeds), and both stamps
+  bracket only the caller's notify, the OS making the worker runnable and
+  the worker's first instructions.
+- The workers run at the default priority (the design's HighQoS only
+  forbids throttling). A thread that becomes ready gets a processor at once
+  when one is idle; when every processor it may use runs another thread of
+  its priority, it waits in a ready queue, for as long as a scheduler
+  quantum. So a wake stalls exactly when other work holds the processors at
+  that instant, which is what the bands show: no wake over 2 ms in 458495
+  wakes while the machine was below 25% busy, 0.002% of them at 25-50%,
+  0.07% at 50-75%, 0.75% at 75-90% and 0.92% at 90% or more; several
+  workers stall at the same instant because they become ready at the same
+  instant; and a thread that only sleeps on a timer is late in the same
+  moments. A busy share over 100 ms cannot show that the processors were
+  all taken for the few milliseconds of one stall, which is why the stalls
+  beside 25-90% load are reported as such and not as explained.
+- The design's 12-29 ms fits a wait of up to a quantum (on Windows client
+  a quantum is two clock intervals, about 31 ms at the default 15.6 ms
+  interval, and longer for the foreground process); its pool runs took most
+  of the machine's cores beside whatever else ran, and its two-thread runs
+  left processors free. That part is an inference from the load dependence,
+  not a trace.
+
+**Consequences.** With the machine to itself the pool's wakes are bounded
+(1.18 ms at most over 137 s of quiet windows; a whole 600 s `--strict` run
+on an idle machine is a gate in docs/gates.md). On a machine other work
+loads, a fork's join can wait a quantum for a worker: that is what the
+4x-median fallback is for (ADR-109), what `ForkStats::late_wakes` and
+`missed_wakes` count, and what M16's per-site soak must measure before a
+site is enabled. Raising the workers' priority would let them preempt
+other processes' work; the design does not ask for it and nothing here
+decides it. Every site stays disabled.
+
+**Not done here.** A kernel trace naming the thread that held each
+processor during a stall (the design's "ETW/WPR"): `wpr.exe` is on the
+machine but recording needs an elevated prompt, which the agent does not
+have, and the Windows Performance Analyzer is not installed (docs/gates.md
+has the commands). The Tracy GUI is not installed either.
+
+**Deviation.** The spec's alternatives are "explain stalls seen" or "no
+wake over 2 ms in the soak". The soak does both in part: no wake over 2 ms
+in its quiet windows, and every stall elsewhere attributed to measured load
+(saturated, or the canary late) or reported beside it; the run was not on
+an idle machine, so the whole-run bound and the trace remain gates.

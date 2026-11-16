@@ -39,6 +39,7 @@
 #include "se_core/thread_role.h"
 #include "se_core/time.h"
 #include "se_core/world.h"
+#include "se_os/fork_workers.h"
 #include "se_platform/display_output.h"
 #include "se_platform/fatal.h"
 #include "se_platform/fs.h"
@@ -102,8 +103,8 @@ struct GameRuntime {
 
   ModuleInstance instance;
   GameStateStack states;
-  // No workers (W = 0) until M14; the most it may start comes from the CPU
-  // topology (boot step 8).
+  // The threaded pool (M14) with up to the CPU topology's W_max workers
+  // (boot step 8), none started: no site is enabled in a shipped build.
   jobs::ForkJoinPool pool;
   SimDriver driver;
   SessionLog session;
@@ -460,6 +461,11 @@ std::expected<void, Error> App::StartGame() {
   env.tick_rate = setup_.tick_rate;
   jobs::ForkJoinPool::Config pool_config;
   pool_config.max_workers = cpu_.fork_pool_size;
+  // M14: the threaded pool's workers come from se_os, and only start when a
+  // site is enabled (none is; M16 decides). SE_CHAOS_SEED turns chaos on.
+  pool_config.workers = -1;
+  pool_config.threads = ForkWorkersFactory();
+  pool_config.chaos_seed = ChaosSeedFromEnv();
   // The action map: the module's bindings and the settings file's keys;
   // an unknown key is a boot error naming it (M8).
   auto map = ActionMap::Build(setup_.module->actions, settings_);

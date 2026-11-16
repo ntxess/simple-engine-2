@@ -17,6 +17,7 @@
 
 #include "game_rampage/module.h"
 #include "se_core/input_frame.h"
+#include "se_core/jobs.h"
 #include "se_core/thread_role.h"
 #include "se_core/thread_safety.h"
 #include "se_core/types.h"
@@ -68,6 +69,8 @@ struct RampageSessionOptions {
   // Called with the sandbox World after the load (tick 0) and after every
   // tick; ticks then run one at a time.
   std::function<void(const World&)> on_world;
+  // The session's ForkJoinPool (M14; W = 0 by default).
+  jobs::ForkJoinPool::Config pool{};
 };
 
 struct RampageSessionResult {

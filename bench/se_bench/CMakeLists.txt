@@ -78,6 +78,15 @@ se_bench_suite(rampage_tick_5k
 se_bench_suite(snapshot_publish_10k
   SOURCES suites/snapshot_publish_10k.cc
   DEPS se_render_core)
+# M14: fork overhead (empty and 50 us chunks, back to back and parked) and
+# the join tails at W = 1/3/7, on se_os's fork workers. One source file
+# registers all nine suites.
+se_bench_suite(fork_empty_w1 SOURCES suites/fork_join.cc DEPS se_os)
+foreach(_se_fork_suite
+    fork_empty_w3 fork_empty_w7 fork_parked_w1 fork_parked_w3
+    fork_parked_w7 fork_50us_w1 fork_50us_w3 fork_50us_w7)
+  se_bench_suite(${_se_fork_suite})
+endforeach()
 
 add_test(NAME se_bench.list COMMAND se_bench --list)
 set_tests_properties(se_bench.list PROPERTIES

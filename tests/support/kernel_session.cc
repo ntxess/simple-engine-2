@@ -134,7 +134,7 @@ KernelSessionResult RunKernelSession(const KernelSessionOptions& options) {
                    scene);
   }
 
-  jobs::ForkJoinPool pool;
+  jobs::ForkJoinPool pool(options.pool);
   SimDriver driver(module.MutableSchedule(), pool);
   driver.AttachInputRing(options.input_ring);
   driver.SetTickGate(options.gate);

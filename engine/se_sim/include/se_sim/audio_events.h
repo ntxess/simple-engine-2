@@ -26,7 +26,9 @@
 #include <utility>
 #include <vector>
 
+#include "se_core/assert.h"
 #include "se_core/hash.h"
+#include "se_core/jobs.h"
 #include "se_core/thread_role.h"
 #include "se_core/thread_safety.h"
 #include "se_core/types.h"
@@ -66,7 +68,9 @@ class AudioEvents {
 
   AudioEvents() { events_.reserve(kCapacity); }
 
+  // Owner thread, never from a fork chunk (a World-level sink, M14).
   void Push(const AudioEvent& event) {
+    SE_ASSERT_NOT_IN_FORK();
     if (events_.size() >= kCapacity) {
       ++dropped_;
       return;

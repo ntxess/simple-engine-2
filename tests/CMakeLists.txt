@@ -27,9 +27,12 @@ else()
 endif()
 set(SE_GOLDEN_PLATFORM "${_se_golden_os}-${_se_golden_cc}")
 
-# Shared test support: goldens, role scopes and the null WakeMain().
+# Shared test support: goldens, role scopes and the null WakeMain(); the
+# fork pool configurations of the M14 tests (support/fork_config.h, se_os's
+# ForkWorkers).
 se_add_module(se_test_support KIND STATIC
   SOURCES
+    support/fork_config.cc
     support/golden.cc
     support/kernel_session.cc
     support/kernel_test_components.cc
@@ -39,6 +42,7 @@ se_add_module(se_test_support KIND STATIC
     support/virtual_display.cc
   PUBLIC_DEPS
     se_core
+    se_os
     se_sim
   DETERMINISTIC
   TEST)
@@ -113,6 +117,7 @@ se_add_module(se_death_tests KIND EXECUTABLE
     death/death_main.cc
   PRIVATE_DEPS
     se_core
+    se_sim
     se_test_support
   DETERMINISTIC
   TEST)
@@ -121,6 +126,8 @@ if(NOT CMAKE_BUILD_TYPE STREQUAL "Release")
     "world_access_in_fork|not allowed inside a fork chunk"
     "structural_call_in_fork|not allowed inside a fork chunk"
     "create_in_fork|not allowed inside a fork chunk"
+    "sink_in_fork|not allowed inside a fork chunk"
+    "sink_in_worker_chunk|not allowed inside a fork chunk"
     "owner_fork_inside_chunk|ParallelFor inside a fork chunk: use jobs::NestedParallelFor"
     "nested_fork_outside_chunk|NestedParallelFor outside a fork chunk"
     "undeclared_read|ParallelView read of a component the ForkSite does not declare"
@@ -185,6 +192,8 @@ endif()
 
 add_subdirectory(os)
 add_subdirectory(rampage)
+# M14: the threaded ForkJoinPool's properties and determinism across W.
+add_subdirectory(jobs)
 add_subdirectory(render)
 # M17a: the dedicated sim driver, headless.
 add_subdirectory(sim)
