@@ -592,6 +592,48 @@ TEST_CASE("Standard HalfRate: a frame's present one vblank late is a miss",
   REQUIRE(totals.missed_presents >= 1);
 }
 
+TEST_CASE("Standard at frame latency 2: a present behind one is on time",
+          "[pacer]") {
+  const testing::MainThreadScope main;
+  // The editor's pacing (M10a, ADR-097): Standard at frame latency 2. One
+  // present waits in the queue ahead of each frame's own, so a frame's
+  // present shows two vblanks after the frame's vblank, and that is on
+  // time: no misses and no HalfRate from an editor presenting every
+  // vblank.
+  FramePacerConfig config = StandardConfig();
+  config.frame_latency = 2;
+  Loop loop(Windowed(), config);
+  loop.port.model_frame_latency = true;
+  loop.Attach();
+  REQUIRE(loop.pacer.Mode() == PacingMode::kStandard);
+  REQUIRE(loop.pacer.FrameLatency() == 2);
+  REQUIRE(loop.port.latencies.back() == 2);
+  loop.Run(2.0);
+  const PacerTotals& totals = loop.pacer.Totals();
+  // A frame every vblank.
+  REQUIRE(loop.frames.size() > 320);
+  REQUIRE(totals.resolved_presents > 300);
+  REQUIRE(totals.missed_presents == 0);
+  REQUIRE(totals.half_rate_entries == 0);
+  REQUIRE_FALSE(loop.pacer.HalfRate());
+  for (std::size_t i = loop.frames.size() - 20; i < loop.frames.size(); ++i) {
+    const PacerFrame& frame = loop.frames[i].pacer;
+    // The target is two vblanks after the frame's vblank, where the fake
+    // display shows the present (presents are 1-based, one a frame).
+    const std::uint64_t vblank = loop.port.LatestVblank(frame.frame_start_ns);
+    CHECK(std::abs(static_cast<double>(frame.target_ns - vblank) -
+                   2.0 * kPeriod165) < 2.0);
+    const auto shown = loop.port.ShownRefresh(i + 1);
+    REQUIRE(shown.has_value());
+    CHECK(*shown ==
+          loop.port.RefreshAt(frame.target_ns) + FakePresentPort::kRefreshBase);
+  }
+  // One vblank later than that is a miss.
+  loop.port.LatePresents(1);
+  for (int i = 0; i < 8; ++i) loop.Step();
+  REQUIRE(totals.missed_presents >= 1);
+}
+
 TEST_CASE("Standard HalfRate: a frame slower than a vblank holds two",
           "[pacer]") {
   const testing::MainThreadScope main;

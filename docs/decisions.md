@@ -3178,7 +3178,10 @@ frame (Edit mode only). The App exposes `GameInstance()`, `GamePool()` and
   L). Before, every present at latency 2 counted one vblank late and
   HalfRate entered by misses on an editor that presented every vblank
   (measured on the 165 Hz display: 139 of 152 presents "missed"; 0 of 152
-  with the change). Latency 1 is unchanged.
+  with the change). Latency 1 is unchanged. `pacing.Standard at frame
+  latency 2: a present behind one is on time` checks it on the fake
+  display, whose waits follow the set frame latency when a test asks
+  (FakePresentPort::model_frame_latency).
 
 **Why.** The spec puts the editor on "the single loop": duplicating the
 App's boot, pacing and shutdown order in se_editor would fork them; hooks

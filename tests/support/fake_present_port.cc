@@ -98,16 +98,26 @@ bool FakePresentPort::GetPresentStats(PresentStatistics& stats) {
   return true;
 }
 
+const FakePresentPort::Shown* FakePresentPort::WaitedPresent() const {
+  const std::size_t back =
+      model_frame_latency && !latencies.empty() && latencies.back() > 1
+          ? static_cast<std::size_t>(latencies.back())
+          : 1;
+  if (presents_.size() < back) return nullptr;
+  return &presents_[presents_.size() - back];
+}
+
 void FakePresentPort::WaitForNewestShown() {
-  if (presents_.empty()) return;
-  const std::uint64_t shown =
-      VblankAt(presents_.back().refresh) + wake_latency_ns;
+  const Shown* waited = WaitedPresent();
+  if (waited == nullptr) return;
+  const std::uint64_t shown = VblankAt(waited->refresh) + wake_latency_ns;
   clock_->now_ns = std::max(clock_->now_ns, shown);
 }
 
 bool FakePresentPort::NewestShown() const {
-  return presents_.empty() ||
-         VblankAt(presents_.back().refresh) + wake_latency_ns <= clock_->now_ns;
+  const Shown* waited = WaitedPresent();
+  return waited == nullptr ||
+         VblankAt(waited->refresh) + wake_latency_ns <= clock_->now_ns;
 }
 
 bool FakePresentPort::SetFrameLatency(int frames) {
