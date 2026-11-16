@@ -60,3 +60,20 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release")
   set_tests_properties(jobs.wake_soak PROPERTIES
     LABELS "slow;soak" RUN_SERIAL TRUE TIMEOUT 900)
 endif()
+
+# M14 exit: no fork site is enabled in any shipped configuration. The scan
+# covers engine/, games/, apps/ and config/ (tests, benches and tools enable
+# sites explicitly); the planted fixture proves it flags one.
+add_test(NAME checks.no_fork_site_enabled
+  COMMAND Python3::Interpreter
+          "${CMAKE_CURRENT_SOURCE_DIR}/check_no_site_enabled.py"
+          "${CMAKE_SOURCE_DIR}")
+add_test(NAME checks.planted.fork_site_enabled
+  COMMAND Python3::Interpreter
+          "${CMAKE_CURRENT_SOURCE_DIR}/check_no_site_enabled.py"
+          "${CMAKE_CURRENT_SOURCE_DIR}/planted"
+          "${CMAKE_CURRENT_SOURCE_DIR}/planted/engine")
+set_tests_properties(checks.no_fork_site_enabled PROPERTIES LABELS checks)
+set_tests_properties(checks.planted.fork_site_enabled PROPERTIES
+  LABELS checks
+  PASS_REGULAR_EXPRESSION "enable_site[.]cc:11: enabled_sites")
