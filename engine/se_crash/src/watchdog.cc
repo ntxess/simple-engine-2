@@ -51,9 +51,10 @@ constexpr std::uint64_t kNsPerMs = 1'000'000;
 constexpr double kNsToSec = 1e-9;
 // How long the deadline path waits for the log worker to flush.
 constexpr std::uint64_t kDeadlineFlushNs = 1'000'000'000;
-// How long a hang's dump waits for the log worker to write the records
-// before it, the hang's own line included (inside the 6 s from the hang's
-// start to its dump: a declaration comes at most 5.5 s after it).
+// How long the watchdog waits, after a hang's dump, for the log worker to
+// write the records up to it (the hang's own line and the dump's
+// included). After the dump: the wait takes nothing from the 6 s between a
+// hang's start and its dump.
 constexpr std::uint64_t kHangFlushNs = 200'000'000;
 
 struct DumpRequest {
@@ -302,13 +303,14 @@ void Watchdog::State::OnHang(const HangDetector& detector,
       "chunk {}): requesting a dump",
       reason, sample.iterates, crumb.tick, BreadcrumbPhase(crumb), crumb.system,
       crumb.chunk);
-  // The log file is complete up to the hang before its dump is written
-  // (mt-design.md P12); the rings are dump streams either way.
-  static_cast<void>(FlushLog(kHangFlushNs));
   hang_dump_ok = WriteDump(reason);
   if (hang_dump_ok) {
     hang_dumps_written.fetch_add(1, std::memory_order_release);
   }
+  // The log file is complete up to the hang and its dump (mt-design.md
+  // P12: a hung process is often ended by hand next); the rings are dump
+  // streams either way.
+  static_cast<void>(FlushLog(kHangFlushNs));
 }
 
 void Watchdog::State::OnHangEnded(const HangDetector& detector) {

@@ -122,6 +122,9 @@ namespace {
 constexpr std::uint64_t kTitleIntervalNs = 250'000'000;
 constexpr std::uint64_t kLogIntervalNs = 2'000'000'000;
 constexpr double kNsToSec = 1e-9;
+constexpr std::uint64_t kNsPerMs = 1'000'000;
+// A teardown this long logs where its time went (the CI gate is 2 s).
+constexpr std::uint64_t kSlowTeardownNs = 500'000'000;
 // A failed device recreation is retried this often, this many times.
 constexpr std::uint64_t kRecreateRetryNs = 1'000'000'000;
 constexpr std::uint32_t kMaxRecreateAttempts = 5;
@@ -784,6 +787,14 @@ void App::RunDurableSaveTest() {
 void App::NoteTeardown(std::string_view step) noexcept {
   if (teardown_count_ < teardown_steps_.size()) {
     teardown_steps_[teardown_count_++] = step;
+  }
+  MarkTeardown(step);
+}
+
+void App::MarkTeardown(std::string_view part) noexcept {
+  if (teardown_mark_count_ < teardown_marks_.size()) {
+    teardown_marks_[teardown_mark_count_++] = {.part = part,
+                                               .end_ns = SDL_GetTicksNS()};
   }
 }
 
@@ -1559,8 +1570,24 @@ SDL_AppResult App::Shutdown(SDL_AppResult result) {
   const std::uint64_t teardown_start = SDL_GetTicksNS();
   Teardown();
   // CI keeps every teardown under 2 s (M12; the callback tests gate it).
+  const std::uint64_t teardown_ns = SDL_GetTicksNS() - teardown_start;
   SE_LOG_INFO("teardown took {:.1f} ms",
-              static_cast<double>(SDL_GetTicksNS() - teardown_start) * 1e-6);
+              static_cast<double>(teardown_ns) * 1e-6);
+  if (teardown_ns >= kSlowTeardownNs) {
+    // Where a slow teardown spent its time: the parts of 1 ms and more.
+    std::string parts;
+    std::uint64_t from = teardown_start;
+    for (std::size_t i = 0; i < teardown_mark_count_; ++i) {
+      const TeardownMark& mark = teardown_marks_[i];
+      const std::uint64_t ns = mark.end_ns > from ? mark.end_ns - from : 0;
+      from = std::max(from, mark.end_ns);
+      if (ns < kNsPerMs) continue;
+      if (!parts.empty()) parts += ", ";
+      parts += std::format("{} {:.0f} ms", mark.part,
+                           static_cast<double>(ns) * 1e-6);
+    }
+    SE_LOG_INFO("slow teardown: {}", parts.empty() ? "no part of 1 ms" : parts);
+  }
   if (lane_stats_) AssetRuntime::LogLaneStopped(*lane_stats_);
   if (replay_submitted_) {
     if (lane_durable_failures_ > replay_failures_before_) {
@@ -1676,17 +1703,21 @@ void App::Teardown() {
   // device.
   present_.reset();
   renderer_.reset();
+  MarkTeardown("renderer (12)");
   gpu_.reset();
+  MarkTeardown("gpu-device (12)");
   // Step 14: remove the subclass, destroy the window.
   if (window_) window_->SetListener(nullptr);
   window_.reset();
   wake_.reset();
   filter_.reset();
   SDL_ResetHint(SDL_HINT_MAIN_CALLBACK_RATE);
+  MarkTeardown("window (14)");
   // The open gamepads, before their subsystem goes.
   gamepads_.CloseAll();
   // Step 15: SDL_QuitSubSystem(GAMEPAD | VIDEO).
   sdl_.reset();
+  MarkTeardown("sdl (15)");
   // Step 16: SDL's log output to stderr, then drain and stop the log
   // worker (spdlog::shutdown); SE_LOG_* is synchronous from here on.
   if (logging_) {

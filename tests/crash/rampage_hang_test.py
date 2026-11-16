@@ -128,6 +128,22 @@ def log_time(line):
     return float(match.group(1)) if match else None
 
 
+def describe_delay(run, start, written):
+    """Where a late dump's time went: the declaration (late when the
+    watchdog itself was not scheduled: ADR-104 does not count time it did
+    not sample) or the handler's write."""
+    declared = run.find("requesting a dump")
+    at = log_time(declared[1]) if declared else None
+    gaps = run.find("the watchdog took no sample for")
+    parts = []
+    if at is not None:
+        parts.append(f"declared {at - start:.3f} s after the hang started, "
+                     f"written {written - at:.3f} s after that")
+    parts.append(f"unwatched gap: {gaps[1].strip()!r}" if gaps
+                 else "no unwatched gap logged")
+    return "; ".join(parts)
+
+
 def check_dump(failures, dump, expected, system):
     failures.equal(dump["problems"], [], "read_dump problems")
     ids, tick = base.check_breadcrumbs(failures, dump, TICK)
@@ -209,7 +225,8 @@ def main():
                   f"(arrived {dumped[0] - hang[0]:.3f} s apart)")
             failures.check(5.0 <= took <= HANG_LIMIT_S,
                            f"the hang dump came {took:.3f} s after the hang "
-                           f"started (5 to {HANG_LIMIT_S} s)")
+                           f"started (5 to {HANG_LIMIT_S} s): "
+                           f"{describe_delay(run, start, written)}")
     declared = [line for line in output.splitlines()
                 if " E watchdog " in line and "requesting a dump" in line]
     failures.equal(len(declared), 1, "hangs declared")

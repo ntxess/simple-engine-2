@@ -437,6 +437,9 @@ class App final : public WindowListener {
   void RunDurableSaveTest() SE_REQUIRES(g_main);
   // Records a teardown step for the shutdown-order log (ADR-088).
   void NoteTeardown(std::string_view step) noexcept;
+  // Records when a part of the teardown ended, for the log line that says
+  // where a slow teardown spent its time (M12's 2 s gate).
+  void MarkTeardown(std::string_view part) noexcept;
   void RunPushKeys(const FrameReport& report) SE_REQUIRES(g_main);
   // The input sampler (M8): started at the first iterate, inside ADR-047's
   // window; parked while Suspended or Idle; its rate from the power source
@@ -489,6 +492,13 @@ class App final : public WindowListener {
   // The teardown steps run, in order (ADR-088).
   std::array<std::string_view, 24> teardown_steps_{};
   std::size_t teardown_count_ = 0;
+  // The parts of the teardown and when each ended (SDL_GetTicksNS).
+  struct TeardownMark {
+    std::string_view part;
+    std::uint64_t end_ns = 0;
+  };
+  std::array<TeardownMark, 24> teardown_marks_{};
+  std::size_t teardown_mark_count_ = 0;
   UserSettings settings_;
   std::unique_ptr<audio::AudioEngine> audio_;
   std::unique_ptr<GameRuntime> game_;

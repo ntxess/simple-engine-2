@@ -19,11 +19,11 @@
 // the pure HangDetector: the 30 s boot budget applies until Arm(); then 5
 // consecutive 1 s periods without progress, with no excuse and no debugger,
 // are a hang (ADR-104); time during which the watchdog itself took no
-// sample (the whole process was stopped) is not counted. A hang gets the
-// log flushed and one out-of-process dump per episode, written on this
-// thread with DumpWithoutCrash, its reason labelled a GPU or compositor
-// stall when main was inside an SDL_GPU or pacer wait; the episode's end,
-// when main makes progress again, is logged with its length.
+// sample (the whole process was stopped) is not counted. A hang gets one
+// out-of-process dump per episode, written on this thread with
+// DumpWithoutCrash, its reason labelled a GPU or compositor stall when main
+// was inside an SDL_GPU or pacer wait, and the log flushed after it; the
+// episode's end, when main makes progress again, is logged with its length.
 // The watchdog never calls DbgHelp, never breaks into a debugger and never
 // ends the process for a hang. Once the shutdown deadline starts (5 s after
 // the quit drain) hangs are no longer judged; when it expires the watchdog

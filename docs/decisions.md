@@ -3059,10 +3059,12 @@ hang_detector.h, watchdog.h):
   keeps sampling while main is stuck.
 - A hang is declared once per episode: one ERROR line ("hang N: main made
   no progress for X s at tick T (iterate I; main's breadcrumb: tick, phase,
-  system, chunk): requesting a dump"), a log flush of at most 200 ms (the
-  log file is complete up to the hang before its dump: mt-design.md P12)
-  and one DumpWithoutCrash on the
-  watchdog thread with the same text as the dump's `se.dump_reason`. The
+  system, chunk): requesting a dump"), one DumpWithoutCrash on the
+  watchdog thread with the same text as the dump's `se.dump_reason`, and
+  then a log flush of at most 200 ms (the log file is complete up to the
+  hang and its dump's line, mt-design.md P12: a hung process is often
+  ended by hand next; the flush comes after the dump so that it takes
+  nothing from the 6 s between a hang's start and its dump). The
   episode ends at the first sample that sees progress again, logged as
   "hang N ended: main made progress again after X s (Hung -> Running)",
   with the length from the last progress before the hang. The hang number
@@ -3211,7 +3213,16 @@ judged`, and the desktop tests of ADR-106.
 - The teardown gate: `tests/platform/support/test_app.cc` measures every
   App test's SDL_AppQuit and fails the run (it returns kSlowTeardown) when
   it took 2 s or more; the App logs "teardown took X ms" after every
-  shutdown, which the rampage hang test also gates.
+  shutdown, which the rampage hang test also gates. A teardown of 500 ms
+  or more also logs where the time went ("slow teardown: audio (7) 1081
+  ms, gpu-device (12) 105 ms, ...": the parts of 1 ms and more, in order),
+  so a failed gate names its step. The limit is wall-clock time: on this
+  machine a teardown takes 0.1 s (rampage on Vulkan with the validation
+  layers) and stays under 1 s in every test of an unloaded run, but with
+  every core taken by other processes (parallel builds) single joins and
+  the device's destruction have been seen to take over a second each, and
+  two Vulkan desktop tests under ASan once took 2.2 and 2.5 s; such a
+  failure is the machine's, and the run is repeated.
 
 **Why.** The spec's session header is "what a replay needs": the replay
 header's fields already say that for `--record` files, so the stream
