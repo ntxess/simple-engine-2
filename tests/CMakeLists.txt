@@ -215,6 +215,8 @@ if(SE_BUILD_PLATFORM)
   add_subdirectory(editor)
   add_subdirectory("${CMAKE_SOURCE_DIR}/tools/render_shot"
                    "${CMAKE_BINARY_DIR}/tools/render_shot")
+  # M10b: the editor's panels, headless.
+  add_subdirectory(editor_panels)
 endif()
 
 # tools/se_replay links the kernel test module from tests/support, so it is
