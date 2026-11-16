@@ -42,6 +42,7 @@ endif()
 se_add_module(se_imgui KIND STATIC
   SOURCES
     src/imgui_context.cc
+    src/imgui_renderer.cc
     $<TARGET_OBJECTS:se_imgui_third_party>
   PUBLIC_DEPS
     se_core

@@ -1,0 +1,11 @@
+# A save that fails (renames refused for 3 s, past the lane's 2 s retry)
+# keeps the document dirty and cancels the quit (M10a).
+set 5a4db0c5-0000-4000-8000-000000000000 Transform {"pos":{"x":321,"y":234},"rot":0,"scale":{"x":1,"y":1},"teleport_tick":0}
+disk-busy 3000
+quit save
+wait-ms 2600
+wait-frames 3
+expect-quit-pending no
+expect-dirty yes
+wait-ms 600
+quit discard

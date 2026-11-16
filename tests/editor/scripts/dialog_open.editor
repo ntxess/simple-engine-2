@@ -1,0 +1,10 @@
+# Dialog results from SDL's dialog thread (played by another thread) and
+# from main open the chosen document at the next frame start (M10a).
+dialog-open open
+dialog-callback assets/scenes/sandbox.scene.json from-thread
+wait-frames 3
+expect-hash document initial
+dialog-callback cancel
+wait-frames 2
+expect-state edit
+quit discard

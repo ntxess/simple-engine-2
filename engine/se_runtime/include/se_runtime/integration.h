@@ -32,12 +32,14 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "se_core/error.h"
 #include "se_core/input_frame_ring.h"
 #include "se_core/thread_role.h"
 #include "se_core/thread_safety.h"
 #include "se_crash/watchdog.h"
+#include "se_log/log_worker.h"
 #include "se_platform/display_output.h"
 #include "se_platform/vblank_sampler.h"
 #include "se_runtime/app_config.h"
@@ -108,6 +110,11 @@ class Logging {
   // then on. Idempotent.
   void Stop() noexcept;
   [[nodiscard]] bool Running() const noexcept;
+  // M10a's log panel: the panel ring's lines after |serial| (see
+  // LogWorker::TryCopyPanelLinesSince), and the worker's counts.
+  bool TryCopyPanelLinesSince(std::uint64_t& serial,
+                              std::vector<std::string>& lines) const;
+  [[nodiscard]] LogWorkerStats WorkerStats() const noexcept;
   // The log file, or empty when the worker writes none.
   [[nodiscard]] const std::string& FilePath() const noexcept {
     return file_path_;

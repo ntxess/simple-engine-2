@@ -229,6 +229,17 @@ class GpuResources {
     ReleaseNow(kind, object);
   }
 
+  // --- Released this frame (M10a, ADR-098) ---
+  // Starts a frame of the release log: the textures released from now on
+  // are remembered (debug builds, up to kReleaseLogSize per frame) until
+  // the next call. The editor calls it at each frame start.
+  static constexpr std::size_t kReleaseLogSize = 256;
+  void MarkFrameStart() noexcept { released_count_ = 0; }
+  // |texture| was released since MarkFrameStart() (and not created again
+  // at the same address since). Always false in builds without asserts.
+  [[nodiscard]] bool ReleasedThisFrame(
+      const SDL_GPUTexture* texture) const noexcept;
+
   // --- Counted creation ---
   [[nodiscard]] SDL_GPUTexture* CreateGpuTexture(
       const SDL_GPUTextureCreateInfo& info) noexcept SE_REQUIRES(g_main);
@@ -362,6 +373,10 @@ class GpuResources {
   SDL_GPUTransferBuffer* upload_buffer_ = nullptr;
 
   std::vector<RetiredObject> retired_;
+  // The release log (MarkFrameStart); a fixed array, so releasing never
+  // allocates.
+  std::array<const void*, kReleaseLogSize> released_{};
+  std::size_t released_count_ = 0;
   std::array<std::uint64_t, kGpuObjectKinds> live_{};
   GpuResourceStats stats_;
 };

@@ -129,6 +129,9 @@ class Lifecycle {
   void OnSuspendProbe(bool window_visible, bool acquire_succeeded);
   // Once per iterate, before the frame: time-based transitions (Idle).
   void Update(std::uint64_t now_ns);
+  // Whether Idle is allowed from now on (M10a: the editor in Edit mode
+  // only; Update leaves Idle when it is not).
+  void SetIdleAllowed(bool allowed) noexcept { config_.idle_allowed = allowed; }
 
   // Two-phase quit progress (QuitController).
   void OnQuitPending();

@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <span>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "game_rampage/module.h"
@@ -136,6 +137,14 @@ RampageSessionResult RunRampageSession(const RampageSessionOptions& options) {
   NullAudioSink null_audio;
   AudioSink& audio = options.audio != nullptr ? *options.audio : null_audio;
   SessionLog log;
+  if (!options.session.empty()) {
+    auto read = SessionLog::Read(options.session);
+    if (!read) {
+      result.error = "session log: " + read.error().message;
+      return result;
+    }
+    log = std::move(*read);
+  }
   RampageScriptedInput scripted(options.seed);
   InputSource& input = options.input != nullptr ? *options.input : scripted;
   {

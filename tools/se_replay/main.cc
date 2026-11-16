@@ -13,6 +13,11 @@
 //             [--jitter-ms MS] [--hash-out FILE] [--projection-out FILE]
 //             [--record FILE] [--expect-golden NAME]
 //
+// With --inputs, the replay's SessionLog is applied (an editor Play
+// session's edits and markers, M10a), and --start-scene FILE writes the
+// replay's start bytes to FILE and runs them as the scene: an editor Play
+// session starts from the document as its Play serialized it.
+//
 // --module rampage also takes --edges-out FILE: with --inputs, every recorded
 // edge as a line "tick action down|up stamp_ns order source" (sources as
 // tools/minidump/read_dump.py names them), so a test can check what a
@@ -50,6 +55,7 @@
 #include <fstream>
 #include <iterator>
 #include <optional>
+#include <span>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -94,6 +100,7 @@ struct Args {
   std::string projection_out;
   std::string record;
   std::string edges_out;
+  std::string start_scene;
   std::uint32_t det_crosscheck = 0;
   int jobs = 0;
   std::string expect_golden;
@@ -111,7 +118,7 @@ void Usage() {
                "[--record FILE]\n"
                "                 [--det-crosscheck K] [--jobs W] "
                "[--expect-golden NAME]\n"
-               "                 [--edges-out FILE]\n");
+               "                 [--edges-out FILE] [--start-scene FILE]\n");
 }
 
 std::optional<Args> Parse(int argc, char** argv) {
@@ -153,6 +160,8 @@ std::optional<Args> Parse(int argc, char** argv) {
       args.record = value;
     } else if (flag == "--edges-out") {
       args.edges_out = value;
+    } else if (flag == "--start-scene") {
+      args.start_scene = value;
     } else if (flag == "--det-crosscheck") {
       args.det_crosscheck = static_cast<std::uint32_t>(std::stoul(value));
     } else if (flag == "--jobs") {
@@ -328,6 +337,19 @@ int RunRampage(const Args& args) SE_REQUIRES(g_main) SE_EXCLUDES(g_sim_owner) {
       input_ticks = reader->Frames().size();
       options.input = &*reader;
       if (reader->Header().seed != 0) options.seed = reader->Header().seed;
+      const std::span<const std::byte> session = reader->SessionBytes();
+      options.session.assign(session.begin(), session.end());
+      if (!args.start_scene.empty()) {
+        // An editor Play session: the scene is what Play serialized.
+        const std::span<const std::byte> start = reader->StartBytes();
+        if (!WriteFile(args.start_scene,
+                       std::vector<std::byte>(start.begin(), start.end()))) {
+          std::fprintf(stderr, "se_replay: cannot write %s\n",
+                       args.start_scene.c_str());
+          return 2;
+        }
+        options.scene.path = args.start_scene;
+      }
     }
   }
   if (!args.edges_out.empty()) {

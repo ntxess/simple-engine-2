@@ -21,6 +21,7 @@
 #include "se_assets/sound_decoder.h"
 #include "se_core/assert.h"
 #include "se_core/error.h"
+#include "se_core/hash.h"
 #include "se_core/log.h"
 #include "se_core/thread_role.h"
 #include "se_platform/fs.h"
@@ -711,6 +712,16 @@ void AssetRegistry::UpdateResidency() {
   }
 }
 
+void AssetRegistry::SetGameplayFrozen(bool frozen) {
+  AssertMainThread();
+  if (frozen_ == frozen) return;
+  frozen_ = frozen;
+  if (frozen_) return;
+  std::vector<FileChange> deferred = std::move(deferred_);
+  deferred_.clear();
+  for (const FileChange& change : deferred) OnFileChange(change);
+}
+
 void AssetRegistry::OnFileChange(const FileChange& change) {
   ++stats_.file_changes;
   const Ref ref = RefOfTag(change.tag);
@@ -720,6 +731,22 @@ void AssetRegistry::OnFileChange(const FileChange& change) {
     SE_LOG_WARN("asset '{}': {} was removed; keeping the loaded one",
                 common->key, change.path);
     return;
+  }
+  if (frozen_) {
+    if (ref.kind == Kind::kPrefab || ref.kind == Kind::kSceneChunk) {
+      // Editor Play: gameplay assets wait for Stop (M10a).
+      SE_LOG_INFO("asset '{}': {} changed during Play; reloaded at Stop",
+                  common->key, change.path);
+      deferred_.push_back(change);
+      return;
+    }
+    if (swap_listener_) {
+      Hasher hash(0x5A9A55E7);
+      hash.AddString(change.path);
+      hash.AddU64(change.size);
+      hash.AddU64(static_cast<std::uint64_t>(change.modify_time_ns));
+      swap_listener_(common->key, hash.Finish());
+    }
   }
   SE_LOG_INFO("asset '{}': {} changed; reloading", common->key, change.path);
   if (ref.kind == Kind::kTexture) {
