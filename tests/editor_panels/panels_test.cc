@@ -16,9 +16,11 @@
 #include <cstdint>
 #include <entt/entity/registry.hpp>
 #include <format>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "editor_panels/support/panel_harness.h"
@@ -247,6 +249,26 @@ TEST_CASE("The hierarchy lists entities in spawn order and selects them",
   REQUIRE(hierarchy.Rows() == std::vector<Guid>{w.GuidOf(c)});
 }
 
+TEST_CASE("The hierarchy submits only the rows scrolled into view",
+          "[editor][hierarchy]") {
+  const testing::MainThreadScope main_thread;
+  const InlineOwnerScope owner(OnMainThread());
+  PanelWorld w;
+  for (int i = 0; i < 2000; ++i) {
+    w.AddSprite({static_cast<float>(i), 0.0F});
+  }
+  w.Finish();
+  PanelHarness ui;
+  RecordingCommands commands;
+  HierarchyPanel hierarchy;
+  const PanelContext context = EditContext(w.CGet(), commands);
+  ui.Frame(hierarchy, context);
+  ui.Frame(hierarchy, context);
+  REQUIRE(hierarchy.Rows().size() == 2000);
+  REQUIRE(hierarchy.RowsDrawn() > 0);
+  REQUIRE(hierarchy.RowsDrawn() < 100);
+}
+
 TEST_CASE("The log panel shows the view's lines, colours and drop counts",
           "[editor][log]") {
   const testing::MainThreadScope main_thread;
@@ -394,6 +416,133 @@ TEST_CASE("Scene settings adds a primary camera, then edits it",
   probe.Clear();
   ui.Frame(panel, context);
   REQUIRE(probe.Find("scene.camera.zoom").has_value());
+}
+
+TEST_CASE("No panel mutates an Edit document: edits leave as commands",
+          "[editor][panels]") {
+  const testing::MainThreadScope main_thread;
+  const InlineOwnerScope owner(OnMainThread());
+  PanelWorld w;
+  const entt::entity e = w.AddSprite({400.0F, 300.0F});
+  {
+    const MutationGate gate = w.Get().OpenGate(GateReason::kTest);
+    entt::registry& reg = w.Get().Reg();
+    reg.emplace<Name>(e, "walker");
+    rampage::Path path;
+    path.points = {{400.0F, 300.0F}, {600.0F, 300.0F}};
+    reg.emplace<rampage::Path>(e, path);
+    rampage::Stats stats;
+    rampage::SetStat(stats, rampage::kStatHp, 100.0F);
+    reg.emplace<rampage::Stats>(e, stats);
+    reg.emplace<rampage::Team>(e, rampage::TeamId::kEnemy);
+    reg.emplace<rampage::EffectSource>(e);
+  }
+  w.Finish();
+  const WorldHash hash = w.CGet().Hash();
+  const std::size_t entities = w.CGet().EntityCount();
+  const Guid guid = w.GuidOf(e);
+
+  PanelHarness ui;
+  RecordingCommands commands;
+  commands.selection.Set(std::span<const Guid>(&guid, 1));
+  LogView log;
+  log.Append("0.000001 W main t=0 a.cc:1 careful");
+  std::vector<SystemStats> systems(1);
+  systems[0].name = "PathSystem";
+  EditorStats stats;
+  stats.systems = systems;
+  FakeTextureIds textures;
+  DefaultPanels panels;
+  WidgetProbe probe;
+  panels.SetProbe(&probe);
+  panels.Inspector().OpenCanvas(guid);
+  std::vector<Panel*> all;
+  for (const auto& panel : panels.All()) all.push_back(panel.get());
+
+  PanelContext context = EditContext(w.CGet(), commands);
+  context.textures = &textures;
+  context.stats = &stats;
+  context.log = &log;
+  // Each panel in turn fills the display; the mouse then presses, drags a
+  // little and releases on every widget the panel reported, and the wheel
+  // turns over it. Whatever the widgets do, they do through the recording
+  // commands: the document is never touched.
+  std::size_t widgets = 0;
+  for (std::size_t first = 0; first < all.size(); ++first) {
+    std::vector<Panel*> order{all[first]};
+    for (std::size_t i = 0; i < all.size(); ++i) {
+      if (i != first) order.push_back(all[i]);
+    }
+    probe.Clear();
+    ui.Frame(order, context);
+    ui.Frame(order, context);
+    std::vector<ImVec2> targets;
+    for (const auto& [key, rect] : probe.Entries()) {
+      const ImVec2 center{rect.x + rect.w / 2.0F, rect.y + rect.h / 2.0F};
+      if (center.x > 0.0F && center.x < testing::kDisplayWidth &&
+          center.y > 0.0F && center.y < testing::kDisplayHeight) {
+        targets.push_back(center);
+      }
+    }
+    widgets += targets.size();
+    for (const ImVec2 target : targets) {
+      for (const int button : {0, 1}) {
+        ui.MoveMouse({target.x + 1.0F, target.y + 1.0F});
+        ui.Frame(order, context);
+        ui.MoveMouse(target);
+        ui.Frame(order, context);
+        ui.Button(button, true);
+        ui.Frame(order, context);
+        ui.MoveMouse({target.x + 9.0F, target.y + 4.0F});
+        ui.Frame(order, context);
+        ui.Button(button, false);
+        ui.Wheel(1.0F);
+        ui.Frame(order, context);
+        // Close whatever popup the click opened.
+        ui.Key(ImGuiKey_Escape, true);
+        ui.Frame(order, context);
+        ui.Key(ImGuiKey_Escape, false);
+        ui.Frame(order, context);
+      }
+    }
+  }
+  // The sweep reached the panels' widgets, and they answered with commands
+  // and selections.
+  REQUIRE(widgets >= 30);
+  REQUIRE_FALSE(commands.commands.empty());
+  REQUIRE_FALSE(commands.selections.empty());
+  REQUIRE_FALSE(w.CGet().GateOpen());
+  REQUIRE(w.CGet().Hash().Folded() == hash.Folded());
+  REQUIRE(w.CGet().EntityCount() == entities);
+}
+
+TEST_CASE("MakeDefaultPanels gives the panels in dock order, owned one by one",
+          "[editor][panels]") {
+  const testing::MainThreadScope main_thread;
+  const InlineOwnerScope owner(OnMainThread());
+  PanelWorld w;
+  w.AddSprite({400.0F, 300.0F});
+  w.Finish();
+  PanelHarness ui;
+  RecordingCommands commands;
+  std::vector<std::unique_ptr<Panel>> panels = MakeDefaultPanels();
+  std::vector<std::string> names;
+  std::vector<Panel*> all;
+  for (const auto& panel : panels) {
+    names.emplace_back(panel->Name());
+    all.push_back(panel.get());
+  }
+  REQUIRE(names == std::vector<std::string>{
+                       "Hierarchy", "Inspector", "Viewport", "Log", "Profiler",
+                       "Schedule", "Stress generator", "Scene settings"});
+  const PanelContext context = EditContext(w.CGet(), commands);
+  ui.Frame(all, context);
+  // The Viewport and Scene settings panels share their settings: either
+  // may go first.
+  panels.erase(panels.begin() + 2);
+  all.erase(all.begin() + 2);
+  ui.Frame(all, context);
+  panels.clear();
 }
 
 TEST_CASE("No panel mutates a Play World or a faulted one",

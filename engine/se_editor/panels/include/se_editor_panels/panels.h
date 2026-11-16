@@ -42,6 +42,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <entt/entity/entity.hpp>
 #include <functional>
 #include <map>
 #include <memory>
@@ -83,12 +84,19 @@ class HierarchyPanel final : public Panel, public Probed {
   [[nodiscard]] std::string_view Name() const override { return "Hierarchy"; }
   void Draw(const PanelContext& context) override;
 
-  // Rows shown by the last Draw, in order (tests).
+  // The rows the last Draw listed (the ones the filter keeps), in order;
+  // only those scrolled into view are submitted to ImGui.
   [[nodiscard]] const std::vector<Guid>& Rows() const noexcept { return rows_; }
+  // How many of them the last Draw submitted.
+  [[nodiscard]] std::size_t RowsDrawn() const noexcept { return drawn_; }
 
  private:
+  void DrawRow(const PanelContext& context, EditSink& sink, const Guid& row,
+               entt::entity entity);
+
   std::string filter_;
   std::vector<Guid> rows_;
+  std::size_t drawn_ = 0;
 };
 
 class InspectorPanel final : public Panel, public Probed {
@@ -122,8 +130,13 @@ class InspectorPanel final : public Panel, public Probed {
 
 class ViewportPanel final : public Panel, public Probed {
  public:
+  // |settings| outlives the panel.
   explicit ViewportPanel(ViewSettings* settings) noexcept
       : settings_(settings) {}
+  // The panel shares the settings' ownership (MakeDefaultPanels).
+  explicit ViewportPanel(std::shared_ptr<ViewSettings> settings) noexcept
+      : owned_settings_(std::move(settings)),
+        settings_(owned_settings_.get()) {}
 
   [[nodiscard]] std::string_view Name() const override { return "Viewport"; }
   void Draw(const PanelContext& context) override;
@@ -154,6 +167,7 @@ class ViewportPanel final : public Panel, public Probed {
   [[nodiscard]] std::optional<Vec2> GizmoOrigin(const PanelContext& context,
                                                 Guid* guid) const;
 
+  std::shared_ptr<ViewSettings> owned_settings_;
   ViewSettings* settings_;
   std::optional<Camera2D> camera_;
   ViewportMapping mapping_;
@@ -250,8 +264,13 @@ class StressPanel final : public Panel, public Probed {
 
 class SceneSettingsPanel final : public Panel, public Probed {
  public:
+  // |settings| outlives the panel.
   explicit SceneSettingsPanel(ViewSettings* settings) noexcept
       : settings_(settings) {}
+  // The panel shares the settings' ownership (MakeDefaultPanels).
+  explicit SceneSettingsPanel(std::shared_ptr<ViewSettings> settings) noexcept
+      : owned_settings_(std::move(settings)),
+        settings_(owned_settings_.get()) {}
 
   [[nodiscard]] std::string_view Name() const override {
     return "Scene settings";
@@ -259,6 +278,7 @@ class SceneSettingsPanel final : public Panel, public Probed {
   void Draw(const PanelContext& context) override;
 
  private:
+  std::shared_ptr<ViewSettings> owned_settings_;
   ViewSettings* settings_;
 };
 
@@ -309,6 +329,13 @@ class DefaultPanels {
   StressPanel* stress_ = nullptr;
   SceneSettingsPanel* scene_settings_ = nullptr;
 };
+
+// The same panels, in the same order, as Panels the caller owns: what the
+// editor executable hands to the editor shell, one by one
+// (Editor::AddPanel). The Viewport and Scene settings panels share the
+// ViewSettings between them and keep it alive.
+[[nodiscard]] std::vector<std::unique_ptr<Panel>> MakeDefaultPanels(
+    PanelOptions options = {});
 
 }  // namespace se::editor
 

@@ -7,7 +7,9 @@
 # ImGui is kept in pure functions the tests drive directly: the waypoint
 # canvas's controls and path-editing rules, the profiler's axis rule,
 # picking, the stress generator's spawn plan and spreading, the viewport's
-# letterbox math, the gizmo and the entity overlays.
+# letterbox math, the gizmo and the entity overlays. The editor executable
+# gets the panels from MakeDefaultPanels (panels.h) and hands each to the
+# editor shell.
 #
 # The panels sit over game_rampage (docs/design/costfree-end-state.md
 # "Editor": the editor is an application over se_runtime and game_rampage):

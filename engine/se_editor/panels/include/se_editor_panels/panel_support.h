@@ -137,6 +137,11 @@ class WidgetProbe {
   void RecordLastItem(std::string key);
   [[nodiscard]] std::optional<Rect> Find(std::string_view key) const;
   [[nodiscard]] std::optional<ImVec2> Center(std::string_view key) const;
+  // Every recorded widget, in the order first recorded.
+  [[nodiscard]] std::span<const std::pair<std::string, Rect>> Entries()
+      const noexcept {
+    return rects_;
+  }
   void Clear() noexcept { rects_.clear(); }
   [[nodiscard]] std::size_t size() const noexcept { return rects_.size(); }
 

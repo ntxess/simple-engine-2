@@ -3180,6 +3180,18 @@ viewport's letterbox math, the gizmo and the overlays.
 - Panels expose a WidgetProbe: when one is attached, they record the screen
   rectangles of their notable widgets under stable keys, and the headless
   tests click there with ImGui's own IO events.
+- The editor executable gets the panels from MakeDefaultPanels (dock order:
+  Hierarchy, Inspector, Viewport, Log, Profiler, Schedule, Stress
+  generator, Scene settings) and hands each to the shell; the Viewport and
+  Scene settings panels share one ViewSettings (the overlays' options and
+  the background colour: editor state, not document state). PanelOptions
+  carries the Profiler's flight-recorder callback, so the panels need no
+  crash-capture dependency.
+- Play.Faulted needs no path of its own in the panels: EditSink::CanEdit()
+  is false whenever the context says faulted, and a selection change goes
+  to whichever of EditorCommands and PlayEdits the shell passes, so a shell
+  that keeps PlayEdits in the context while faulted keeps the frozen World
+  selectable.
 
 **Why.** The JSON hooks exist for every component of every module, so one
 drawer covers them all and its commands are exactly what the undo stack

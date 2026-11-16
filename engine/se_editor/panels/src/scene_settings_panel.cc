@@ -164,6 +164,21 @@ DefaultPanels::DefaultPanels(PanelOptions options) {
   panels_.push_back(std::move(scene_settings));
 }
 
+std::vector<std::unique_ptr<Panel>> MakeDefaultPanels(PanelOptions options) {
+  auto view = std::make_shared<ViewSettings>();
+  std::vector<std::unique_ptr<Panel>> panels;
+  panels.push_back(std::make_unique<HierarchyPanel>());
+  panels.push_back(std::make_unique<InspectorPanel>());
+  panels.push_back(std::make_unique<ViewportPanel>(view));
+  panels.push_back(std::make_unique<LogPanel>());
+  panels.push_back(
+      std::make_unique<ProfilerPanel>(std::move(options.dump_flight_recorder)));
+  panels.push_back(std::make_unique<SchedulePanel>());
+  panels.push_back(std::make_unique<StressPanel>());
+  panels.push_back(std::make_unique<SceneSettingsPanel>(std::move(view)));
+  return panels;
+}
+
 void DefaultPanels::SetProbe(WidgetProbe* probe) noexcept {
   hierarchy_->SetProbe(probe);
   inspector_->SetProbe(probe);

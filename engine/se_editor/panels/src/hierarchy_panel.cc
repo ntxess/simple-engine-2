@@ -8,10 +8,12 @@
 #include <imgui_stdlib.h>
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <entt/entity/registry.hpp>
 #include <limits>
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -60,8 +62,48 @@ Guid NewEntityGuid(const World& world, std::string_view purpose) {
   }
 }
 
+void HierarchyPanel::DrawRow(const PanelContext& context, EditSink& sink,
+                             const Guid& row, entt::entity entity) {
+  const std::string_view name = EntityName(*context.world, entity);
+  const std::string guid = ToString(row);
+  const bool selected =
+      context.selection != nullptr && context.selection->Contains(row);
+  ImGui::TableNextRow();
+  ImGui::TableNextColumn();
+  ImGui::PushID(guid.c_str());
+  const std::string label =
+      name.empty() ? std::string("(unnamed)") : std::string(name);
+  if (ImGui::Selectable(label.c_str(), selected,
+                        ImGuiSelectableFlags_SpanAllColumns)) {
+    if (ImGui::GetIO().KeyCtrl && context.selection != nullptr) {
+      // Ctrl-click toggles the row in the selection.
+      std::vector<Guid> next(context.selection->Guids().begin(),
+                             context.selection->Guids().end());
+      const auto it =
+          std::find_if(next.begin(), next.end(),
+                       [&row](const Guid& guid) { return guid == row; });
+      if (it != next.end()) {
+        next.erase(it);
+      } else {
+        next.push_back(row);
+      }
+      sink.Select(next);
+    } else {
+      sink.Select(std::span<const Guid>(&row, 1));
+    }
+  }
+  ProbeItem("hierarchy.row." + guid);
+  ImGui::PopID();
+  ImGui::TableNextColumn();
+  ImGui::TextUnformatted(ShortGuid(row).c_str());
+  if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", guid.c_str());
+  ImGui::TableNextColumn();
+  ImGui::TextDisabled("-");
+}
+
 void HierarchyPanel::Draw(const PanelContext& context) {
   rows_.clear();
+  drawn_ = 0;
   if (context.world == nullptr) {
     ImGui::TextDisabled("No document");
     return;
@@ -109,6 +151,17 @@ void HierarchyPanel::Draw(const PanelContext& context) {
     return a.serial != b.serial ? a.serial < b.serial : a.guid < b.guid;
   });
 
+  // The rows the filter keeps; only the ones on screen are drawn (a stress
+  // press makes thousands).
+  if (!filter_.empty()) {
+    std::erase_if(rows, [this, &world](const Row& row) {
+      return !Matches(filter_, EntityName(world, row.entity),
+                      ToString(row.guid));
+    });
+  }
+  rows_.reserve(rows.size());
+  for (const Row& row : rows) rows_.push_back(row.guid);
+
   constexpr ImGuiTableFlags kFlags = ImGuiTableFlags_RowBg |
                                      ImGuiTableFlags_ScrollY |
                                      ImGuiTableFlags_Resizable;
@@ -118,43 +171,14 @@ void HierarchyPanel::Draw(const PanelContext& context) {
   ImGui::TableSetupColumn("Guid");
   ImGui::TableSetupColumn("Parent");
   ImGui::TableHeadersRow();
-  for (const Row& row : rows) {
-    const std::string_view name = EntityName(world, row.entity);
-    const std::string guid = ToString(row.guid);
-    if (!Matches(filter_, name, guid)) continue;
-    rows_.push_back(row.guid);
-    const bool selected =
-        context.selection != nullptr && context.selection->Contains(row.guid);
-    ImGui::TableNextRow();
-    ImGui::TableNextColumn();
-    ImGui::PushID(guid.c_str());
-    const std::string label =
-        name.empty() ? std::string("(unnamed)") : std::string(name);
-    if (ImGui::Selectable(label.c_str(), selected,
-                          ImGuiSelectableFlags_SpanAllColumns)) {
-      if (ImGui::GetIO().KeyCtrl && context.selection != nullptr) {
-        std::vector<Guid> next(context.selection->Guids().begin(),
-                               context.selection->Guids().end());
-        const auto it =
-            std::find_if(next.begin(), next.end(),
-                         [&row](const Guid& guid) { return guid == row.guid; });
-        if (it != next.end()) {
-          next.erase(it);
-        } else {
-          next.push_back(row.guid);
-        }
-        sink.Select(next);
-      } else {
-        sink.Select(std::span<const Guid>(&row.guid, 1));
-      }
+  ImGuiListClipper clipper;
+  clipper.Begin(static_cast<int>(rows.size()));
+  while (clipper.Step()) {
+    for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
+      DrawRow(context, sink, rows[static_cast<std::size_t>(i)].guid,
+              rows[static_cast<std::size_t>(i)].entity);
+      ++drawn_;
     }
-    ProbeItem("hierarchy.row." + guid);
-    ImGui::PopID();
-    ImGui::TableNextColumn();
-    ImGui::TextUnformatted(ShortGuid(row.guid).c_str());
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", guid.c_str());
-    ImGui::TableNextColumn();
-    ImGui::TextDisabled("-");
   }
   ImGui::EndTable();
 }
