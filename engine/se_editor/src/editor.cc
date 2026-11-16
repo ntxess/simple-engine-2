@@ -488,15 +488,16 @@ void Editor::BuildRender(App& app, const FrameReport& report,
       }
       return nullptr;
     };
-    const bool still = play_->State() != PlayState::kPlaying;
+    const bool still = play_->DrawsStill();
     std::vector<RenderLayer> built;
     bool failed = render_discarded_;
     for (const RenderLayer& layer : layers) {
       if (failed || layer.world == nullptr) continue;
       RenderLayer next = layer;
       // Paused, stepping and faulted Worlds draw at alpha 1, as the
-      // inspector shows them.
-      if (still || play_->Faulted()) next.alpha = 1.0F;
+      // inspector shows them; so does a resumed one until its next tick
+      // (the design's prev := current at Pause).
+      if (still) next.alpha = 1.0F;
       next.list = guarded(*layer.world, next.camera, next.alpha);
       if (next.list == nullptr) {
         failed = true;

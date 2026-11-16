@@ -124,6 +124,16 @@ class PlaySession {
     return state_ == PlayState::kPlaying;
   }
 
+  // The World draws at alpha 1 (its current tick, as the inspector shows
+  // it): while Paused, Stepping or Faulted, and after a Resume until the
+  // first tick has run. That is the design's "Pause sets prev := current
+  // once" without writing the play World outside a tick (ADR-097): nothing
+  // snaps back to an interpolated pose when Play resumes.
+  [[nodiscard]] bool DrawsStill() const noexcept {
+    return state_ != PlayState::kPlaying ||
+           driver_.NextTick() == resumed_at_tick_;
+  }
+
   // Each logged in the SessionLog with its tick; no-ops when faulted.
   void Pause() SE_REQUIRES(g_main) SE_EXCLUDES(g_sim_owner);
   void Resume() SE_REQUIRES(g_main) SE_EXCLUDES(g_sim_owner);
@@ -224,6 +234,8 @@ class PlaySession {
   // Whether the play World steps (its state's SimRunning); false while
   // Paused or Faulted, so SessionLog entries apply at once.
   bool play_running_ = true;
+  // The tick that was next at the last Resume (0: never paused).
+  Tick resumed_at_tick_ = 0;
   bool inject_tick_throw_ = false;
   bool inject_render_throw_ = false;
 };

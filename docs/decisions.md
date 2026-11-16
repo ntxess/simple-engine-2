@@ -3155,6 +3155,15 @@ frame (Edit mode only). The App exposes `GameInstance()`, `GamePool()` and
   applies them at once and logs them against the next tick. Play game's
   states are the module's: while it is paused its edits wait for its next
   tick (the one difference from Play).
+- Pause does not write the play World. The design's "Pause sets prev :=
+  current once" (no backward snap on resume) is `PlaySession::DrawsStill()`:
+  the World draws at alpha 1 while Paused, Stepping or Faulted and after a
+  Resume until the first tick has run, which shows what prev := current
+  would show. Writing PrevTransform at the Pause would change a hashed
+  component outside a tick, so the paused World's hash would no longer be
+  the last tick's recorded hash (what the script's `expect-hash play`, a
+  fault's replay and se_replay compare); the next tick's PrevTransformCopy
+  overwrites it either way.
 - se_replay replays an editor session: `--inputs REPLAY --start-scene FILE`
   writes the replay's start bytes (the Play-start bytes) to FILE and runs
   them as the scene, and the replay's SessionLog is applied (rampage's own

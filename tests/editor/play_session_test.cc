@@ -118,12 +118,16 @@ TEST_CASE("Play, Pause, Step and Stop", "[play]") {
   REQUIRE(play->Running());
   REQUIRE(play->TopWorld() != nullptr);
   REQUIRE(play->TopWorld()->Desc().kind == WorldKind::kPlay);
+  // Playing: interpolated, from the first frame on.
+  REQUIRE_FALSE(play->DrawsStill());
   REQUIRE(f.Ticks(*play, 3) == 3);
   REQUIRE(play->NextTick() == 4);
+  REQUIRE_FALSE(play->DrawsStill());
 
   play->Pause();
   REQUIRE(play->State() == PlayState::kPaused);
   REQUIRE_FALSE(play->Running());
+  REQUIRE(play->DrawsStill());
   REQUIRE(f.Ticks(*play, 3) == 0);
   // Step: exactly one tick, whatever the plan, then paused again.
   play->Step();
@@ -131,9 +135,20 @@ TEST_CASE("Play, Pause, Step and Stop", "[play]") {
   REQUIRE(f.Ticks(*play, 0) == 1);
   REQUIRE(play->State() == PlayState::kPaused);
   REQUIRE(play->NextTick() == 5);
+  REQUIRE(play->DrawsStill());
 
+  // Resumed: the paused pose stays (alpha 1) until a tick has run, so a
+  // frame without a tick does not snap back to an interpolated pose (the
+  // design's prev := current at Pause, without writing the World).
+  const std::uint64_t paused_hash = play->Hash();
   play->Resume();
+  REQUIRE(play->State() == PlayState::kPlaying);
+  REQUIRE(play->DrawsStill());
+  REQUIRE(f.Ticks(*play, 0) == 0);
+  REQUIRE(play->DrawsStill());
+  REQUIRE(play->Hash() == paused_hash);
   REQUIRE(f.Ticks(*play, 2) == 2);
+  REQUIRE_FALSE(play->DrawsStill());
   // The markers are in the SessionLog with their ticks.
   std::size_t markers = 0;
   for (const SessionEntry& entry : play->Log().Applied()) {

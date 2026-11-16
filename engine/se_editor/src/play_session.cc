@@ -171,6 +171,8 @@ void PlaySession::Resume() {
   if (state_ != PlayState::kPaused && state_ != PlayState::kStepping) return;
   state_ = PlayState::kPlaying;
   SetRunning(true);
+  // Drawn at alpha 1 until this tick has run (DrawsStill()).
+  resumed_at_tick_ = driver_.NextTick();
   Marker(SessionOp::kResume);
 }
 
