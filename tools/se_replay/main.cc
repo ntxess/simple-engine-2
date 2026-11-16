@@ -11,7 +11,11 @@
 //             [--legacy-rules v1|v2] [--root DIR] [--ticks N]
 //             [--inputs FILE] [--seed S] [--fixed-frame-dt MS]
 //             [--jitter-ms MS] [--hash-out FILE] [--projection-out FILE]
-//             [--record FILE] [--expect-golden NAME]
+//             [--record FILE] [--jobs W] [--expect-golden NAME]
+//
+// --jobs W runs the session on a threaded ForkJoinPool of W workers with
+// every fork site enabled (M14); the hashes do not depend on W, and
+// --det-crosscheck still steps its clones serially.
 //
 // --module rampage also takes --edges-out FILE: with --inputs, every recorded
 // edge as a line "tick action down|up stamp_ns order source" (sources as
@@ -64,11 +68,13 @@
 #include "se_core/fp.h"
 #include "se_core/guid.h"
 #include "se_core/input_frame.h"
+#include "se_core/jobs.h"
 #include "se_core/thread_role.h"
 #include "se_core/types.h"
 #include "se_core/world.h"
 #include "se_sim/game_state.h"
 #include "se_sim/replay.h"
+#include "support/fork_config.h"
 #include "support/golden.h"
 #include "support/kernel_session.h"
 #include "support/kernel_test_module.h"
@@ -223,6 +229,14 @@ std::optional<std::vector<std::byte>> SeinputAsReplay(const std::string& path) {
   return recorder.Finish();
 }
 
+// The session's ForkJoinPool: inline without --jobs; with --jobs W, W
+// workers and every fork site enabled at its own grain (M14; SE_CHAOS_SEED
+// turns the pool's chaos mode on). The hashes are the same either way.
+jobs::ForkJoinPool::Config PoolFor(const Args& args) {
+  if (args.jobs <= 0) return {};
+  return testing::ForkTestConfig(args.jobs);
+}
+
 // Writes the per-tick hashes, then checks the hashes a replay recorded and
 // a golden; shared by both modules.
 int ReportHashes(const Args& args, const std::vector<std::uint64_t>& hashes,
@@ -294,6 +308,7 @@ int RunRampage(const Args& args) SE_REQUIRES(g_main) SE_EXCLUDES(g_sim_owner) {
   }
   options.seed = args.seed;
   options.record = !args.record.empty();
+  options.pool = PoolFor(args);
   if (args.frame_dt_ms > 0.0) {
     options.hz = 1000.0 / args.frame_dt_ms;
     options.jitter_sec = args.jitter_ms / 1000.0;
@@ -405,14 +420,8 @@ int Run(const Args& args) SE_REQUIRES(g_main) SE_EXCLUDES(g_sim_owner) {
                  "replay carries its own session log\n");
     return 2;
   }
-  if (args.jobs > 0) {
-    std::fprintf(stderr,
-                 "se_replay: --jobs %d accepted; the threaded pool arrives in "
-                 "M14, so forks run inline\n",
-                 args.jobs);
-  }
-
   testing::KernelSessionOptions options;
+  options.pool = PoolFor(args);
   options.seed = args.seed;
   options.edits_path = args.edits;
   options.det_crosscheck = args.det_crosscheck;

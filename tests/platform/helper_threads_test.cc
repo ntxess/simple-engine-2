@@ -5,7 +5,8 @@
 // so the WSL sanitizer presets run it): the background lane is a live
 // ThreadRegistry slot when the boot ends, the input sampler joins it at the
 // first iterate (inside ADR-047's window), EngineThreadsRunning() counts
-// both, and nothing is left running once the App has shut down.
+// both, no fork worker runs (no site is enabled, M14), and nothing is left
+// running once the App has shut down.
 
 #include <SDL3/SDL_timer.h>
 
@@ -43,6 +44,16 @@ bool WaitLive(ThreadRole role, std::string_view name) {
   return Live(role, name);
 }
 
+std::uint32_t LiveOfRole(ThreadRole role) {
+  const ThreadRegistry& registry = ThreadRegistry::Instance();
+  std::uint32_t live = 0;
+  for (std::uint32_t slot = 0; slot < kThreadSlotCount; ++slot) {
+    const ThreadSlotInfo info = registry.Read(slot);
+    if (info.state == ThreadSlotState::kLive && info.role == role) ++live;
+  }
+  return live;
+}
+
 std::uint32_t LiveHelpers() {
   const ThreadRegistry& registry = ThreadRegistry::Instance();
   std::uint32_t live = 0;
@@ -65,6 +76,7 @@ TEST_CASE("The lane and the input sampler start in order and are counted",
     bool sampler_running = false;
     std::uint32_t running = 0;
     std::uint32_t live = 0;
+    std::uint32_t fork_workers = 0;
   } seen;
   GameSetup setup = testing::TestGameSetup();
   setup.on_boot = [&seen](App& /*app*/) {
@@ -84,6 +96,7 @@ TEST_CASE("The lane and the input sampler start in order and are counted",
     seen.sampler_running = Live(ThreadRole::kInputSampler, "input-sampler");
     seen.running = integration::EngineThreadsRunning();
     seen.live = LiveHelpers();
+    seen.fork_workers = LiveOfRole(ThreadRole::kForkWorker);
     if (seen.sampler_running || report.iterate == 2000) app.RequestQuit();
   };
   REQUIRE(testing::RunTestApp(std::move(setup), {"--headless"}) == 0);
@@ -99,6 +112,9 @@ TEST_CASE("The lane and the input sampler start in order and are counted",
   CHECK(seen.sampler_running);
   CHECK(seen.running == seen.running_at_boot + 1);
   CHECK(seen.running == seen.live);
+  // M14: the game's pool may start up to W_max workers, but no site is
+  // enabled in a shipped configuration, so none runs.
+  REQUIRE(seen.fork_workers == 0);
   // Shut down: every engine thread has been joined.
   CHECK_FALSE(Live(ThreadRole::kBackground, "bg-lane"));
   CHECK_FALSE(Live(ThreadRole::kInputSampler, "input-sampler"));

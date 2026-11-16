@@ -4,6 +4,9 @@
 // pair of the tick, found through the spatial hash, sorted by spawn serial,
 // then the self, same-team and cooldown checks and one ActiveEffect per
 // effect of the source, in list order (core/system/CollisionSystem.cpp).
+// The boxes and cells (rampage.Broadphase) and the pair tests
+// (rampage.Narrowphase) are fork sites; the contacts are concatenated in
+// chunk order, so they come out as the serial loop made them.
 
 #include "game_rampage/collision.h"
 
@@ -15,9 +18,11 @@
 
 #include "game_rampage/broadphase.h"
 #include "game_rampage/components.h"
+#include "game_rampage/fork_sites.h"
 #include "game_rampage/systems.h"
 #include "se_core/core_components.h"
 #include "se_core/guid.h"
+#include "se_core/jobs.h"
 #include "se_core/schedule.h"
 #include "se_core/world.h"
 
@@ -97,30 +102,66 @@ void CollisionSystem::Run(World& world, const TickContext& context) {
             [](const CollisionCandidate& a, const CollisionCandidate& b) {
               return a.serial < b.serial;
             });
-  auto& boxes = scratch->boxes;
-  boxes.clear();
-  for (const CollisionCandidate& c : candidates) {
-    boxes.push_back(ColliderBox(reg.get<Transform>(c.entity).pos,
-                                reg.get<Collider>(c.entity).half_extents));
-  }
-  scratch->broadphase.Build(boxes);
+  const auto count = static_cast<std::uint32_t>(candidates.size());
+  jobs::ForkJoinPool& jobs = context.jobs;
 
-  // Sources: polled ones every tick, event-driven ones on ticks they moved.
+  // Broadphase: each candidate's box (R4), whether it is a source this tick
+  // (polled ones every tick, event-driven ones on ticks they moved) and its
+  // cells.
+  jobs::ForkSite& broad = jobs.Site(BroadphaseSite());
+  auto& boxes = scratch->boxes;
+  auto& sources = scratch->sources;
+  boxes.resize(count);
+  sources.resize(count);
+  const std::uint32_t broad_chunks = jobs.ChunkCountFor(broad, count);
+  scratch->cells.Reset(broad_chunks);
+  scratch->oversized.Reset(broad_chunks);
+  {
+    const auto view =
+        world.Parallel<Transform, Collider, EffectSource, Moved>(broad);
+    const SpatialHash& hash = scratch->broadphase;
+    jobs.ParallelFor(broad, count, [&](jobs::ChunkRange range) {
+      std::vector<SpatialHash::Entry>& cells = scratch->cells.At(range);
+      std::vector<std::uint32_t>& oversized = scratch->oversized.At(range);
+      for (std::uint32_t i = range.begin; i < range.end; ++i) {
+        const entt::entity e = candidates[i].entity;
+        boxes[i] = ColliderBox(view.Read<Transform>(e).pos,
+                               view.Read<Collider>(e).half_extents);
+        const bool source =
+            view.Has<EffectSource>(e) &&
+            (view.Read<EffectSource>(e).polled || view.Has<Moved>(e));
+        sources[i] = source ? 1 : 0;
+        hash.AppendCells(boxes[i], i, cells, oversized);
+      }
+    });
+  }
+  scratch->broadphase.Assemble(count, scratch->cells, scratch->oversized);
+
+  // Narrowphase: each source's candidates, tested for overlap (R3).
+  jobs::ForkSite& narrow = jobs.Site(NarrowphaseSite());
+  const std::uint32_t narrow_chunks = jobs.ChunkCountFor(narrow, count);
+  scratch->queries.Reset(narrow_chunks);
+  scratch->found.Reset(narrow_chunks);
+  {
+    const SpatialHash& hash = scratch->broadphase;
+    jobs.ParallelFor(narrow, count, [&](jobs::ChunkRange range) {
+      std::vector<std::uint32_t>& query = scratch->queries.At(range);
+      std::vector<Contact>& found = scratch->found.At(range);
+      for (std::uint32_t i = range.begin; i < range.end; ++i) {
+        if (sources[i] == 0) continue;
+        hash.Query(boxes[i], query);
+        for (const std::uint32_t j : query) {
+          if (Overlaps(boxes[i], boxes[j])) {
+            found.push_back(
+                Contact{candidates[i].serial, candidates[j].serial, i, j});
+          }
+        }
+      }
+    });
+  }
   auto& contacts = scratch->contacts;
   contacts.clear();
-  for (std::uint32_t i = 0; i < candidates.size(); ++i) {
-    const entt::entity e = candidates[i].entity;
-    const auto* source = reg.try_get<EffectSource>(e);
-    if (source == nullptr) continue;
-    if (!source->polled && !reg.all_of<Moved>(e)) continue;
-    scratch->broadphase.Query(boxes[i], scratch->query);
-    for (const std::uint32_t j : scratch->query) {
-      if (Overlaps(boxes[i], boxes[j])) {
-        contacts.push_back(
-            Contact{candidates[i].serial, candidates[j].serial, i, j});
-      }
-    }
-  }
+  scratch->found.AppendTo(contacts);
   // R8: by (source, receiver) spawn serial.
   std::sort(contacts.begin(), contacts.end(),
             [](const Contact& a, const Contact& b) {

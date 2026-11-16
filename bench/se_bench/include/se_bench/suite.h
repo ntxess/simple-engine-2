@@ -72,6 +72,24 @@ class Sampler {
     }
   }
 
+  // As Run, with |between| called untimed after every call of |step| (the
+  // fork benches let the workers park there).
+  template <class F, class G>
+  void Run(const F& step, const G& between) {
+    for (std::uint32_t i = 0; i < options_.warmup; ++i) {
+      step();
+      between();
+    }
+    samples_ns_.clear();
+    samples_ns_.reserve(options_.iterations);
+    for (std::uint32_t i = 0; i < options_.iterations; ++i) {
+      const std::uint64_t start = ProfileNowNs();
+      step();
+      samples_ns_.push_back(ProfileNowNs() - start);
+      between();
+    }
+  }
+
   void AddCounter(std::string_view name, double value) {
     counters_.push_back({std::string(name), value});
   }

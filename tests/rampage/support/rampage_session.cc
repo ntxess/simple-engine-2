@@ -131,7 +131,7 @@ RampageSessionResult RunRampageSession(const RampageSessionOptions& options) {
                    scene);
   }
 
-  jobs::ForkJoinPool pool;
+  jobs::ForkJoinPool pool(options.pool);
   SimDriver driver(module.MutableSchedule(), pool);
   NullAudioSink null_audio;
   AudioSink& audio = options.audio != nullptr ? *options.audio : null_audio;

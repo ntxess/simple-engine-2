@@ -1,25 +1,31 @@
 // Copyright 2026 The simple-engine-2 Authors.
 //
 // Input, Intent and Movement: the player's controls, path following and the
-// arena clamp. The float expressions follow the legacy reference operation
-// for operation (Movement::execute, WayPointSystem, BoundarySystem, sf::Angle
-// and sf::Transformable), or the text of rules R11 and R12.
+// arena clamp (the three movement systems are fork sites, M14). The float
+// expressions follow the legacy reference operation for operation
+// (Movement::execute, WayPointSystem, BoundarySystem, sf::Angle and
+// sf::Transformable), or the text of rules R11 and R12.
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <entt/entity/registry.hpp>
 #include <limits>
 #include <numbers>
 #include <vector>
 
 #include "game_rampage/components.h"
+#include "game_rampage/fork_sites.h"
 #include "game_rampage/module.h"
 #include "game_rampage/systems.h"
 #include "se_core/core_components.h"
 #include "se_core/detmath.h"
 #include "se_core/input_buffer.h"
 #include "se_core/input_frame.h"
+#include "se_core/jobs.h"
 #include "se_core/schedule.h"
+#include "se_core/thread_role.h"
+#include "se_core/thread_safety.h"
 #include "se_core/types.h"
 #include "se_core/world.h"
 
@@ -53,12 +59,12 @@ bool CacheStale(const Path& path, const PathCache& cache) {
 
 // The legacy WayPointSystem (legacy-ref-v1): the whole step follows the
 // current segment, which switches once the distance passes the next point's
-// running total; position integrates per tick.
-void StepPathV1(entt::registry& reg, entt::entity e, Path& path,
-                const PathCache& cache, float speed, float dt,
+// running total; position integrates per tick. True when it moved the
+// entity.
+bool StepPathV1(Path& path, const PathCache& cache, float speed, float dt,
                 Transform& transform) {
   const auto n = static_cast<std::uint32_t>(path.points.size());
-  if (n == 0) return;
+  if (n == 0) return false;
   std::uint32_t head = std::min(path.segment, n - 1);
   // R6: zero-length segments are skipped without moving.
   while (head + 1 < n && cache.lengths[head] <= 0.0F) ++head;
@@ -68,7 +74,7 @@ void StepPathV1(entt::registry& reg, entt::entity e, Path& path,
       path.segment = 0;
       path.u = 0.0F;
     }
-    return;
+    return false;
   }
   path.u += speed * dt;
   if (path.u > cache.totals[head + 1]) path.segment = head + 1;
@@ -80,7 +86,30 @@ void StepPathV1(entt::registry& reg, entt::entity e, Path& path,
   const float heading = (dm::Atan2(velocity.y, velocity.x) * kRadToDeg) + 90.0F;
   transform.rot = RotationFromHeading(heading);
   transform.pos = transform.pos + velocity;
-  reg.emplace_or_replace<Moved>(e);
+  return true;
+}
+
+// The entities a movement fork moved, per chunk (World ctx; reused every
+// tick).
+struct MovementScratch {
+  jobs::ChunkOutputs<entt::entity> moved;
+};
+
+MovementScratch& Scratch(World& world) SE_REQUIRES(g_sim_owner) {
+  auto& ctx = world.Reg().ctx();
+  if (auto* scratch = ctx.find<MovementScratch>()) return *scratch;
+  return ctx.emplace<MovementScratch>();
+}
+
+// After the join, on the owner: the structural part, in chunk order.
+void MarkMoved(World& world, const jobs::ChunkOutputs<entt::entity>& moved)
+    SE_REQUIRES(g_sim_owner) {
+  entt::registry& reg = world.Reg();
+  for (std::uint32_t c = 0; c < moved.Chunks(); ++c) {
+    for (const entt::entity e : moved.Chunk(c)) {
+      reg.emplace_or_replace<Moved>(e);
+    }
+  }
 }
 
 }  // namespace
@@ -342,54 +371,83 @@ std::uint8_t ActionBufferTicks(ActionId action) noexcept {
   return 6;
 }
 
+// The movement systems are fork sites (game_rampage/fork_sites.h): each
+// chunk writes only its own entities' components and lists the entities it
+// moved; the owner marks them Moved after the join.
+
 void KinematicMoveSystem::Run(World& world, const TickContext& context) {
   const float dt = Dt(context);
-  entt::registry& reg = world.Reg();
-  for (const auto [e, body, transform] :
-       reg.view<const KinematicBody, Transform>().each()) {
-    if (body.velocity.x == 0.0F && body.velocity.y == 0.0F) continue;
-    // Movement::execute: pos + direction * (speed * dt), one axis term each.
-    const Vec2 before = transform.pos;
-    transform.pos = {before.x + body.velocity.x * dt,
-                     before.y + body.velocity.y * dt};
-    if (transform.pos != before) reg.emplace_or_replace<Moved>(e);
-  }
+  jobs::ForkSite& site = context.jobs.Site(KinematicMoveSite());
+  MovementScratch& scratch = Scratch(world);
+  const auto view = world.Parallel<KinematicBody, Transform>(site);
+  const std::uint32_t count = view.size();
+  scratch.moved.Reset(context.jobs.ChunkCountFor(site, count));
+  context.jobs.ParallelFor(site, count, [&](jobs::ChunkRange range) {
+    std::vector<entt::entity>& moved = scratch.moved.At(range);
+    view.ForChunk(range, [&](entt::entity e) {
+      const KinematicBody& body = view.Read<KinematicBody>(e);
+      if (body.velocity.x == 0.0F && body.velocity.y == 0.0F) return;
+      // Movement::execute: pos + direction * (speed * dt), one axis term
+      // each.
+      Transform& transform = view.Write<Transform>(e);
+      const Vec2 before = transform.pos;
+      transform.pos = {before.x + body.velocity.x * dt,
+                       before.y + body.velocity.y * dt};
+      if (transform.pos != before) moved.push_back(e);
+    });
+  });
+  MarkMoved(world, scratch.moved);
 }
 
 void PathSystem::Run(World& world, const TickContext& context) {
   const float dt = Dt(context);
   const RulesVersion rules = Rules(world);
-  entt::registry& reg = world.Reg();
-  for (const auto [e, path, cache, stats, transform] :
-       reg.view<Path, PathCache, const Stats, Transform>().each()) {
-    // Without a Speed stat an entity does not move.
-    const float* speed = FindStat(stats, kStatSpeed);
-    if (speed == nullptr) continue;
-    if (CacheStale(path, cache)) BuildPathCache(path, cache);
-    if (rules == RulesVersion::kV1) {
-      StepPathV1(reg, e, path, cache, *speed, dt, transform);
-      continue;
-    }
-    const PathStep step = AdvancePath(path, cache, *speed * dt);
-    if (!step.active) continue;
-    if (step.has_heading) transform.rot = RotationFromHeading(step.heading);
-    if (step.pos != transform.pos) {
-      transform.pos = step.pos;
-      reg.emplace_or_replace<Moved>(e);
-    }
-  }
+  jobs::ForkSite& site = context.jobs.Site(PathSite());
+  MovementScratch& scratch = Scratch(world);
+  const auto view = world.Parallel<Path, PathCache, Stats, Transform>(site);
+  const std::uint32_t count = view.size();
+  scratch.moved.Reset(context.jobs.ChunkCountFor(site, count));
+  context.jobs.ParallelFor(site, count, [&](jobs::ChunkRange range) {
+    std::vector<entt::entity>& moved = scratch.moved.At(range);
+    view.ForChunk(range, [&](entt::entity e) {
+      // Without a Speed stat an entity does not move.
+      const float* speed = FindStat(view.Read<Stats>(e), kStatSpeed);
+      if (speed == nullptr) return;
+      Path& path = view.Write<Path>(e);
+      PathCache& cache = view.Write<PathCache>(e);
+      Transform& transform = view.Write<Transform>(e);
+      if (CacheStale(path, cache)) BuildPathCache(path, cache);
+      if (rules == RulesVersion::kV1) {
+        if (StepPathV1(path, cache, *speed, dt, transform)) moved.push_back(e);
+        return;
+      }
+      const PathStep step = AdvancePath(path, cache, *speed * dt);
+      if (!step.active) return;
+      if (step.has_heading) transform.rot = RotationFromHeading(step.heading);
+      if (step.pos != transform.pos) {
+        transform.pos = step.pos;
+        moved.push_back(e);
+      }
+    });
+  });
+  MarkMoved(world, scratch.moved);
 }
 
-void BoundarySystem::Run(World& world, const TickContext& /*context*/) {
+void BoundarySystem::Run(World& world, const TickContext& context) {
   const ArenaBounds bounds = Bounds(world);
   const RulesVersion rules = Rules(world);
-  for (const auto [e, transform, collider] :
-       world.Reg().view<Transform, const Collider>().each()) {
-    transform.pos =
-        rules == RulesVersion::kV1
-            ? ClampToArenaV1(transform, collider.half_extents, bounds)
-            : ClampToArena(transform.pos, collider.half_extents, bounds);
-  }
+  jobs::ForkSite& site = context.jobs.Site(BoundarySite());
+  const auto view = world.Parallel<Transform, Collider>(site);
+  context.jobs.ParallelFor(site, view.size(), [&](jobs::ChunkRange range) {
+    view.ForChunk(range, [&](entt::entity e) {
+      const Collider& collider = view.Read<Collider>(e);
+      Transform& transform = view.Write<Transform>(e);
+      transform.pos =
+          rules == RulesVersion::kV1
+              ? ClampToArenaV1(transform, collider.half_extents, bounds)
+              : ClampToArena(transform.pos, collider.half_extents, bounds);
+    });
+  });
 }
 
 }  // namespace se::rampage

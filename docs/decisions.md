@@ -3026,3 +3026,219 @@ recorded in gates.md for M15.
 settles` appends to a watched file every 25 ms for 400 ms under a 100 ms
 scan: the old rule reported once per scan during the writes, the new one
 reports the finished size once (twice at most on a stalled writer).
+
+## ADR-107 The threaded ForkJoinPool: workers from se_os, sites kept by the pool, chunks as a fault boundary (2026-11-10)
+
+**Decision.** M14's pool replaces M2's inline one behind the same API
+(`ParallelFor(ForkSite&, count, body)`, `NestedParallelFor`, the chunking
+of `ChunkCount`/`ChunkAt`), with these contracts:
+- **Threads.** se_core runs the protocol but creates no thread (ADR-029):
+  `ForkJoinPool::Config::threads` makes a `jobs::WorkerThreads`, and se_os's
+  `ForkWorkers` (se_os/fork_workers.h) starts each worker with StartThread
+  as role kForkWorker, OS name `fork-worker-<i>`, Qos::kHigh, soft affinity.
+  Placement: workers 0 .. PerformanceOnlyCount - 1 prefer main's last-level
+  cache P-cores (`WorkerCpuSet(kPerformanceOnly)`), so a PerformanceOnly
+  site uses exactly those; every other worker prefers the cores of one
+  efficiency class, the cores in order (fastest class and main's cache
+  first) past main's and the PerformanceOnly workers', wrapping when W is
+  above the cores. On a homogeneous CPU every worker prefers every core,
+  M4's `WorkerCpuSet(kAnyPhysical)`. MaxWorkers is ForkPoolSize and
+  PerformanceOnlyWorkers is PerformanceOnlyCount.
+- **W.** `Config::workers`: 0 runs every fork inline (the default, so every
+  pool M2 code builds stays inline); -1 is the WorkerThreads' W_max capped by
+  `max_workers`; N is N (at most 15, and `max_workers` when set), which may
+  exceed the machine (the tests' W = 7 on any machine). The App builds its
+  pool with -1, `max_workers = ForkPoolSize` and se_os's factory; no site is
+  enabled, so no worker starts (the boot log's "none started" stays true).
+- **No worker until a site is enabled.** The workers start when a site
+  becomes enabled: `Site()` of a site `Config::enabled_sites` names,
+  `EnableSite(name, true)`, or the first fork of a caller's own enabled
+  `ForkSite`; the startup calibration (ADR-109) runs then. A start that
+  fails leaves the pool inline (`PoolStats::start_failed`, logged once).
+- **Sites are kept by the pool.** A system declares a `ForkSiteDecl` (name,
+  grain, min_items, core class, read and write sets) in static storage and
+  calls `context.jobs.Site(decl)`, which returns the pool's `ForkSite`
+  record (enabled, the fallback window, ForkStats, the join ring), made at
+  the first call and found again by the declaration's address (then its
+  name). Systems are stateless and game modules may not keep mutable
+  statics, and the inline and threaded drivers (or an editor's Play
+  session beside the game) may run the same module at once, so the state
+  belongs to the session's pool. `Sites()`/`FindSite()` list them for the
+  profiler and schedule panels (the integration). A caller's own
+  `ForkSite` object (M2's tests, se_bench) still works; it is not listed.
+  `Config::enabled_sites` names the sites enabled at registration (`"*"`
+  for every site, tests only); shipped configurations list none.
+- **Results do not depend on W.** A fork runs inline when the site is
+  disabled, in a fallback window, below min_items, at W = 0, with fewer than
+  two participants (participants = min(W' + 1, chunks / 4), W' the workers
+  the site may use) or with more than 2^19 chunks. Either way the chunks are
+  ChunkAt(count, grain, k). Variable outputs go to `jobs::ChunkOutputs<T>`,
+  one arena per chunk, concatenated in chunk order on the owner after the
+  join. Tests may set `Config::grain_override` (every site's grain) and
+  `chunks_per_participant`; every W of a comparison uses the same values.
+- **Fault boundary.** A threaded fork runs every chunk, the caller's too,
+  through `RunChunkContained` in engine/se_core/src/fork_fault_boundary.cc,
+  which joins ADR-006's list of `// se-fault-boundary` files. The first
+  exception is kept, the chunks not yet started are skipped, the caller
+  joins, then rethrows it (`ForkStats::faults` counts it); no thread
+  unwinds while another still reads the fork. An inline fork keeps M2's
+  behaviour: the exception propagates at once, later chunks do not run.
+- **Sinks.** `AudioEvents::Push`, the World-level sink game rules write,
+  asserts not-in-fork (the structural calls already did through Reg()).
+- **Fork sites written.** The Schedule's built-in PrevTransformCopy
+  (`se.PrevTransformCopy`, grain 1024); rampage's KinematicMove, Path and
+  Boundary (grain 1024; the entities a chunk moved are its output, marked
+  Moved by the owner after the join), Broadphase (grain 1024: each
+  candidate's box, source flag and spatial-hash cells, `SpatialHash::
+  AppendCells`, sorted on the owner by `Assemble`) and Narrowphase (grain
+  256 candidates: const `SpatialHash::Query` and the overlap test, contacts
+  per chunk); and the RenderList's cull, keys and vertices
+  (`render.RenderList`, grain 1024, `BuildRenderListForked`). The spatial
+  hash's query now gathers, sorts and drops duplicates instead of stamping
+  (the same ascending, unique indices, and no mutable state, so chunks may
+  query at once). Every site is disabled in every shipped configuration.
+
+**Why.** The spec puts the pool in se_core "behind the same API" and the
+threads in se_os; an interface the pool calls keeps se_core free of thread
+creation and lets tests supply hosts with chosen efficiency classes and
+battery states. Keeping the sites in the pool is the only place a stateless
+system can find per-session state. Rethrowing after the join is what the
+design's "the first exception is rethrown on main after the join" needs:
+an exception unwinding the caller's frame while a worker reads the body
+would be a use-after-free.
+
+**Deviations.** `BuildRenderListForked` has its own name instead of a
+`BuildRenderList` overload: tests/render/no_alloc_test.cc pins the
+builder's signature with `decltype(&BuildRenderList)`. The design's
+per-chunk DebugDraw slices: there is no DebugDraw sink yet; ChunkOutputs is
+the mechanism it will use. The design's "Swept AABB against tiles",
+"Scatter", "Body pushes", "Contact radix sort" and "key sort" candidates
+have no code in rampage or the RenderList to be written as sites (no tiles,
+bodies or radix-sorted contacts; the RenderList's radix sort stays serial).
+
+## ADR-108 The wake protocol, claims and the spin (2026-11-10)
+
+**Decision.** The design's protocol (mt-design "Data Flow", the descriptor
+row), made exact:
+- The caller writes the descriptor (invoke, body, count, grain, chunks,
+  the chaos claim order, its breadcrumb) with plain stores, its full 64-bit
+  generation, the batch hint and remaining = chunks, then
+  `claim.store(pack(...), release)`. The descriptor, the claim word,
+  remaining and the error slot each start a cache line.
+- The claim word packs a 16-bit generation, the range of workers that may
+  claim (two 4-bit indices), the chunk count (20 bits) and the next index
+  (20 bits). A worker loads the word first and adds only when the
+  generation is not one it ran out of, chunks are left and its index is in
+  the range; so next passes the count by at most one batch per claimer and
+  the fields cannot overflow (forks of more than 2^19 chunks run inline;
+  a batch is at most 2^13). The range is [0, W') for a fork (a
+  PerformanceOnly site's workers, or all) and one efficiency class for a
+  calibration fork. A worker that was not woken (spinning, or a thread
+  that started late) may claim from any fork whose range holds it;
+  between its load and its add a newer fork may be published, so rarely
+  a worker outside the range takes chunks, which it then runs (correct,
+  only placement suffers).
+- Claims are `fetch_add(batch, acq_rel)`; batch = clamp(chunks /
+  (participants * 8), 1, 8192), read from a relaxed hint (any value claims
+  a valid disjoint range). After a successful claim the claimer copies the
+  descriptor when its 64-bit generation is new (the fork cannot end while
+  the claim is outstanding, so the generation it reads is the claim's),
+  runs the batch, then `remaining.fetch_sub(n, acq_rel)` as its last access;
+  the decrement that reaches 0 calls `notify_one`. The caller claims like a
+  worker, then waits with `remaining.wait()` until it reads 0 (acquire): it
+  does not spin itself.
+- Each worker has its own padded wake word. The caller wakes participants
+  - 1 workers (the lowest indices): it stores the bump's generation, keeps
+  the stamp of the oldest bump the worker has not seen (a compare-exchange
+  from 0), `fetch_add(1, release)`, then `notify_one`. A worker loads its
+  word, accounts for a new value (it takes the stamp with an exchange to 0:
+  the latency of the oldest unseen bump), claims until none are left, then
+  `wait(old)`: a bump between the load and the wait makes the wait return
+  at once, so no bump is lost. `WorkerWakes()` exposes each word and the
+  value its worker last saw (equal once every bump was seen).
+- A woken worker that ran no chunk of its fork is a missed wake; one that
+  saw its bump more than 2 ms late and still ran a chunk is a late wake.
+  Both are counted per site after the join and per pool.
+- The spin: after running chunks a worker spins (pause instructions,
+  checking its wake word and the claim word) for at most `spin_us` (20) when
+  the caller's hint says another fork is predicted, then parks. The
+  prediction is per pool site: whether the next threaded fork after its last
+  one started within spin_us (`ForkSite::followed_quickly`), so "Path, then
+  Boundary at once" is learned and the last fork of a tick is not. The hint
+  is off on battery: `WorkerThreads::OnBattery` (se_os `BatteryPowered`:
+  GetSystemPowerStatus, or a battery and no online mains in
+  /sys/class/power_supply), polled at most once a second.
+
+**Why.** A 24-bit generation (the first layout) left no room for the
+eligibility range, and the range is what keeps a late-starting or spinning
+worker out of a PerformanceOnly site's fork and of another class's
+calibration (both seen in the first test runs). The generation's wrap is
+harmless: it only names the fork a claimer ran out of (a wrap could make a
+worker skip one fork), and the descriptor is matched by the 64-bit
+generation. Keeping the oldest unseen bump's stamp makes a worker that slept
+through several bumps report its whole delay rather than the last bump's.
+
+## ADR-109 ForkStats, the 4x-median fallback, calibration and chaos mode (2026-11-10)
+
+**Decision.**
+- **ForkStats** per site: forks, chunks, inline, threaded, fallbacks and
+  forks run in a fallback window, missed and late wakes, faults, the last
+  and the most participants, and the join (publish to join, the pool's
+  clock) p50, p99, p99.9 over the last 2048 threaded joins and the max
+  over all. The percentiles refresh after the 32nd threaded join, every 64
+  joins and on `RefreshStats()` (a sort of the 2048, every 64 forks).
+  `PoolStats` adds the bumps, wakes, unstamped wakes, the largest wake
+  latency, the workers' chunks and the spins.
+- **Fallback.** A threaded join slower than 4x the site's cached median
+  (from the last refresh) opens a 5 s window on the pool's clock in which
+  the site runs inline (`fallback_forks`), then it retries; each window
+  counts in `fallbacks`. `fallback_factor = 0` turns the rule off (the
+  tests and benches that must stay threaded). The clock is
+  `Config::now_ns` (ProfileNowNs; a test clock in the fallback test).
+- **Calibration.** When the workers start, for each efficiency class among
+  them (fastest first) one dummy fork of 200 chunks per worker of about
+  50 us each (about 10 ms; the caller sizes the chunk from its own speed
+  first and does not claim), which only that class's workers may claim.
+  `Calibrations()` keeps each class's workers, chunks, p50 and max chunk
+  time, wall time and its speed relative to the caller's; the pool logs
+  them. Nothing schedules on them yet: using them (claim weights, which
+  class a site may use) is M16's, with the measurements on a hybrid laptop
+  (docs/gates.md).
+- **Chaos mode** (`Config::chaos_seed`; `SE_CHAOS_SEED`, decimal or 0x hex,
+  read by se_os `ChaosSeedFromEnv`, which the App and the tests' pool
+  configurations use): a seeded permutation of the claim order per fork;
+  a yield before a quarter of the claims; a delay of up to 20 us between
+  a quarter of the claims and their descriptor read, and between a quarter
+  of the batches' last write and their decrement; injected late wakes: a
+  worker waits up to 100 us after an eighth of its wakes before it claims,
+  and the caller sends a quarter of its notifies up to 100 us after the
+  bump (before its own claims, so a fork whose chunks wait for each other
+  cannot deadlock). Results never depend on it.
+
+**Why.** The design's tails (a 29.2 ms forked tick against a 0.53 ms
+median) are why stats keep p99.9 and max, and why a slow join falls back
+rather than hoping. The calibration's results are recorded because the
+only hybrid machine is not here; acting on them without measurements would
+be guesswork.
+
+**Tests** (tests/jobs, `jobs.*`, label unit, every one under TSan in
+linux-clang-tsan): exactly-once chunks and per-item writes for W = 1/3/7
+and no chaos plus the eight seeds of `testing::kChaosSeeds`; visibility of
+one fork's writes in the join and in the next fork on other threads; no
+lost wake (forks of W + 1 chunks that wait for each other, 60 per W and
+seed, and every wake word seen); exceptions (two throwing chunks, the
+pool usable after; a worker's throw reaching the caller); destroying pools
+of 7 workers parked or spinning (a 50 ms spin) joins them all; nested forks
+inline on the worker; per-chunk outputs equal the serial result for W =
+0/1/3/7 and every seed; a PerformanceOnly site uses 1 of 4 workers; the
+stats, the fallback window and its expiry; the spin after predicted forks
+only and never on battery; calibration of two classes on a test host and
+of this machine's one class. Determinism: identical per-tick hashes for W =
+0 and W = 1/3/7 under each of the eight seeds, every site enabled at grain
+2 (8 for the pile-up), on the kernel golden (600 ticks), rampage's sandbox
+golden and the effects, patrol and stress reference scenarios (900 ticks
+each under every W and seed, 3600 at W = 0), and a pile-up of 240
+colliders in one 64 px cell with polled and moving event-driven sources
+(240 ticks, thousands of contacts a tick) whose RenderLists at alpha 0.5
+equal the serial builder's; and the threaded sim driver against the inline
+one at W = 0, 1 and 3 (sim.*).

@@ -27,9 +27,12 @@ else()
 endif()
 set(SE_GOLDEN_PLATFORM "${_se_golden_os}-${_se_golden_cc}")
 
-# Shared test support: goldens, role scopes and the null WakeMain().
+# Shared test support: goldens, role scopes and the null WakeMain(); the
+# fork pool configurations of the M14 tests (support/fork_config.h, se_os's
+# ForkWorkers).
 se_add_module(se_test_support KIND STATIC
   SOURCES
+    support/fork_config.cc
     support/golden.cc
     support/kernel_session.cc
     support/kernel_test_components.cc
@@ -39,6 +42,7 @@ se_add_module(se_test_support KIND STATIC
     support/virtual_display.cc
   PUBLIC_DEPS
     se_core
+    se_os
     se_sim
   DETERMINISTIC
   TEST)
@@ -185,6 +189,8 @@ endif()
 
 add_subdirectory(os)
 add_subdirectory(rampage)
+# M14: the threaded ForkJoinPool's properties and determinism across W.
+add_subdirectory(jobs)
 add_subdirectory(render)
 # M17a: the dedicated sim driver, headless.
 add_subdirectory(sim)

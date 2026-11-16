@@ -17,6 +17,7 @@
 
 #include "se_core/input_frame.h"
 #include "se_core/input_frame_ring.h"
+#include "se_core/jobs.h"
 #include "se_core/thread_role.h"
 #include "se_core/thread_safety.h"
 #include "se_core/time.h"
@@ -60,6 +61,8 @@ struct KernelSessionOptions {
   std::function<void(Tick, const GameStateStack&)> on_tick;
   // Asked before every tick TickInline runs (M9's asset hold).
   TickGate* gate = nullptr;
+  // The session's ForkJoinPool (M14; W = 0 by default).
+  jobs::ForkJoinPool::Config pool{};
 };
 
 struct KernelSessionResult {

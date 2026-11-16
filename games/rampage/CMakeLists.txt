@@ -8,6 +8,7 @@ se_add_module(game_rampage KIND STATIC
     src/broadphase.cc
     src/collision.cc
     src/effects.cc
+    src/fork_sites.cc
     src/json.cc
     src/legacy_scenario.cc
     src/module.cc

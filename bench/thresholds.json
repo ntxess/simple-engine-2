@@ -85,6 +85,69 @@
         "max_ms": [3.716, 4.507],
         "note": "Ranges over 5 runs of 1000 ticks after 50 untimed ones (5000 movers and the player; deterministic: 4995 entities alive at the end, 18 contacts in the last tick). Per-system medians of one run: Cleanup (drain, FinalizeSpawns, world hash) 1.27 ms, Collision 0.91 ms, Path 0.33 ms, Boundary and PrevTransformCopy 0.03 ms each."
       }
+    },
+    "fork_empty_w1": {
+      "n": 8,
+      "iterations": 5000,
+      "warmup": 200,
+      "p95_ms": 0.2,
+      "source": "placeholder until measured"
+    },
+    "fork_parked_w1": {
+      "n": 8,
+      "iterations": 1000,
+      "warmup": 50,
+      "p95_ms": 0.5,
+      "source": "placeholder until measured"
+    },
+    "fork_50us_w1": {
+      "n": 8,
+      "iterations": 1000,
+      "warmup": 50,
+      "p95_ms": 1.0,
+      "source": "placeholder until measured"
+    },
+    "fork_empty_w3": {
+      "n": 16,
+      "iterations": 5000,
+      "warmup": 200,
+      "p95_ms": 0.2,
+      "source": "placeholder until measured"
+    },
+    "fork_parked_w3": {
+      "n": 16,
+      "iterations": 1000,
+      "warmup": 50,
+      "p95_ms": 0.5,
+      "source": "placeholder until measured"
+    },
+    "fork_50us_w3": {
+      "n": 16,
+      "iterations": 1000,
+      "warmup": 50,
+      "p95_ms": 1.0,
+      "source": "placeholder until measured"
+    },
+    "fork_empty_w7": {
+      "n": 32,
+      "iterations": 5000,
+      "warmup": 200,
+      "p95_ms": 0.2,
+      "source": "placeholder until measured"
+    },
+    "fork_parked_w7": {
+      "n": 32,
+      "iterations": 1000,
+      "warmup": 50,
+      "p95_ms": 0.5,
+      "source": "placeholder until measured"
+    },
+    "fork_50us_w7": {
+      "n": 32,
+      "iterations": 1000,
+      "warmup": 50,
+      "p95_ms": 1.0,
+      "source": "placeholder until measured"
     }
   }
 }

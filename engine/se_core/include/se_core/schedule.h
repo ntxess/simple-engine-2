@@ -13,9 +13,9 @@
 //   1. opens the World's MutationGate and advances its SimClock;
 //   2. runs the phases Input, Intent, Movement, Collision, Effects, GameRules
 //      and Cleanup in order, the systems of a phase in registration order;
-//      the built-in PrevTransformCopy runs at the head of Movement, the
-//      built-in Cleanup (drain destroys, FinalizeSpawns, record the hash) at
-//      the end of Cleanup;
+//      the built-in PrevTransformCopy (a fork site) runs at the head of
+//      Movement, the built-in Cleanup (drain destroys, FinalizeSpawns,
+//      record the hash) at the end of Cleanup;
 //   3. sets the thread's breadcrumb (tick, phase, system) as it goes and
 //      times every system into a 1024-entry ring.
 
@@ -52,6 +52,11 @@ enum class Phase : std::uint8_t {
 inline constexpr int kPhaseCount = 7;
 
 [[nodiscard]] std::string_view PhaseName(Phase phase) noexcept;
+
+// The built-in PrevTransformCopy's fork site ("se.PrevTransformCopy", grain
+// 1024: reads Transform, writes PrevTransform; M14). Disabled unless the
+// pool enables it.
+[[nodiscard]] const jobs::ForkSiteDecl& PrevTransformCopySite();
 
 // What a system sees besides the World.
 struct TickContext {
