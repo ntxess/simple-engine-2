@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <expected>
 #include <format>
 #include <memory>
@@ -19,10 +20,12 @@
 #include <string_view>
 #include <utility>
 
+#include "se_core/assert.h"
 #include "se_core/dump_stream.h"
 #include "se_core/error.h"
 #include "se_core/input_frame_ring.h"
 #include "se_core/log.h"
+#include "se_core/session_header.h"
 #include "se_core/thread_registry.h"
 #include "se_core/thread_role.h"
 #include "se_crash/crash.h"
@@ -88,6 +91,11 @@ void RegisterDumpStreams() {
   const std::span<const std::byte> ring = DumpInputRing().StreamBytes();
   if (!crash::RegisterStream(crash::StreamType::kInputFrameRing, ring.data(),
                              ring.size())) {
+    g_streams_refused.fetch_add(1, std::memory_order_relaxed);
+  }
+  const std::span<const std::byte> header = DumpSessionHeader().StreamBytes();
+  if (!crash::RegisterStream(crash::StreamType::kSessionHeader, header.data(),
+                             header.size())) {
     g_streams_refused.fetch_add(1, std::memory_order_relaxed);
   }
 }
@@ -164,6 +172,73 @@ InputFrameRing& DumpInputRing() {
   return *kRing;
 }
 
+SessionHeaderStream& DumpSessionHeader() {
+  static auto* const kHeader = new SessionHeaderStream();
+  return *kHeader;
+}
+
+PlayStartStream::PlayStartStream() noexcept = default;
+
+PlayStartStream::PlayStartStream(PlayStartStream&& other) noexcept
+    : block_(std::move(other.block_)), size_(std::exchange(other.size_, 0)) {}
+
+PlayStartStream& PlayStartStream::operator=(PlayStartStream&& other) noexcept {
+  if (this != &other) {
+    Detach();
+    block_ = std::move(other.block_);
+    size_ = std::exchange(other.size_, 0);
+  }
+  return *this;
+}
+
+PlayStartStream::~PlayStartStream() { Detach(); }
+
+std::expected<void, Error> PlayStartStream::Attach(
+    std::span<const std::byte> bytes) {
+  if (bytes.empty()) {
+    return Fail(ErrorCode::kInvalidArgument, "no Play-start bytes to attach");
+  }
+  if (bytes.size() > std::size_t{UINT32_MAX}) {
+    return Fail(ErrorCode::kInvalidArgument,
+                "the Play-start bytes are too large for a dump stream");
+  }
+  Detach();
+  const std::size_t size = sizeof(DumpStreamHeader) + bytes.size();
+  auto block = std::make_unique<std::byte[]>(size);
+  DumpStreamHeader header;
+  InitDumpStreamHeader(header, DumpStreamKind::kBytes, 1,
+                       static_cast<std::uint32_t>(bytes.size()), "play-start");
+  header.head = bytes.size();
+  header.os_thread_id = CurrentOsThreadId();
+  header.role = static_cast<std::uint8_t>(CurrentRole());
+  std::memcpy(block.get(), &header, sizeof(header));
+  std::memcpy(block.get() + sizeof(header), bytes.data(), bytes.size());
+  if (auto registered = crash::RegisterStream(
+          crash::StreamType::kPlayStartBytes, block.get(), size);
+      !registered) {
+    return registered;
+  }
+  block_ = std::move(block);
+  size_ = size;
+  return {};
+}
+
+void PlayStartStream::Detach() noexcept {
+  if (block_ == nullptr) return;
+  // The stream is withdrawn before its memory goes (crash.h). It is
+  // registered while attached, so this cannot fail.
+  [[maybe_unused]] const bool withdrawn =
+      crash::UnregisterStream(crash::StreamType::kPlayStartBytes).has_value();
+  SE_ASSERT_MSG(withdrawn, "the Play-start stream was not registered");
+  block_.reset();
+  size_ = 0;
+}
+
+std::span<const std::byte> PlayStartStream::StreamBytes() const noexcept {
+  if (block_ == nullptr) return {};
+  return {block_.get(), size_};
+}
+
 std::expected<Logging, Error> StartLogging(const AppConfig& config,
                                            std::string_view log_path) {
   SetLogLevel(config.log_level);
@@ -229,7 +304,7 @@ std::expected<CpuInfo, Error> ReadCpuTopology() {
 }
 
 std::expected<HelperThreads, Error> StartHelperThreads(
-    const AppConfig& /*config*/, const WatchdogInputs& inputs,
+    const AppConfig& config, const WatchdogInputs& inputs,
     std::uint64_t boot_start_ns, const VblankStart& vblank) {
   HelperThreads threads;
   // The vblank sampler before the watchdog (docs/design/mt-design.md
@@ -248,6 +323,10 @@ std::expected<HelperThreads, Error> StartHelperThreads(
   crash::WatchdogConfig watchdog_config;
   watchdog_config.inputs = inputs;
   watchdog_config.boot_start_ns = boot_start_ns;
+  // A shorter hang period (test builds: the headless hang tests).
+  if (kRuntimeTestHooks && config.watchdog_period_ms > 0) {
+    watchdog_config.period_ms = config.watchdog_period_ms;
+  }
   auto watchdog = crash::Watchdog::Start(watchdog_config);
   if (!watchdog) return std::unexpected(std::move(watchdog.error()));
   threads.watchdog_ = std::make_unique<crash::Watchdog>(std::move(*watchdog));
@@ -298,6 +377,10 @@ std::uint64_t HelperThreads::DumpsFinished() const noexcept {
   if (!watchdog_) return 0;
   const crash::WatchdogStats stats = watchdog_->Stats();
   return stats.dumps_written + stats.dumps_failed;
+}
+
+crash::WatchdogStats HelperThreads::WatchdogStats() const noexcept {
+  return watchdog_ ? watchdog_->Stats() : crash::WatchdogStats{};
 }
 
 std::uint64_t BootClockNs() noexcept { return UnbiasedNowNs(); }

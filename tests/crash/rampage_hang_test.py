@@ -1,0 +1,290 @@
+"""The M12 hang dumps through the real stack (docs/milestone-specs.md M12,
+"Tests" and "Exit (M12)").
+
+Runs the rampage executable (unfocused, audio on the null backend) with the
+--hang-test hook, which puts main in a loop inside the HangTest system at
+tick 240, and checks what the watchdog did:
+
+  hang          --hang-test after-ticks:240: main loops forever. The
+                watchdog declares the hang after 5 periods of 1 s and its
+                out-of-process dump must be written within 6 s of the hang's
+                start (both times from the process's own log, one clock).
+                The dump, decoded by tools/minidump/read_dump.py --json,
+                shows main's breadcrumb at tick 240 in HangTest (phase
+                Cleanup), the reason "hang 1: main made no progress for 5.x
+                s at tick 240", the session header (module, scene, seed,
+                tick rate, start tick, a published hash) and the InputFrame
+                ring up to tick 240; se_replay --from-dump replays the
+                session to tick 240 and matches the dump's hash. Then the
+                test ends the process (main never returns).
+  driver_stall  --hang-test after-ticks:240:for-ms:6500:in-driver
+                --frames 600: main loops for 6.5 s inside a DriverWaitScope,
+                as a stalled SDL_GPU wait would. The hang is labelled a GPU
+                or compositor stall in the log and the dump's reason, one
+                dump is written, the episode's end is logged with its length
+                (Hung -> Running), and rampage then quits on its own through
+                the two-phase quit with its teardown under 2 s.
+
+usage:
+  rampage_hang_test.py --rampage EXE --se-replay EXE --read-dump PY
+      --work DIR --scenario hang|driver_stall
+"""
+
+import argparse
+import os
+import pathlib
+import re
+import shutil
+import subprocess
+import sys
+import threading
+import time
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import rampage_dump_test as base  # noqa: E402  (this directory)
+
+TICK = 240
+PHASE_CLEANUP = 6
+HANG_LIMIT_S = 6.0
+TEARDOWN_LIMIT_MS = 2000.0
+RUN_TIMEOUT_S = 60
+LINE = re.compile(r"^\s*(\d+\.\d+) ([TDIWEF]) (\S+) t=(\d+) (\S+) (.*)$")
+
+SCENARIOS = {
+    "hang": {
+        "args": ["--hang-test", f"after-ticks:{TICK}"],
+        "reason": "hang 1: main made no progress for 5.",
+        "ends": False,
+    },
+    "driver_stall": {
+        "args": ["--hang-test", f"after-ticks:{TICK}:for-ms:6500:in-driver",
+                 "--frames", "600"],
+        "reason": "hang 1: GPU or compositor stall, main in an SDL_GPU or "
+                  "pacer wait for 5.",
+        "ends": True,
+    },
+}
+
+
+class Run:
+    """rampage with its merged output read line by line as it comes."""
+
+    def __init__(self, rampage, args):
+        env = dict(os.environ)
+        env["SE_NO_MESSAGE_BOX"] = "1"
+        env.setdefault("SE_AUDIO", "null")
+        self.lines = []
+        self.lock = threading.Lock()
+        self.started = time.monotonic()
+        self.process = subprocess.Popen(
+            [str(rampage), *args], stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, text=True, errors="replace", env=env)
+        self.reader = threading.Thread(target=self._read, daemon=True)
+        self.reader.start()
+
+    def _read(self):
+        for line in self.process.stdout:
+            with self.lock:
+                self.lines.append((time.monotonic(), line.rstrip("\n")))
+
+    def find(self, text):
+        with self.lock:
+            for arrived, line in self.lines:
+                if text in line:
+                    return arrived, line
+        return None
+
+    def wait_for(self, text, timeout):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            found = self.find(text)
+            if found:
+                return found
+            if self.process.poll() is not None and not self.reader.is_alive():
+                return self.find(text)
+            time.sleep(0.05)
+        return None
+
+    def finish(self, kill):
+        if kill and self.process.poll() is None:
+            self.process.kill()
+        try:
+            self.process.wait(timeout=RUN_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+            self.process.wait()
+        self.reader.join(timeout=10)
+        with self.lock:
+            output = "\n".join(line for _, line in self.lines)
+        print(f"rampage: exit {self.process.returncode & 0xFFFFFFFF:#x} after "
+              f"{time.monotonic() - self.started:.2f} s")
+        print("--- rampage output\n" + output)
+        return output
+
+
+def log_time(line):
+    """The log record's own timestamp (seconds, the process's clock)."""
+    match = LINE.match(line)
+    return float(match.group(1)) if match else None
+
+
+def describe_delay(run, start, written):
+    """Where a late dump's time went: the declaration (late when the
+    watchdog itself was not scheduled: ADR-104 does not count time it did
+    not sample) or the handler's write."""
+    declared = run.find("requesting a dump")
+    at = log_time(declared[1]) if declared else None
+    gaps = run.find("the watchdog took no sample for")
+    parts = []
+    if at is not None:
+        parts.append(f"declared {at - start:.3f} s after the hang started, "
+                     f"written {written - at:.3f} s after that")
+    parts.append(f"unwatched gap: {gaps[1].strip()!r}" if gaps
+                 else "no unwatched gap logged")
+    return "; ".join(parts)
+
+
+def check_dump(failures, dump, expected, system):
+    failures.equal(dump["problems"], [], "read_dump problems")
+    ids, tick = base.check_breadcrumbs(failures, dump, TICK)
+    table = base.stream(dump, base.STREAM_BREADCRUMBS)
+    if table is not None:
+        mains = [r for r in table["records"] if r["slot"] == 0]
+        if failures.check(mains, "no breadcrumb for slot 0"):
+            crumb = mains[0]["breadcrumb"]
+            failures.equal((crumb["phase"], crumb["system"]),
+                           (PHASE_CLEANUP, system),
+                           "main's breadcrumb (phase, system): HangTest")
+    exception = dump["exception"]
+    if failures.check(exception is not None, "no exception record"):
+        failures.equal(exception["code"], base.SIMULATED, "exception code")
+        failures.equal(exception["thread_id"], ids.get(base.ROLE_WATCHDOG),
+                       "the dump was requested on the watchdog thread")
+    reason = dump["annotation_objects"].get("se.dump_reason") or ""
+    failures.check(reason.startswith(expected["reason"]) and
+                   reason.endswith(f"at tick {TICK}"),
+                   f"se.dump_reason {reason!r}")
+    header = base.stream(dump, 0x53450005)
+    if failures.check(header is not None, "no session header stream"):
+        record = header["records"][0]
+        failures.equal((record.get("begun"), record.get("torn"),
+                        record.get("module"), record.get("scene"),
+                        record.get("seed"), record.get("tick_rate"),
+                        record.get("start_tick"), record.get("first_frame")),
+                       (True, False, "rampage",
+                        "assets/scenes/sandbox.scene.json", 1, 120, 1, 0),
+                       "session header")
+        last = record.get("last_tick", 0)
+        failures.check(TICK - 3 <= last < TICK,
+                       f"the last published tick {last} is just before "
+                       f"{TICK}")
+    ring = base.stream(dump, base.STREAM_INPUT)
+    if failures.check(ring is not None, "no InputFrame ring"):
+        failures.equal(ring["head"], TICK, "InputFrame ring head (frames 1 "
+                       f"to {TICK}, the hanging tick's included)")
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--rampage", type=pathlib.Path, required=True)
+    parser.add_argument("--se-replay", type=pathlib.Path, required=True)
+    parser.add_argument("--read-dump", type=pathlib.Path, required=True)
+    parser.add_argument("--work", type=pathlib.Path, required=True)
+    parser.add_argument("--scenario", choices=sorted(SCENARIOS),
+                        required=True)
+    args = parser.parse_args()
+    if args.work.exists():
+        shutil.rmtree(args.work)
+    args.work.mkdir(parents=True)
+    pref = args.work / "pref"
+    expected = SCENARIOS[args.scenario]
+    failures = base.Failures()
+
+    run = Run(args.rampage, [*expected["args"], "--no-activate",
+                             "--pref-dir", str(pref)])
+    hang = run.wait_for("hang test: main loops", 30)
+    dumped = run.wait_for("dump written (hang 1", 30) if hang else None
+    if expected["ends"]:
+        run.wait_for("shutdown order:", 40)
+    output = run.finish(kill=not expected["ends"])
+    if not failures.check(hang is not None, "the hang test never started"):
+        return report(args.scenario, failures)
+    system_match = re.search(r"'HangTest' \(id (\d+), phase Cleanup\) at "
+                             rf"tick {TICK}", hang[1])
+    failures.check(system_match is not None,
+                   f"the hang line names HangTest and tick {TICK}")
+    system = int(system_match.group(1)) if system_match else -1
+    failures.check("crash capture on" in output,
+                   "rampage did not start crash capture")
+    if failures.check(dumped is not None, "no hang dump was written"):
+        start, written = log_time(hang[1]), log_time(dumped[1])
+        if failures.check(start is not None and written is not None,
+                          "log lines without timestamps"):
+            took = written - start
+            print(f"hang dump written {took:.3f} s after the hang started "
+                  f"(arrived {dumped[0] - hang[0]:.3f} s apart)")
+            failures.check(5.0 <= took <= HANG_LIMIT_S,
+                           f"the hang dump came {took:.3f} s after the hang "
+                           f"started (5 to {HANG_LIMIT_S} s): "
+                           f"{describe_delay(run, start, written)}")
+    declared = [line for line in output.splitlines()
+                if " E watchdog " in line and "requesting a dump" in line]
+    failures.equal(len(declared), 1, "hangs declared")
+    if declared:
+        failures.check(expected["reason"] in declared[0],
+                       f"the hang's log line: {declared[0]!r}")
+    if expected["ends"]:
+        failures.equal(run.process.returncode, 0, "rampage exit code")
+        ended = re.search(r"hang 1 ended: main made progress again after "
+                          r"([0-9.]+) s \(Hung -> Running\)", output)
+        if failures.check(ended is not None, "the episode's end was not "
+                          "logged"):
+            length = float(ended.group(1))
+            failures.check(6.0 <= length <= 7.5,
+                           f"episode length {length} s for a 6.5 s stall")
+        failures.check("shutdown (success)" in output,
+                       "no clean two-phase shutdown after the hang")
+        teardown = re.search(r"teardown took ([0-9.]+) ms", output)
+        if failures.check(teardown is not None, "no teardown line"):
+            failures.check(float(teardown.group(1)) < TEARDOWN_LIMIT_MS,
+                           f"teardown took {teardown.group(1)} ms")
+    dumps = base.find_dumps(pref / "crashdb")
+    if failures.equal(len(dumps), 1, "dumps written"):
+        dump = base.decode(args.read_dump, dumps[0])
+        check_dump(failures, dump, expected, system)
+        if not expected["ends"]:
+            replay = subprocess.run(
+                [str(args.se_replay), "--from-dump", str(dumps[0]),
+                 "--hash-out", str(args.work / "hashes.txt")],
+                capture_output=True, text=True, timeout=RUN_TIMEOUT_S,
+                check=False)
+            print("--- se_replay --from-dump\n" + replay.stdout +
+                  replay.stderr)
+            failures.equal(replay.returncode, 0, "se_replay exit code")
+            failures.check(
+                f"reached tick {TICK} (main's breadcrumb), inside which "
+                "main stopped" in replay.stdout,
+                f"se_replay did not reach tick {TICK}")
+            failures.check(
+                re.search(r"tick \d+'s hash [0-9a-f]{16} matches the dump",
+                          replay.stdout) is not None,
+                "se_replay did not match the dump's hash")
+            hashes = (args.work / "hashes.txt").read_text().splitlines() \
+                if (args.work / "hashes.txt").exists() else []
+            failures.equal(len(hashes), TICK - 1,
+                           "per-tick hashes of the ticks before the hang")
+    return report(args.scenario, failures)
+
+
+def report(scenario, failures):
+    if failures.items:
+        print(f"FAIL: {scenario}")
+        for item in failures.items:
+            print(f"  {item}")
+        return 1
+    print(f"PASS: {scenario}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

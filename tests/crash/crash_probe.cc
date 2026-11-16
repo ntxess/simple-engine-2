@@ -9,7 +9,9 @@
 //       KIND: access-violation, abort, terminate, terminate-noexcept,
 //       stack-overflow
 //   se_crash_probe --database DIR [--handler PATH] --dump-without-crash
-//       two dumps from a second thread, with more log records in the second
+//       two dumps from a second thread, with more log records in the second;
+//       a Play-start bytes stream (kind 7) registered for the first and
+//       withdrawn (UnregisterStream, M12) before the second
 //   se_crash_probe --database DIR --handler PATH --expect-start-failure
 //       Start must fail (a missing or broken handler, or a build without
 //       crashpad) and leave the fault handlers as they were; the probe runs
@@ -90,12 +92,19 @@ struct FlightStream {
   std::array<std::uint8_t, std::size_t{kFlightRecords} * kFlightRecordSize>
       records;
 };
+// The Play-start bytes of the first dump (crash_test.py knows the text).
+constexpr std::string_view kPlayStartText = "probe play-start bytes";
+struct PlayStartStream {
+  DumpStreamHeader header;
+  std::array<char, kPlayStartText.size()> bytes;
+};
 
 alignas(64) BreadcrumbStream g_breadcrumbs{};
 alignas(64) LogStream<kMainLogCapacity> g_main_log{};
 alignas(64) LogStream<kWorkerLogCapacity> g_worker_log{};
 alignas(64) InputStream g_input{};
 alignas(64) FlightStream g_flight{};
+alignas(64) PlayStartStream g_play_start{};
 
 std::uint64_t OsThreadId() {
 #if defined(_WIN32)
@@ -380,11 +389,33 @@ class Worker {
   }
 
   static bool DumpTwice(std::uint64_t main_tid) {
+    // The first dump holds the Play-start bytes, the second does not: they
+    // are withdrawn between the two (M12).
+    InitHeader(g_play_start.header, DumpStreamKind::kBytes, 1,
+               static_cast<std::uint32_t>(kPlayStartText.size()), main_tid,
+               ThreadRole::kMain, "play-start");
+    std::copy(kPlayStartText.begin(), kPlayStartText.end(),
+              g_play_start.bytes.begin());
+    g_play_start.header.head = kPlayStartText.size();
+    if (!Register(crash::StreamType::kPlayStartBytes, &g_play_start,
+                  sizeof(g_play_start))) {
+      return false;
+    }
     if (auto dump = crash::DumpWithoutCrash("probe dump 1"); !dump) {
       Report(std::format("probe: dump 1 failed: {}", dump.error().message));
       return false;
     }
     Report("probe: dump 1 written");
+    if (auto withdrawn =
+            crash::UnregisterStream(crash::StreamType::kPlayStartBytes);
+        !withdrawn) {
+      Report(std::format("probe: UnregisterStream failed: {}",
+                         withdrawn.error().message));
+      return false;
+    }
+    // The withdrawn region's contents change: the second dump must not
+    // read it.
+    g_play_start.bytes.fill('x');
     // The second dump must show what changed since: the handler reads the
     // registered memory at dump time.
     for (std::uint32_t i = kMainLogFirstDump; i < kMainLogSecondDump; ++i) {

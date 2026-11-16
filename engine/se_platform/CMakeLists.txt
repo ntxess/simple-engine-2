@@ -9,12 +9,15 @@
 # M9 adds the stepwise file streams (file_stream.h: FILE_SHARE_DELETE reads,
 # TryReplace's sharing violations) and the fault and delay injector
 # (fs_faults.h, test builds) for the background lane.
+# M12 adds the in-driver flag (driver_wait.h) that se_render and the
+# FramePacer raise around SDL_GPU and pacer waits, for the watchdog's label.
 
 se_use_deps(sdl3)
 
 se_add_module(se_platform KIND STATIC
   SOURCES
     src/display_output.cc
+    src/driver_wait.cc
     src/fatal.cc
     src/file_stream.cc
     src/fs.cc

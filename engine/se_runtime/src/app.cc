@@ -36,11 +36,13 @@
 #include "se_core/jobs.h"
 #include "se_core/log.h"
 #include "se_core/profile.h"
+#include "se_core/session_header.h"
 #include "se_core/thread_role.h"
 #include "se_core/time.h"
 #include "se_core/world.h"
 #include "se_os/fork_workers.h"
 #include "se_platform/display_output.h"
+#include "se_platform/driver_wait.h"
 #include "se_platform/fatal.h"
 #include "se_platform/fs.h"
 #include "se_platform/fs_faults.h"
@@ -62,6 +64,7 @@
 #include "se_runtime/app_config.h"
 #include "se_runtime/audio_bridge.h"
 #include "se_runtime/frame_pacer.h"
+#include "se_runtime/heartbeat.h"
 #include "se_runtime/input_service.h"
 #include "se_runtime/integration.h"
 #include "se_runtime/lifecycle.h"
@@ -77,6 +80,7 @@
 #include "se_sim/session_log.h"
 #include "se_sim/sim_driver.h"
 #include "src/game_hook.h"
+#include "src/hang_test.h"
 
 namespace se {
 
@@ -119,6 +123,9 @@ namespace {
 constexpr std::uint64_t kTitleIntervalNs = 250'000'000;
 constexpr std::uint64_t kLogIntervalNs = 2'000'000'000;
 constexpr double kNsToSec = 1e-9;
+constexpr std::uint64_t kNsPerMs = 1'000'000;
+// A teardown this long logs where its time went (the CI gate is 2 s).
+constexpr std::uint64_t kSlowTeardownNs = 500'000'000;
 // A failed device recreation is retried this often, this many times.
 constexpr std::uint64_t kRecreateRetryNs = 1'000'000'000;
 constexpr std::uint32_t kMaxRecreateAttempts = 5;
@@ -356,6 +363,8 @@ std::expected<void, Error> App::Boot() {
   inputs.modal = &modal_flag_;
   inputs.suspended = &suspended_flag_;
   inputs.heartbeat = &heartbeat_flag_;
+  // SDL_GPU and pacer waits label a hang a GPU or compositor stall (M12).
+  inputs.in_driver = &DriverWaitFlag();
   integration::VblankStart vblank;
   vblank.enabled = window_ != nullptr;
   vblank.monitor = monitor_;
@@ -488,9 +497,10 @@ std::expected<void, Error> App::StartGame() {
 #else
   input_config.key_source = EdgeSource::kWinMessage;
 #endif
-  game_ = std::make_unique<GameRuntime>(*setup_.module, env, pool_config,
-                                        std::move(*map), input_config,
-                                        audio_.get());
+  // --hang-test (test builds): the module with the HangTest system (M12).
+  game_ = std::make_unique<GameRuntime>(
+      *HangTestModule(setup_.module, config_.hang_test), env, pool_config,
+      std::move(*map), input_config, audio_.get());
   // Every latched InputFrame goes into the process's ring, a dump stream.
   game_->driver.AttachInputRing(&integration::DumpInputRing());
   if (setup_.configure) {
@@ -513,14 +523,29 @@ std::expected<void, Error> App::StartGame() {
                 std::format("the start state '{}' could not be pushed", start));
   }
   // --record: every tick's InputFrame (edges and their sources included)
-  // and hash, written at shutdown (M8).
+  // and hash, written at shutdown (M8). The session header (M12) carries
+  // the same header for replays from a dump.
+  std::vector<std::byte> start_bytes;
+  if (setup_.replay_start) start_bytes = setup_.replay_start(paths_);
+  const ReplayHeader replay_header =
+      MakeReplayHeader(start_bytes, setup_.seed, setup_.tick_rate);
   if (!config_.record_path.empty()) {
-    std::vector<std::byte> start_bytes;
-    if (setup_.replay_start) start_bytes = setup_.replay_start(paths_);
-    game_->recorder.Begin(
-        MakeReplayHeader(start_bytes, setup_.seed, setup_.tick_rate),
-        start_bytes);
+    game_->recorder.Begin(replay_header, start_bytes);
   }
+  SessionHeaderInfo session;
+  session.module = setup_.module->name;
+  session.scene = setup_.scene;
+  session.scene_hash = replay_header.scene_hash;
+  session.seed = setup_.seed;
+  session.tick_rate = setup_.tick_rate;
+  session.build = replay_header.build;
+  session.platform = replay_header.platform;
+  session.compiler = replay_header.compiler;
+  session.math_hash = replay_header.math_hash;
+  session.cpu_features = replay_header.cpu_features;
+  session.start_tick = game_->driver.NextTick();
+  session.first_frame = integration::DumpInputRing().Head();
+  integration::DumpSessionHeader().Begin(session);
   // The start state's scope requests its assets now; no tick runs until
   // they are resident (M9).
   game_->driver.SetTickGate(assets_.get());
@@ -769,6 +794,14 @@ void App::NoteTeardown(std::string_view step) noexcept {
   if (teardown_count_ < teardown_steps_.size()) {
     teardown_steps_[teardown_count_++] = step;
   }
+  MarkTeardown(step);
+}
+
+void App::MarkTeardown(std::string_view part) noexcept {
+  if (teardown_mark_count_ < teardown_marks_.size()) {
+    teardown_marks_[teardown_mark_count_++] = {.part = part,
+                                               .end_ns = SDL_GetTicksNS()};
+  }
 }
 
 void App::RunPushKeys(const FrameReport& report) {
@@ -892,11 +925,14 @@ SDL_AppResult App::HandleEvent(const SDL_Event& event) {
     case SDL_EVENT_QUIT:
       quit_.Request(QuitReason::kQuitEvent);
       break;
-    case SDL_EVENT_TERMINATING:
+    case SDL_EVENT_TERMINATING: {
       SE_LOG_WARN("SDL_EVENT_TERMINATING: running the recovery hook");
+      // A blocking save at session end: known long work (M12).
+      const HeartbeatScope beat = KnownLongWork("recovery at TERMINATING");
       quit_.RequestImmediate(QuitReason::kTerminating);
       std::fflush(stderr);
       break;
+    }
     case SDL_EVENT_LOW_MEMORY:
       ++low_memory_events_;
       SE_LOG_WARN("SDL_EVENT_LOW_MEMORY");
@@ -1294,6 +1330,12 @@ SDL_AppResult App::Iterate() {
       static_cast<double>(SDL_GetTicksNS() - ticks_start) * kNsToSec;
   // The assets' TickGate may have stopped the frame's ticks early.
   const auto ran = static_cast<int>(game_->driver.FrameResults().size());
+  if (ran > 0) {
+    // The session header's newest hash (M12: se_replay --from-dump checks
+    // it).
+    const TickResult& last = game_->driver.FrameResults().back();
+    integration::DumpSessionHeader().PublishTick(last.tick, last.hash);
+  }
   ticks_run_ += static_cast<std::uint64_t>(ran);
   for (int i = 0; i < ran; ++i) {
     costs_.AddTick(ticks_sec / ran);
@@ -1504,6 +1546,13 @@ SDL_AppResult App::Shutdown(SDL_AppResult result) {
   if (device_recoveries_ > 0) {
     SE_LOG_INFO("device losses recovered: {}", device_recoveries_);
   }
+  if (long_work_.scopes > 0) {
+    SE_LOG_INFO(
+        "known long work (the watchdog's heartbeat): {} scopes, the longest "
+        "'{}' {:.1f} ms",
+        long_work_.scopes, long_work_.longest,
+        static_cast<double>(long_work_.longest_ns) * 1e-6);
+  }
   if (game_) {
     const AudioBridgeStats& sound = game_->audio.Stats();
     SE_LOG_INFO(
@@ -1524,7 +1573,27 @@ SDL_AppResult App::Shutdown(SDL_AppResult result) {
   // The renderer's totals and leak check, while logging still runs; the
   // teardown below only destroys it.
   if (renderer_) renderer_->Shutdown();
+  const std::uint64_t teardown_start = SDL_GetTicksNS();
   Teardown();
+  // CI keeps every teardown under 2 s (M12; the callback tests gate it).
+  const std::uint64_t teardown_ns = SDL_GetTicksNS() - teardown_start;
+  SE_LOG_INFO("teardown took {:.1f} ms",
+              static_cast<double>(teardown_ns) * 1e-6);
+  if (teardown_ns >= kSlowTeardownNs) {
+    // Where a slow teardown spent its time: the parts of 1 ms and more.
+    std::string parts;
+    std::uint64_t from = teardown_start;
+    for (std::size_t i = 0; i < teardown_mark_count_; ++i) {
+      const TeardownMark& mark = teardown_marks_[i];
+      const std::uint64_t ns = mark.end_ns > from ? mark.end_ns - from : 0;
+      from = std::max(from, mark.end_ns);
+      if (ns < kNsPerMs) continue;
+      if (!parts.empty()) parts += ", ";
+      parts += std::format("{} {:.0f} ms", mark.part,
+                           static_cast<double>(ns) * 1e-6);
+    }
+    SE_LOG_INFO("slow teardown: {}", parts.empty() ? "no part of 1 ms" : parts);
+  }
   if (lane_stats_) AssetRuntime::LogLaneStopped(*lane_stats_);
   if (replay_submitted_) {
     if (lane_durable_failures_ > replay_failures_before_) {
@@ -1640,17 +1709,21 @@ void App::Teardown() {
   // device.
   present_.reset();
   renderer_.reset();
+  MarkTeardown("renderer (12)");
   gpu_.reset();
+  MarkTeardown("gpu-device (12)");
   // Step 14: remove the subclass, destroy the window.
   if (window_) window_->SetListener(nullptr);
   window_.reset();
   wake_.reset();
   filter_.reset();
   SDL_ResetHint(SDL_HINT_MAIN_CALLBACK_RATE);
+  MarkTeardown("window (14)");
   // The open gamepads, before their subsystem goes.
   gamepads_.CloseAll();
   // Step 15: SDL_QuitSubSystem(GAMEPAD | VIDEO).
   sdl_.reset();
+  MarkTeardown("sdl (15)");
   // Step 16: SDL's log output to stderr, then drain and stop the log
   // worker (spdlog::shutdown); SE_LOG_* is synchronous from here on.
   if (logging_) {
@@ -1684,9 +1757,15 @@ SDL_AppResult App::OnCallbackFault(std::string_view where,
   return SDL_APP_FAILURE;
 }
 
+crash::WatchdogStats App::WatchdogStats() const noexcept {
+  return helpers_ ? helpers_->WatchdogStats() : crash::WatchdogStats{};
+}
+
 void App::OnSessionEnd(SessionEnd kind) noexcept {
   // Synchronous: the recovery hook runs before the window procedure
-  // returns to Windows.
+  // returns to Windows. A blocking save at session end: known long work
+  // (M12).
+  const HeartbeatScope beat = KnownLongWork("session-end recovery");
   quit_.RequestImmediate(QuitReason::kSessionEnd);
   std::fflush(stderr);
   static_cast<void>(kind);

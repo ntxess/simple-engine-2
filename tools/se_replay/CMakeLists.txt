@@ -4,6 +4,18 @@
 # module and the rampage session. The rampage replay and reference tests are
 # registered in tests/rampage/CMakeLists.txt.
 
+# --from-dump's reader of the dump layout and its replay (M12), a library
+# so that its tests can feed it synthetic dumps.
+se_add_module(se_replay_dump KIND STATIC
+  SOURCES
+    dump_session.cc
+  PUBLIC_DEPS
+    se_core
+    se_sim
+    rampage_test_support
+  TEST)
+target_include_directories(se_replay_dump PUBLIC "${CMAKE_SOURCE_DIR}/tools")
+
 se_add_module(se_replay KIND EXECUTABLE
   SOURCES
     main.cc
@@ -12,7 +24,28 @@ se_add_module(se_replay KIND EXECUTABLE
     se_sim
     se_test_support
     rampage_test_support
+    se_replay_dump
   TEST)
+
+# The dump reader and the replay from a dump on synthetic minidumps built
+# from a headless rampage session (label unit, every platform).
+se_add_module(se_replay_tests KIND EXECUTABLE
+  SOURCES
+    dump_session_test.cc
+    ../../tests/support/tracy_inert_listener.cc
+  PRIVATE_DEPS
+    se_core
+    se_sim
+    se_test_support
+    rampage_test_support
+    se_replay_dump
+    Catch2::Catch2WithMain
+  TEST)
+catch_discover_tests(se_replay_tests
+  DISCOVERY_MODE PRE_TEST
+  TEST_PREFIX "replay_unit."
+  ADD_TAGS_AS_LABELS
+  PROPERTIES LABELS unit)
 
 set(_se_replay_out "${CMAKE_BINARY_DIR}/se_replay_out")
 file(MAKE_DIRECTORY "${_se_replay_out}")

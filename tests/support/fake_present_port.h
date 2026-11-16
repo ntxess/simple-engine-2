@@ -113,6 +113,9 @@ class FakePresentPort final : public PresentPort {
   std::uint32_t fence_polls = 0;
   std::uint32_t fence_waits = 0;
   std::uint32_t submitted = 0;
+  // Waits and polls (latency, fence, swapchain) the pacer made without the
+  // in-driver flag up (M12: it raises it around each).
+  std::uint32_t waits_outside_driver = 0;
 
  private:
   struct Shown {

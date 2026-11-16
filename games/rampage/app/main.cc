@@ -83,6 +83,8 @@ std::expected<se::GameSetup, se::Error> MakeRampage(
     se::rampage::SetSandboxScene(std::move(request));
     return {};
   };
+  // The scene for the session header (M12: se_replay --from-dump).
+  setup.scene = scene;
   // A --record replay starts from the scene file, as se_replay's do.
   setup.replay_start = [scene](const se::ContentPaths& paths) {
     auto bytes = se::fs::ReadFile(se::fs::Join(paths.content_root, scene));

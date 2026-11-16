@@ -17,6 +17,7 @@
 #include "se_core/log.h"
 #include "se_core/thread_role.h"
 #include "se_core/time.h"
+#include "se_platform/driver_wait.h"
 #include "se_platform/vblank_sampler.h"
 #include "se_runtime/pacer_policy.h"
 #include "se_runtime/present_port.h"
@@ -220,6 +221,9 @@ FrameClock FramePacer::BeginFrame(bool modal, FixedStepper& stepper) {
   // 1. The fence of frame N - L.
   if (port_ != nullptr && submitted_ > 0) {
     const int back = latency_.Latency();
+    // The pacer's waits raise the in-driver flag: the watchdog labels a
+    // hang inside one a GPU or compositor stall (M12).
+    const DriverWaitScope in_driver;
     if (port_->WaitFrameFence(back, 0) == PresentWait::kTimeout) {
       frame_.fence_pending = true;
       ++totals_.fence_pending_frames;
@@ -464,10 +468,14 @@ WaitTracker::Result FramePacer::WaitWaitable(std::uint64_t& now_ns) {
   // A poll first: only a wait that blocked returned when its present was
   // taken from the queue.
   bool blocked = false;
-  PresentWait result = port_->WaitFrameLatency(0);
-  if (result == PresentWait::kTimeout) {
-    blocked = true;
-    result = port_->WaitFrameLatency(config_.waitable_timeout_ns);
+  PresentWait result = PresentWait::kUnsupported;
+  {
+    const DriverWaitScope in_driver;
+    result = port_->WaitFrameLatency(0);
+    if (result == PresentWait::kTimeout) {
+      blocked = true;
+      result = port_->WaitFrameLatency(config_.waitable_timeout_ns);
+    }
   }
   now_ns = clock_->NowNs();
   frame_.waitable = result;
@@ -575,7 +583,10 @@ void FramePacer::EndFrame(const StepPlan& next, const FrameCosts& costs,
   }
   const auto wait_swapchain = [&] {
     const std::uint64_t start = clock_->NowNs();
-    static_cast<void>(port_->WaitSwapchain());
+    {
+      const DriverWaitScope in_driver;
+      static_cast<void>(port_->WaitSwapchain());
+    }
     now = clock_->NowNs();
     frame_.swapchain_wait_ns += now - start;
     ++totals_.swapchain_waits;

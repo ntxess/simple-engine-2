@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <expected>
 #include <format>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -62,10 +63,21 @@ std::mutex& DumpMutex() {
   return *kMutex;
 }
 
-// Guards CrashpadInfo's stream list, which crashpad does not lock.
+// Guards CrashpadInfo's stream list, which crashpad does not lock, and the
+// handles below.
 std::mutex& StreamMutex() {
   static std::mutex* const kMutex = new std::mutex();
   return *kMutex;
+}
+
+// The list entry of every stream type registered so far, kept after
+// UnregisterStream (crashpad cannot unlink one: a withdrawn entry points at
+// no memory, which the handler skips) so a later RegisterStream reuses it.
+// Guarded by StreamMutex.
+std::map<std::uint32_t, crashpad::UserDataMinidumpStreamHandle*>& Handles() {
+  static auto* const kHandles =
+      new std::map<std::uint32_t, crashpad::UserDataMinidumpStreamHandle*>();
+  return *kHandles;
 }
 
 std::string_view Truncated(std::string_view text) {
@@ -191,11 +203,40 @@ std::expected<void, Error> RegisterStream(StreamType type, const void* data,
     return reserved;
   }
   // The entry is linked in with its fields set, so the handler reading the
-  // list at dump time sees either the old list or the new one.
-  if (crashpad::CrashpadInfo::GetCrashpadInfo()->AddUserDataMinidumpStream(
-          static_cast<std::uint32_t>(type), data, size) == nullptr) {
+  // list at dump time sees either the old list or the new one. A type that
+  // was withdrawn gets its entry back, pointing at the new region.
+  const auto value = static_cast<std::uint32_t>(type);
+  crashpad::CrashpadInfo* info = crashpad::CrashpadInfo::GetCrashpadInfo();
+  auto& handles = Handles();
+  const auto existing = handles.find(value);
+  crashpad::UserDataMinidumpStreamHandle* handle =
+      existing != handles.end()
+          ? info->UpdateUserDataMinidumpStream(existing->second, value, data,
+                                               size)
+          : info->AddUserDataMinidumpStream(value, data, size);
+  if (handle == nullptr) {
+    if (existing != handles.end()) handles.erase(existing);
     internal::ReleaseStream(type);
     return Fail(ErrorCode::kIo, "crashpad did not register the dump stream");
+  }
+  handles[value] = handle;
+  return {};
+}
+
+std::expected<void, Error> UnregisterStream(StreamType type) {
+  const std::scoped_lock lock(StreamMutex());
+  if (auto released = internal::UnreserveStream(type); !released) {
+    return released;
+  }
+  // Crashpad has no removal: the entry is replaced by one with no memory
+  // (size 0), which the handler skips. UpdateUserDataMinidumpStream links
+  // the new entry in before it frees the old one.
+  const auto value = static_cast<std::uint32_t>(type);
+  auto& handles = Handles();
+  if (const auto existing = handles.find(value); existing != handles.end()) {
+    existing->second =
+        crashpad::CrashpadInfo::GetCrashpadInfo()->UpdateUserDataMinidumpStream(
+            existing->second, value, nullptr, 0);
   }
   return {};
 }

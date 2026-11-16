@@ -3,7 +3,8 @@
 // The backend of builds without crashpad (SE_CRASH=OFF, and Linux until the
 // docs/gates.md entry "Linux crash capture" is closed): Start and
 // DumpWithoutCrash return kUnsupported, RegisterStream validates its
-// arguments and keeps nothing, so callers need no build switches.
+// arguments and reserves the type (UnregisterStream releases it) but keeps
+// nothing, so callers need no build switches.
 
 #include <expected>
 #include <memory>
@@ -35,6 +36,10 @@ bool Running() noexcept { return false; }
 std::expected<void, Error> RegisterStream(StreamType type, const void* data,
                                           std::size_t size) {
   return internal::ReserveStream(type, data, size);
+}
+
+std::expected<void, Error> UnregisterStream(StreamType type) {
+  return internal::UnreserveStream(type);
 }
 
 std::expected<void, Error> DumpWithoutCrash(std::string_view /*reason*/) {

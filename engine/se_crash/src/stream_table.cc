@@ -71,6 +71,24 @@ void ReleaseStream(StreamType type) noexcept {
   table.reserved.reset(IndexOf(type));
 }
 
+std::expected<void, Error> UnreserveStream(StreamType type) {
+  const auto value = static_cast<std::uint32_t>(type);
+  if (!IsFirstPartyStream(type)) {
+    return Fail(ErrorCode::kInvalidArgument,
+                std::format("dump stream type {:#010x} is outside the "
+                            "first-party range",
+                            value));
+  }
+  StreamTable& table = Table();
+  const std::scoped_lock lock(table.mutex);
+  if (!table.reserved.test(IndexOf(type))) {
+    return Fail(ErrorCode::kInvalidArgument,
+                std::format("dump stream {:#010x} is not registered", value));
+  }
+  table.reserved.reset(IndexOf(type));
+  return {};
+}
+
 }  // namespace internal
 
 std::string HandlerPathIn(std::string_view dir) {

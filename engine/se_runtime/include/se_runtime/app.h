@@ -96,7 +96,16 @@
 // main right after tick N; --dump-test after-ticks:N has the watchdog write
 // a dump after tick N, holds the ticks until it is written, then quits.
 // M7 adds --inject-frame-fault, --reload-texture and --readback
-// (app_config.h); M9 --lane-step-trace.
+// (app_config.h); M9 --lane-step-trace; M12 --hang-test (main loops inside
+// a system at tick N) and --watchdog-period-ms.
+//
+// The watchdog (M12): main's iterate counter, the Suspended and Modal flags,
+// the heartbeat (KnownLongWork) and the in-driver flag (se_platform/
+// driver_wait.h, raised around SDL_GPU and pacer waits) are its inputs; a
+// hang (5 periods of 1 s without progress, armed after the first iterate)
+// gets one dump per episode. The session header (integration.h) is begun at
+// boot step 10 and gets the last tick's hash after each frame's ticks. The
+// teardown's length is logged ("teardown took ...").
 
 #ifndef SE_RUNTIME_APP_H_
 #define SE_RUNTIME_APP_H_
@@ -136,6 +145,7 @@
 #include "se_runtime/app_config.h"
 #include "se_runtime/asset_runtime.h"
 #include "se_runtime/frame_pacer.h"
+#include "se_runtime/heartbeat.h"
 #include "se_runtime/integration.h"
 #include "se_runtime/lifecycle.h"
 #include "se_runtime/quit.h"
@@ -216,8 +226,11 @@ struct GameSetup {
   // to the audio engine when resident (ADR-087).
   std::string sound_table;
   // The start bytes of a --record replay (rampage: its scene file); empty:
-  // none.
+  // none. Their hash goes into the session header too (M12).
   std::function<std::vector<std::byte>(const ContentPaths& paths)> replay_start;
+  // The scene the session starts from, relative to the content root, for
+  // the session header's replays from a dump (M12); empty: none.
+  std::string scene;
   // The camera a World is drawn with; empty: its primary Camera2D, else a
   // default one.
   std::function<Camera2D(const World& world)> camera;
@@ -264,6 +277,19 @@ class App final : public WindowListener {
 
   // Starts the two-phase quit.
   void RequestQuit() SE_REQUIRES(g_main);
+
+  // Known long work on main (a large synchronous load, a blocking save at
+  // session end; M12): the watchdog's heartbeat is up while the scope
+  // lives (heartbeat.h). Main only.
+  [[nodiscard]] HeartbeatScope KnownLongWork(std::string_view what) noexcept {
+    return HeartbeatScope(heartbeat_flag_, what, &long_work_);
+  }
+  // The known long work so far (logged at shutdown).
+  [[nodiscard]] const LongWorkStats& LongWork() const noexcept {
+    return long_work_;
+  }
+  // The watchdog's counters (M12); zeros without a watchdog.
+  [[nodiscard]] crash::WatchdogStats WatchdogStats() const noexcept;
 
   // WindowListener (the window subclass, on main).
   void OnSessionEnd(SessionEnd kind) noexcept override;
@@ -411,6 +437,9 @@ class App final : public WindowListener {
   void RunDurableSaveTest() SE_REQUIRES(g_main);
   // Records a teardown step for the shutdown-order log (ADR-088).
   void NoteTeardown(std::string_view step) noexcept;
+  // Records when a part of the teardown ended, for the log line that says
+  // where a slow teardown spent its time (M12's 2 s gate).
+  void MarkTeardown(std::string_view part) noexcept;
   void RunPushKeys(const FrameReport& report) SE_REQUIRES(g_main);
   // The input sampler (M8): started at the first iterate, inside ADR-047's
   // window; parked while Suspended or Idle; its rate from the power source
@@ -463,6 +492,13 @@ class App final : public WindowListener {
   // The teardown steps run, in order (ADR-088).
   std::array<std::string_view, 24> teardown_steps_{};
   std::size_t teardown_count_ = 0;
+  // The parts of the teardown and when each ended (SDL_GetTicksNS).
+  struct TeardownMark {
+    std::string_view part;
+    std::uint64_t end_ns = 0;
+  };
+  std::array<TeardownMark, 24> teardown_marks_{};
+  std::size_t teardown_mark_count_ = 0;
   UserSettings settings_;
   std::unique_ptr<audio::AudioEngine> audio_;
   std::unique_ptr<GameRuntime> game_;
@@ -495,13 +531,14 @@ class App final : public WindowListener {
   // teardown).
   bool vblank_detached_ = false;
 
-  // Read by the watchdog (integration). The heartbeat flag is for long
-  // work on main that still makes progress (M9's loads, M12); nothing in
-  // M5 raises it.
+  // Read by the watchdog (integration). The heartbeat flag is raised only
+  // by KnownLongWork (M12: the session-end recovery hook; M10's loads and
+  // saves).
   std::atomic<std::uint64_t> iterate_counter_{0};
   std::atomic<bool> suspended_flag_{false};
   std::atomic<bool> modal_flag_{false};
   std::atomic<bool> heartbeat_flag_{false};
+  LongWorkStats long_work_;
   std::uint64_t boot_start_ns_ = 0;
   bool profiling_ = false;
   bool exit_test_fired_ = false;

@@ -5,7 +5,8 @@ the standard thread, thread-name, module, exception and misc streams,
 crashpad's annotations, and first-party streams in the layout of
 docs/milestone-specs.md ("Dump stream layout"), including a wrapped log ring
 and an InputFrame ring with a torn slot, with the stamps the engine's
-InputFrameRing writes (2n + 1 while frame n is written, 2n + 2 after).
+InputFrameRing writes (2n + 1 while frame n is written, 2n + 2 after), and
+M12's session header (kind 6) and Play-start bytes (kind 7).
 Malformed inputs must be reported, not decoded; a record that does not fit
 its index is a problem unless it is the one a running writer was
 overwriting. CTest runs this as minidump.read_dump; the crash tests
@@ -135,6 +136,27 @@ def input_stream(record_size=968, slots_override=None):
 
 def flight_stream():
     return se_header(5, 8, 2, 2, name=b"flight") + bytes(range(16))
+
+
+def session_record(stamp=4, last_tick=118):
+    record = bytearray(512)
+    struct.pack_into("<10Q2I", record, 0, stamp, 1, 1, 0xABCDEF, 0x1234,
+                     0x7, 1, 37, last_tick, 0xFEED, 120, 0)
+    for offset, text in ((88, b"rampage"), (128, b"simple-engine 0.1 Dev"),
+                         (192, b"windows"), (224, b"msvc 19.51"),
+                         (288, b"assets/scenes/sandbox.scene.json")):
+        record[offset:offset + len(text)] = text
+    return bytes(record)
+
+
+def session_stream(head=1, record=None):
+    record = record if record is not None else session_record()
+    return se_header(6, 512, 1, head, name=b"session-header") + record
+
+
+def bytes_stream(payload=b'{"format": "se-scene-v1"}'):
+    return (se_header(7, 1, len(payload), len(payload), name=b"play-start")
+            + payload)
 
 
 def crashpad_info(builder):
@@ -293,6 +315,59 @@ class FirstPartyStreams(unittest.TestCase):
             "action": 5, "down": True, "stamp_ns": 5000, "order": 0,
             "source": "replay"}])
         self.assertTrue(frame["platform_live"])
+
+    def test_session_header(self):
+        dump = read_dump.read_dump(full_dump([
+            (0x53450005, session_stream()),
+            (0x53450006, bytes_stream()),
+        ]))
+        self.assertEqual(dump["problems"], [])
+        stream = se_stream(dump, 0x53450005)
+        self.assertEqual((stream["kind"], stream["kind_name"],
+                          stream["type_name"]),
+                         (6, "session header", "session header"))
+        record = stream["records"][0]
+        self.assertTrue(record["begun"])
+        self.assertFalse(record["torn"])
+        self.assertEqual((record["session"], record["seed"],
+                          record["scene_hash"], record["start_tick"],
+                          record["first_frame"], record["last_tick"],
+                          record["last_hash"], record["tick_rate"]),
+                         (1, 1, "0000000000abcdef", 1, 37, 118,
+                          "000000000000feed", 120))
+        self.assertEqual((record["module"], record["scene"], record["build"],
+                          record["platform"], record["compiler"]),
+                         ("rampage", "assets/scenes/sandbox.scene.json",
+                          "simple-engine 0.1 Dev", "windows", "msvc 19.51"))
+        status, out, _ = run_cli(full_dump([(0x53450005, session_stream())]))
+        self.assertEqual(status, 0)
+        self.assertIn("session 1 of 'rampage': scene "
+                      "'assets/scenes/sandbox.scene.json'", out)
+        self.assertIn("last tick 118 hash 000000000000feed", out)
+
+    def test_session_header_being_rewritten_is_marked(self):
+        dump = read_dump.read_dump(full_dump([
+            (0x53450005, session_stream(record=session_record(stamp=5)))]))
+        self.assertEqual(dump["problems"], [])
+        self.assertTrue(se_stream(dump, 0x53450005)["records"][0]["torn"])
+        empty = read_dump.read_dump(full_dump([
+            (0x53450005, session_stream(head=0))]))
+        self.assertFalse(se_stream(empty, 0x53450005)["records"][0]["begun"])
+
+    def test_play_start_bytes(self):
+        payload = b'{"format": "se-scene-v1"}'
+        dump = read_dump.read_dump(full_dump([(0x53450006,
+                                               bytes_stream(payload))]))
+        self.assertEqual(dump["problems"], [])
+        stream = se_stream(dump, 0x53450006)
+        self.assertEqual(stream["type_name"], "play-start bytes")
+        record = stream["records"][0]
+        self.assertEqual(record["size"], len(payload))
+        self.assertEqual(read_dump.base64.b64decode(record["base64"]),
+                         payload)
+        self.assertEqual(record["fnv1a64"],
+                         f"{read_dump.fnv1a64(payload):016x}")
+        self.assertEqual(read_dump.fnv1a64(b""), 0xCBF29CE484222325)
 
     def test_later_kinds_are_listed_raw(self):
         stream = se_stream(self.dump, 0x53450004)

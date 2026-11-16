@@ -82,6 +82,13 @@
 //                          key event for KEY (a key name) stamped MS
 //                          milliseconds after that frame's start, so the
 //                          next frame places it (M8); repeatable
+//   --hang-test after-ticks:N[:for-ms:MS][:in-driver]  main loops inside a
+//                          system (HangTest, the last of the Cleanup phase)
+//                          at tick N: forever, or for MS milliseconds; with
+//                          in-driver inside a DriverWaitScope, as a stalled
+//                          SDL_GPU wait would be (M12)
+//   --watchdog-period-ms MS  the watchdog's hang period (default 1000; the
+//                          headless hang tests shorten it; M12)
 // Frames are iterates, counted from 1, as for --inject-null-acquire.
 
 #ifndef SE_RUNTIME_APP_CONFIG_H_
@@ -147,6 +154,14 @@ struct DurableSaveTestHook {
 // --audio.
 enum class AudioRequest : std::uint8_t { kDefault, kDevice, kNull, kNone };
 
+// --hang-test after-ticks:N[:for-ms:MS][:in-driver] (after_ticks 0: off).
+struct HangTestHook {
+  std::int64_t after_ticks = 0;
+  // 0: forever.
+  std::uint32_t for_ms = 0;
+  bool in_driver = false;
+};
+
 struct AppConfig {
   std::int64_t frames = 0;
   double fixed_frame_dt_ms = 0.0;
@@ -185,6 +200,9 @@ struct AppConfig {
   std::string lane_step_trace;
   std::vector<PushKeyHook> push_keys;
   DurableSaveTestHook durable_save_test;
+  // M12.
+  HangTestHook hang_test;
+  std::uint32_t watchdog_period_ms = 0;
 
   // The arguments after "--".
   std::vector<std::string> game_args;
