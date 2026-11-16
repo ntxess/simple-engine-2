@@ -24,12 +24,18 @@ void HangDetector::Arm(std::uint64_t iterates, std::uint64_t now_ns) noexcept {
   last_iterates_ = iterates;
   progress_ns_ = now_ns;
   count_from_ns_ = now_ns;
+  last_sample_ns_ = now_ns;
   stalled_periods_ = 0;
   stall_ns_ = 0;
   in_hang_ = false;
 }
 
 void HangDetector::Disarm() noexcept { disarmed_ = true; }
+
+std::uint64_t HangDetector::MaxSampleGapNs() const noexcept {
+  if (config_.max_sample_gap_ns == 0) return 0;
+  return std::max(config_.max_sample_gap_ns, 2 * config_.period_ns);
+}
 
 HangVerdict HangDetector::Observe(const HangSample& sample) noexcept {
   if (disarmed_) return HangVerdict::kOff;
@@ -42,6 +48,9 @@ HangVerdict HangDetector::Observe(const HangSample& sample) noexcept {
     }
     return HangVerdict::kProgress;
   }
+  const std::uint64_t gap =
+      sample.now_ns > last_sample_ns_ ? sample.now_ns - last_sample_ns_ : 0;
+  last_sample_ns_ = std::max(last_sample_ns_, sample.now_ns);
   if (sample.iterates != last_iterates_) {
     last_iterates_ = sample.iterates;
     const bool ended = in_hang_;
@@ -61,6 +70,15 @@ HangVerdict HangDetector::Observe(const HangSample& sample) noexcept {
     count_from_ns_ = std::max(count_from_ns_, sample.now_ns);
     stalled_periods_ = 0;
     return HangVerdict::kExcused;
+  }
+  // Nobody watched main during a gap this long: the process was stopped,
+  // so the time is no evidence of a hang. A declared hang stays declared.
+  if (const std::uint64_t limit = MaxSampleGapNs();
+      limit != 0 && gap > limit && !in_hang_) {
+    gap_ns_ = gap;
+    count_from_ns_ = std::max(count_from_ns_, sample.now_ns);
+    stalled_periods_ = 0;
+    return HangVerdict::kUnobserved;
   }
   const std::uint64_t counted =
       sample.now_ns > count_from_ns_ ? sample.now_ns - count_from_ns_ : 0;

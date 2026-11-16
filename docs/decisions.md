@@ -3045,9 +3045,23 @@ hang_detector.h, watchdog.h):
 - Suspended, Modal, the heartbeat and a debugger each excuse a sample: the
   count starts over from it. The debugger is read only on samples without
   progress (Linux reads /proc for it).
+- The periods must have been watched. When the detector itself got no
+  sample for longer than `HangDetectorConfig::max_sample_gap_ns` (2 s, or
+  two periods when that is longer; 0 turns the rule off) and main made no
+  progress, the whole process was stopped, not only main: a debugger that
+  detached (or was closed) while the process stood in it, so that no later
+  sample sees it; a job-control stop (SIGSTOP, CLOCK_MONOTONIC keeps
+  running); a paused virtual machine. The sample after the gap is
+  `HangVerdict::kUnobserved`: the count starts over from it, the watchdog
+  logs one WARN line with the gap's length and counts it
+  (`WatchdogStats::unobserved_gaps`). A hang already declared stays
+  declared. A real hang is not delayed: the watchdog is its own thread and
+  keeps sampling while main is stuck.
 - A hang is declared once per episode: one ERROR line ("hang N: main made
   no progress for X s at tick T (iterate I; main's breadcrumb: tick, phase,
-  system, chunk): requesting a dump") and one DumpWithoutCrash on the
+  system, chunk): requesting a dump"), a log flush of at most 200 ms (the
+  log file is complete up to the hang before its dump: mt-design.md P12)
+  and one DumpWithoutCrash on the
   watchdog thread with the same text as the dump's `se.dump_reason`. The
   episode ends at the first sample that sees progress again, logged as
   "hang N ended: main made progress again after X s (Hung -> Running)",
@@ -3059,7 +3073,8 @@ hang_detector.h, watchdog.h):
   hung, so it could only ever enter and leave Hung in the same iterate.
   M5's lifecycle.h listed Hung among the states M12 would add; it does not.
 - WatchdogStats gains hangs, hang_dumps_written, hangs_ended,
-  last_episode_ns, in_hang and last_hang_in_driver; `periods` becomes
+  last_episode_ns, unobserved_gaps, in_hang and last_hang_in_driver;
+  `periods` becomes
   `samples` (the wakes that sampled), and `stalled_periods` counts whole
   unexcused periods.
 - The clock and the debugger check are injectable (`WatchdogConfig::clock`,
@@ -3073,17 +3088,25 @@ up to 6 s after the hang began, before the dump is written, so the 6 s
 budget would be missed in a sixth of the runs; counting from the last
 observed progress with quarter-period samples keeps the rule (no hang
 before 5 s without progress) and the budget. Four wakes a second of a
-thread that reads a few atomics is no measurable cost.
+thread that reads a few atomics is no measurable cost. The design counts a
+debugger's stalls as paused time, and `IsDebuggerPresent` only says so
+while the debugger is still attached: after "detach" from a break of 20 s
+the first sample would have seen 20 s without progress and no excuse, and
+declared a hang that never was. The gap between the watchdog's own samples
+is the evidence that works for every way of stopping a process.
 
 **Tests.** `crash_unit.*` (every platform, TSan in WSL): the detector on a
 fake clock (5 periods declare; 4.75 s do not; one hang per episode, a second
 episode after progress; the periods start at the last progress; Modal,
 Suspended, the heartbeat and a debugger each prevent a hang and an excuse
 restarts the count; a slow boot under 30 s; an hour of system sleep during
-which the unbiased clock stands still; the in-driver label; Disarm), and
+which the unbiased clock stands still; the in-driver label; Disarm; a 20 s
+gap between samples starts the count over, a gap inside a declared hang
+changes nothing, the limit of 2 s or two periods), and
 the watchdog thread on a fake clock (one dump per episode, the episode's
 end, no dump under each excuse or a faked debugger, a slow boot and sleep,
-the stall label, no judging after the deadline starts) and on the real
+the stall label, no judging after the deadline starts, a 20 s jump of the
+clock between two samples and the hang 5 s after it) and on the real
 clock (the boot budget, then a hang after 5 periods of 10 ms).
 
 ## ADR-105 The in-driver flag, the heartbeat and the shutdown deadline (2026-11-10)

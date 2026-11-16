@@ -18,10 +18,12 @@
 // the Suspended, Modal, heartbeat and in-driver flags (atomics only) into
 // the pure HangDetector: the 30 s boot budget applies until Arm(); then 5
 // consecutive 1 s periods without progress, with no excuse and no debugger,
-// are a hang (ADR-104). A hang gets one out-of-process dump per episode,
-// written on this thread with DumpWithoutCrash, its reason labelled a GPU or
-// compositor stall when main was inside an SDL_GPU or pacer wait; the
-// episode's end, when main makes progress again, is logged with its length.
+// are a hang (ADR-104); time during which the watchdog itself took no
+// sample (the whole process was stopped) is not counted. A hang gets the
+// log flushed and one out-of-process dump per episode, written on this
+// thread with DumpWithoutCrash, its reason labelled a GPU or compositor
+// stall when main was inside an SDL_GPU or pacer wait; the episode's end,
+// when main makes progress again, is logged with its length.
 // The watchdog never calls DbgHelp, never breaks into a debugger and never
 // ends the process for a hang. Once the shutdown deadline starts (5 s after
 // the quit drain) hangs are no longer judged; when it expires the watchdog
@@ -110,6 +112,10 @@ struct WatchdogStats {
   std::uint64_t hangs_ended = 0;
   // The last ended episode's length.
   std::uint64_t last_episode_ns = 0;
+  // Times the watchdog itself took no sample for longer than the
+  // detector's gap limit while main made no progress (the process was
+  // stopped); each starts the hang count over.
+  std::uint64_t unobserved_gaps = 0;
   bool armed = false;
   bool boot_over_budget = false;
   // A hang is declared and main has not made progress since.

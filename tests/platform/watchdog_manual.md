@@ -67,8 +67,17 @@ Expected:
 - no `hang` line and no `.dmp` file: while stopped, the watchdog thread is
   stopped too; once it runs, `IsDebuggerPresent` excuses every period
   without progress, and the count starts over after the debugger detaches;
+- the log may show one `W watchdog` line "the watchdog took no sample for
+  N s (the process was stopped ...)": time during which the watchdog itself
+  did not run is not counted towards a hang (ADR-104);
 - the watchdog never breaks into the debugger itself and never ends the
   process (no `DebugBreak`, checked by `checks.planted.debugbreak`).
+
+Repeat steps 1 to 3 and then detach while still stopped (Debug > Detach
+All; `qd` in WinDbg or cdb) instead of continuing: the process resumes
+with no debugger attached and 20 s gone from the unbiased clock. Expected:
+no `hang` line and no dump; the log shows the "took no sample for 2x.x s"
+line once.
 
 Variation: start rampage with `--hang-test after-ticks:2400` (test builds:
 main loops forever in the HangTest system 20 s in), attach the debugger

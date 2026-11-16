@@ -51,6 +51,10 @@ constexpr std::uint64_t kNsPerMs = 1'000'000;
 constexpr double kNsToSec = 1e-9;
 // How long the deadline path waits for the log worker to flush.
 constexpr std::uint64_t kDeadlineFlushNs = 1'000'000'000;
+// How long a hang's dump waits for the log worker to write the records
+// before it, the hang's own line included (inside the 6 s from the hang's
+// start to its dump: a declaration comes at most 5.5 s after it).
+constexpr std::uint64_t kHangFlushNs = 200'000'000;
 
 struct DumpRequest {
   std::array<char, kDumpRequestReasonSize> reason{};
@@ -164,6 +168,7 @@ struct Watchdog::State {
   std::atomic<std::uint64_t> hang_dumps_written{0};
   std::atomic<std::uint64_t> hangs_ended{0};
   std::atomic<std::uint64_t> last_episode_ns{0};
+  std::atomic<std::uint64_t> unobserved_gaps{0};
   std::atomic<bool> detector_armed{false};
   std::atomic<bool> boot_over_budget{false};
   std::atomic<bool> in_hang{false};
@@ -248,6 +253,14 @@ void Watchdog::State::Judge(HangDetector& detector, std::uint64_t now_ns) {
     case HangVerdict::kStalled:
     case HangVerdict::kOff:
       break;
+    case HangVerdict::kUnobserved:
+      unobserved_gaps.fetch_add(1, std::memory_order_release);
+      SE_LOG_WARN(
+          "the watchdog took no sample for {:.1f} s (the process was "
+          "stopped: a debugger, a job-control stop or a paused machine): "
+          "that time is not counted towards a hang",
+          static_cast<double>(detector.GapNs()) * kNsToSec);
+      break;
     case HangVerdict::kBootOverBudget:
       boot_over_budget.store(true, std::memory_order_release);
       SE_LOG_ERROR("the boot has taken more than {} s: requesting a dump",
@@ -289,6 +302,9 @@ void Watchdog::State::OnHang(const HangDetector& detector,
       "chunk {}): requesting a dump",
       reason, sample.iterates, crumb.tick, BreadcrumbPhase(crumb), crumb.system,
       crumb.chunk);
+  // The log file is complete up to the hang before its dump is written
+  // (mt-design.md P12); the rings are dump streams either way.
+  static_cast<void>(FlushLog(kHangFlushNs));
   hang_dump_ok = WriteDump(reason);
   if (hang_dump_ok) {
     hang_dumps_written.fetch_add(1, std::memory_order_release);
@@ -413,6 +429,7 @@ WatchdogStats Watchdog::Stats() const noexcept {
       s.hang_dumps_written.load(std::memory_order_acquire);
   stats.hangs_ended = s.hangs_ended.load(std::memory_order_acquire);
   stats.last_episode_ns = s.last_episode_ns.load(std::memory_order_relaxed);
+  stats.unobserved_gaps = s.unobserved_gaps.load(std::memory_order_acquire);
   stats.armed = s.detector_armed.load(std::memory_order_acquire);
   stats.boot_over_budget = s.boot_over_budget.load(std::memory_order_acquire);
   stats.in_hang = s.in_hang.load(std::memory_order_acquire);

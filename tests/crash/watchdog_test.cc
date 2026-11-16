@@ -4,8 +4,9 @@
 // M12): the pure HangDetector on a fake unbiased clock (5 periods declare a
 // hang, once per episode; Modal, Suspended, the heartbeat and a debugger
 // each prevent it; a slow boot under 30 s and system sleep trigger nothing;
-// the in-driver label; the episode's end), and the watchdog thread with a
-// test dump function, a fake clock and a fake debugger (TSan in WSL).
+// the in-driver label; the episode's end; time the detector did not watch
+// is not counted), and the watchdog thread with a test dump function, a
+// fake clock and a fake debugger (TSan in WSL).
 // Stream registration and withdrawal (UnregisterStream, M12) on whichever
 // backend the build has.
 
@@ -209,6 +210,69 @@ TEST_CASE("System sleep triggers nothing: the unbiased clock stands still",
   // On resume main runs again within the first awake period.
   REQUIRE(detector.Observe(At(2'400 * kMs, 3)) == HangVerdict::kProgress);
   REQUIRE(detector.Hangs() == 0);
+}
+
+TEST_CASE("Time the detector did not watch is not counted towards a hang",
+          "[watchdog]") {
+  HangDetector detector({});
+  detector.Start(0);
+  detector.Arm(1, 0);
+  // 4 s without progress, watched four times a period.
+  const auto first = SampleRange(detector, kSample, 4 * kSecond, 1);
+  REQUIRE(Count(first, HangVerdict::kStalled) == Size(first));
+  REQUIRE(detector.StalledPeriods() == 4);
+  // The whole process is stopped for 20 s (a debugger that detaches while
+  // the process stands in it: the next sample no longer sees it).
+  REQUIRE(detector.Observe(At(24 * kSecond, 1)) == HangVerdict::kUnobserved);
+  REQUIRE(detector.GapNs() == 20 * kSecond);
+  REQUIRE(detector.StalledPeriods() == 0);
+  REQUIRE(detector.Hangs() == 0);
+  // The stall itself is still measured from the last progress.
+  REQUIRE(detector.StallNs() == 24 * kSecond);
+  // Five watched periods from the end of the gap are a hang.
+  const auto second = SampleRange(detector, 24'250 * kMs, 28'750 * kMs, 1);
+  REQUIRE(Count(second, HangVerdict::kStalled) == Size(second));
+  REQUIRE(detector.Observe(At(29 * kSecond, 1)) == HangVerdict::kHang);
+  // A gap inside a declared hang neither ends it nor declares it again.
+  REQUIRE(detector.Observe(At(60 * kSecond, 1)) == HangVerdict::kStalled);
+  REQUIRE(detector.InHang());
+  REQUIRE(detector.Hangs() == 1);
+  // Progress seen after a gap is progress.
+  REQUIRE(detector.Observe(At(90 * kSecond, 2)) == HangVerdict::kHangEnded);
+  REQUIRE(detector.Observe(At(120 * kSecond, 3)) == HangVerdict::kProgress);
+}
+
+TEST_CASE("The gap limit is 2 s, or two periods when that is longer",
+          "[watchdog]") {
+  // Samples exactly 2 s apart are watched: the hang comes with the third.
+  HangDetector detector({});
+  REQUIRE(detector.MaxSampleGapNs() == 2 * kSecond);
+  detector.Start(0);
+  detector.Arm(1, 0);
+  REQUIRE(detector.Observe(At(2 * kSecond, 1)) == HangVerdict::kStalled);
+  REQUIRE(detector.Observe(At(4 * kSecond, 1)) == HangVerdict::kStalled);
+  REQUIRE(detector.Observe(At(6 * kSecond, 1)) == HangVerdict::kHang);
+
+  // One nanosecond more is a gap.
+  HangDetector gapped({});
+  gapped.Start(0);
+  gapped.Arm(1, 0);
+  REQUIRE(gapped.Observe(At(2 * kSecond + 1, 1)) == HangVerdict::kUnobserved);
+
+  // Long periods widen the limit: two periods of 5 s.
+  HangDetector slow({.period_ns = 5 * kSecond});
+  REQUIRE(slow.MaxSampleGapNs() == 10 * kSecond);
+  slow.Start(0);
+  slow.Arm(1, 0);
+  REQUIRE(slow.Observe(At(10 * kSecond, 1)) == HangVerdict::kStalled);
+  REQUIRE(slow.Observe(At(20 * kSecond + 1, 1)) == HangVerdict::kUnobserved);
+
+  // 0: gaps are not judged.
+  HangDetector unjudged({.max_sample_gap_ns = 0});
+  REQUIRE(unjudged.MaxSampleGapNs() == 0);
+  unjudged.Start(0);
+  unjudged.Arm(1, 0);
+  REQUIRE(unjudged.Observe(At(60 * kSecond, 1)) == HangVerdict::kHang);
 }
 
 TEST_CASE("A hang inside a driver wait is labelled a GPU or compositor stall",
@@ -550,6 +614,41 @@ TEST_CASE(
   REQUIRE(stats.hangs == 0);
   watchdog->Stop();
   CHECK(DumpReasons().empty());
+}
+
+TEST_CASE("A stopped process is not a hang: the watchdog counts on from it",
+          "[watchdog]") {
+  ResetDumps();
+  g_fake_now.store(kSecond);
+  g_fake_debugger.store(false);
+  MainFlags flags;
+  auto watchdog = Watchdog::Start(FakeClockConfig(flags));
+  REQUIRE(watchdog.has_value());
+  watchdog->Arm();
+  REQUIRE(WaitFor([&] { return watchdog->Stats().armed; }));
+  // 4 fake seconds without progress, each quarter second sampled.
+  Advance(*watchdog, 250 * kMs, 4 * kSecond);
+  REQUIRE(watchdog->Stats().hangs == 0);
+  REQUIRE(watchdog->Stats().unobserved_gaps == 0);
+  // The process is stopped for 20 s: the clock ran, the watchdog did not
+  // (and no debugger is seen once it runs again). The sample that sees the
+  // jump may not be the next one counted: one may be under way.
+  g_fake_now.fetch_add(20 * kSecond, std::memory_order_acq_rel);
+  REQUIRE(WaitFor([&] { return watchdog->Stats().unobserved_gaps == 1; }));
+  WatchdogStats stats = watchdog->Stats();
+  REQUIRE(stats.hangs == 0);
+  // Main is still stuck: five watched periods later that is a hang, 29 s
+  // after main's last progress.
+  REQUIRE(AdvanceUntil(*watchdog, 100 * kMs, 30 * kSecond, [&] {
+    return watchdog->Stats().hang_dumps_written == 1;
+  }));
+  stats = watchdog->Stats();
+  REQUIRE(stats.hangs == 1);
+  REQUIRE(stats.unobserved_gaps == 1);
+  watchdog->Stop();
+  const std::vector<std::string> reasons = DumpReasons();
+  REQUIRE(reasons.size() == 1);
+  CHECK(reasons[0].starts_with("hang 1: main made no progress for 29."));
 }
 
 TEST_CASE("A hang in a driver wait is dumped as a GPU or compositor stall",

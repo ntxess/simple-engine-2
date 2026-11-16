@@ -21,6 +21,12 @@
 // in-driver flag); the episode ends at the first sample that sees progress
 // again, with its length. After Disarm() (the shutdown deadline owns the
 // end of the process) nothing is judged.
+//
+// The periods must have been watched: when the detector itself got no
+// sample for longer than max_sample_gap_ns (2 s, or two periods when that
+// is longer), the whole process was stopped (a debugger that detached
+// while the process stood in it, SIGSTOP, a paused virtual machine), not
+// only main, and the count starts over from the sample after the gap.
 
 #ifndef SE_CRASH_HANG_DETECTOR_H_
 #define SE_CRASH_HANG_DETECTOR_H_
@@ -38,6 +44,11 @@ struct HangDetectorConfig {
   std::uint32_t hang_periods = 5;
   // M4 counted stalls without declaring hangs; M12 declares them.
   bool declare_hangs = true;
+  // The longest time between two samples that still counts as watched (the
+  // watchdog samples four times a period); two periods when that is
+  // longer. A longer gap without progress starts the count over. 0: gaps
+  // are not judged.
+  std::uint64_t max_sample_gap_ns = 2'000'000'000;
 };
 
 // One reading of main's progress (atomics, read by the watchdog).
@@ -64,6 +75,9 @@ enum class HangVerdict : std::uint8_t {
   // No progress and nothing excuses it: fewer than hang_periods periods so
   // far, a hang already declared in this episode, or declaration is off.
   kStalled,
+  // No progress, and the detector had no sample for longer than the gap
+  // limit: the process was stopped, the count starts over.
+  kUnobserved,
   // The boot took longer than its budget (once).
   kBootOverBudget,
   // hang_periods periods without progress (once per episode).
@@ -95,7 +109,7 @@ class HangDetector {
   [[nodiscard]] bool Armed() const noexcept { return armed_; }
   [[nodiscard]] bool Disarmed() const noexcept { return disarmed_; }
   // Whole periods without progress, counted from the sample that last saw
-  // progress or an excuse.
+  // progress, an excuse or the end of an unwatched gap.
   [[nodiscard]] std::uint32_t StalledPeriods() const noexcept {
     return stalled_periods_;
   }
@@ -113,6 +127,11 @@ class HangDetector {
   // saw progress before the hang to the one that saw progress again.
   [[nodiscard]] std::uint64_t EpisodeNs() const noexcept { return episode_ns_; }
   [[nodiscard]] bool BootOverBudget() const noexcept { return boot_reported_; }
+  // The length of the last unwatched gap (kUnobserved).
+  [[nodiscard]] std::uint64_t GapNs() const noexcept { return gap_ns_; }
+  // The gap limit in force: max_sample_gap_ns or two periods; 0 when gaps
+  // are not judged.
+  [[nodiscard]] std::uint64_t MaxSampleGapNs() const noexcept;
   [[nodiscard]] const HangDetectorConfig& Config() const noexcept {
     return config_;
   }
@@ -121,10 +140,14 @@ class HangDetector {
   HangDetectorConfig config_;
   std::uint64_t boot_start_ns_ = 0;
   std::uint64_t last_iterates_ = 0;
-  // The sample that last saw progress, and the one that last saw progress
-  // or an excuse (the periods are counted from it).
+  // The sample that last saw progress, and the one that last saw progress,
+  // an excuse or the end of an unwatched gap (the periods are counted from
+  // it).
   std::uint64_t progress_ns_ = 0;
   std::uint64_t count_from_ns_ = 0;
+  // The last armed sample, and the last unwatched gap.
+  std::uint64_t last_sample_ns_ = 0;
+  std::uint64_t gap_ns_ = 0;
   std::uint64_t stall_ns_ = 0;
   std::uint64_t episode_ns_ = 0;
   std::uint64_t hangs_ = 0;
