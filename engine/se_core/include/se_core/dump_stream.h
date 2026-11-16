@@ -57,15 +57,19 @@
 //    64  u64 last_tick     the newest tick whose hash is last_hash (0: none)
 //    72  u64 last_hash     GameStateStack::Hash().Folded() after last_tick
 //    80  u32 tick_rate
-//    84  u32 flags         0
+//    84  u32 flags         kSessionFlag* bits: 1 the session is an editor
+//                          Play and its start is the kind-7 stream; 2 no
+//                          session runs (the editor in Edit mode)
 //    88  char module[40]   the game module, NUL-padded
 //   128  char build[64]    the replay header's build name
 //   192  char platform[32]
 //   224  char compiler[64]
 //   288  char scene[224]   the scene file, relative to the content root
 //
-//   kind 7 (M12): bytes, record_size 1 and capacity the byte count (the
-//   editor's Play-start bytes while Play runs).
+//   kind 7 (M12): bytes, record_size 1 and capacity the byte count: while
+//   the editor's Play runs, the session's replay file without frames
+//   (se_sim/replay.h: the header, the Play-start bytes and the SessionLog
+//   so far; ADR-111).
 //
 // The structs are plain data so the layout can be pinned with static_assert.
 // Fields that change while other threads (or the dump writer) read them are
@@ -154,6 +158,13 @@ struct InputFrameSlot {
   std::uint64_t stamp = 0;
   InputFrame frame;
 };
+
+// SessionHeaderRecord::flags.
+// An editor Play session: the scene is not a file, the session starts from
+// the Play-start stream (kind 7) and applies its SessionLog.
+inline constexpr std::uint32_t kSessionFlagPlayStart = 1U << 0;
+// No session runs (the editor in Edit mode): nothing to replay.
+inline constexpr std::uint32_t kSessionFlagNoSession = 1U << 1;
 
 inline constexpr std::size_t kSessionModuleSize = 40;
 inline constexpr std::size_t kSessionBuildSize = 64;

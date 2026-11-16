@@ -116,6 +116,12 @@ Tick Editor::PlayEditsImpl::NextTick() const noexcept {
 void Editor::PlayEditsImpl::Submit(std::unique_ptr<EditorCommand> command,
                                    Tick apply_before) {
   if (command == nullptr) return;
+  if (editor_->play_ && editor_->play_->Faulted()) {
+    // Play.Faulted: the World is read-only; only Select is taken.
+    SE_LOG_WARN("editor: '{}' dropped: the play World is faulted",
+                command->Label());
+    return;
+  }
   Queued queued;
   queued.command = std::move(command);
   queued.play = true;
@@ -144,6 +150,10 @@ ViewportTarget* Editor::Viewports::Viewport(std::string_view name) {
     return nullptr;
   }
   entries_.push_back(Entry{std::string(name), *made, true});
+  SE_LOG_INFO(
+      "editor: viewport '{}' created: the World is drawn into it and "
+      "shown through TextureIds",
+      name);
   return *made;
 }
 
@@ -213,7 +223,26 @@ Editor::Editor(EditorGame game, EditorOptions options)
 Editor::~Editor() = default;
 
 void Editor::AddPanel(std::unique_ptr<Panel> panel) {
-  if (panel != nullptr) panels_.push_back(std::move(panel));
+  if (panel == nullptr) return;
+  panels_.push_back(std::move(panel));
+  panel_draws_.push_back(0);
+  panel_frame_.push_back(0);
+}
+
+bool Editor::PanelDrewLastFrame(std::string_view name) const noexcept {
+  for (std::size_t i = 0; i < panels_.size(); ++i) {
+    if (panels_[i]->Name() == name) {
+      return ui_frame_ > 0 && panel_frame_[i] == ui_frame_;
+    }
+  }
+  return false;
+}
+
+std::uint64_t Editor::PanelDraws(std::string_view name) const noexcept {
+  for (std::size_t i = 0; i < panels_.size(); ++i) {
+    if (panels_[i]->Name() == name) return panel_draws_[i];
+  }
+  return 0;
 }
 
 EditorMode Editor::Mode() const noexcept {
@@ -275,6 +304,8 @@ std::expected<void, Error> Editor::Boot(App& app) {
     return opened;
   }
   initial_hash_ = document_->Hash();
+  // No session runs yet: a dump taken now says so (ADR-111).
+  BeginIdleHeader();
   if (!options_.script.empty()) {
     if (!kRuntimeTestHooks) {
       return Fail(ErrorCode::kInvalidArgument,
@@ -375,7 +406,11 @@ ExtensionTicks Editor::TickFrame(App& app, const StepPlan& plan,
   if (!play_) return ExtensionTicks{0, 0};
   InputSource& source = game_input_focus_ ? input : NoInput();
   const bool was_faulted = play_->Faulted();
+  // The dump streams first: a hang or a crash inside a tick finds the
+  // SessionLog as it is now.
+  SyncPlayDump();
   const int ran = play_->TickFrame(plan, source, audio, SDL_GetTicksNS());
+  PublishPlayTicks();
   if (!was_faulted && play_->Faulted()) SaveFaultFiles(app);
   return ExtensionTicks{ran, play_->NextTick()};
 }
@@ -538,7 +573,10 @@ void Editor::BuildRender(App& app, const FrameReport& report,
       frame.viewports->push_back(ViewportDraw{asked[v], viewport_layers_[v]});
     }
     layers.clear();
+    // The readback hooks read the World where it is drawn.
+    if (!frame.viewports->empty()) frame.readback = asked.front();
   }
+  viewport_drawn_ = !frame.viewports->empty();
   static_cast<void>(report);
 }
 
@@ -587,6 +625,7 @@ void Editor::ShutdownWorlds(App& app) {
   AssertMainThread();
   JoinScriptThread();
   if (dialogs_) dialogs_->Close();
+  if (play_) DetachPlayDump();
   play_.reset();
   if (document_states_) {
     const InlineOwnerScope owner(OnMainThread());
@@ -680,6 +719,7 @@ void Editor::FillStats(App& app, const FrameReport& report) {
     stats_.render = &renderer->LastFrame();
     stats_.render_totals = &renderer->Totals();
   }
+  FillForkStats(app);
 }
 
 void Editor::EnterFaulted(App& app, std::string where, std::string what) {

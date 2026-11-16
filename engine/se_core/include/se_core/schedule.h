@@ -86,8 +86,12 @@ struct SystemStats {
   std::uint64_t runs = 0;
   std::uint32_t last_ns = 0;
   std::uint32_t max_ns = 0;
+  // Of the last run, the time inside threaded forks (publish to join, the
+  // pool's ThreadedJoinNs): the run's parallel part. 0 while its fork
+  // sites run inline (every site ships disabled).
+  std::uint32_t last_fork_ns = 0;
 
-  void Record(std::uint64_t ns) noexcept;
+  void Record(std::uint64_t ns, std::uint64_t fork_ns = 0) noexcept;
   // Nearest-rank percentile of the ring; 0 when empty.
   [[nodiscard]] std::uint32_t PercentileNs(double p) const;
 };

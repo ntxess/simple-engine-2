@@ -946,6 +946,8 @@ SDL_AppResult App::HandleEvent(const SDL_Event& event) {
     InjectedThrow("SDL_AppEvent");
   }
   lifecycle_.OnAnyEvent();
+  // The event ended an Idle wait: main is watched again from here.
+  EndIdleWait();
   if (ConsumeWakeEvent(event)) return SDL_APP_CONTINUE;
   // M10a: the extension's UI first; input it takes skips the game's.
   const bool taken =
@@ -1257,7 +1259,8 @@ void App::RunReadbacks(const FrameReport& report) {
                                             readback.frame;
     if (readbacks_done_[i] || !due) continue;
     readbacks_done_[i] = true;
-    auto image = renderer_->Readback();
+    // An extension that draws the World into a viewport names it (M10).
+    auto image = renderer_->Readback(ext_readback_);
     if (!image) {
       SE_LOG_ERROR("--readback {}: {}", readback.file, image.error().message);
       continue;
@@ -1267,7 +1270,7 @@ void App::RunReadbacks(const FrameReport& report) {
       continue;
     }
     SE_LOG_INFO("readback of frame {} (tick {}, {}x{}) written to {}",
-                iterates_, NextTick() - 1, image->width, image->height,
+                iterates_, LastTick(), image->width, image->height,
                 readback.file);
   }
 }
@@ -1277,6 +1280,9 @@ SDL_AppResult App::Iterate() {
   const std::uint64_t iterate_start = SDL_GetTicksNS();
   iterate_counter_.fetch_add(1, std::memory_order_relaxed);
   ++iterates_;
+  // A callback runs: an Idle wait is over (the mark at this function's
+  // end).
+  EndIdleWait();
   if (iterates_ == 1) {
     if (helpers_) helpers_->ArmWatchdog();
     // SDL_AppInit has returned and SDL has added its own event watcher:
@@ -1433,6 +1439,7 @@ SDL_AppResult App::Iterate() {
     ext_viewports_.clear();
     setup_.extension->BuildFrame(*this, report, frame);
     ext_overlay_ = frame.overlay;
+    ext_readback_ = frame.readback;
     ext_clear_ = frame.clear;
     ext_frame_ready_ = true;
   }
@@ -1501,7 +1508,28 @@ SDL_AppResult App::Iterate() {
     RunDurableSaveTest();
   }
   if (setup_.on_frame) setup_.on_frame(*this, report);
+  // Idle (M10: the editor in Edit mode): SDL calls no iterate until an
+  // event arrives, so main makes no progress by design. From this return
+  // until the next callback starts the watchdog sees the App as it sees a
+  // Suspended one; a hang inside a callback is still a hang (ADR-111).
+  if (lifecycle_.Idle()) {
+    suspended_flag_.store(true, std::memory_order_release);
+    if (!idle_waiting_) {
+      idle_waiting_ = true;
+      idle_wait_start_ns_ = SDL_GetTicksNS();
+      SE_LOG_DEBUG("idle: waiting for events after iterate {}", iterates_);
+    }
+  }
   return SDL_APP_CONTINUE;
+}
+
+void App::EndIdleWait() {
+  suspended_flag_.store(lifecycle_.Suspended(), std::memory_order_release);
+  if (!idle_waiting_ || lifecycle_.Idle()) return;
+  idle_waiting_ = false;
+  SE_LOG_DEBUG(
+      "idle: the wait ended after {:.1f} s",
+      static_cast<double>(SDL_GetTicksNS() - idle_wait_start_ns_) * kNsToSec);
 }
 
 std::int64_t App::ExitTestTick() const noexcept {
@@ -1552,9 +1580,8 @@ void App::RunExitTests(Tick next_tick) {
 void App::UpdateTitle(std::uint64_t now_ns) {
   if (window_ == nullptr || now_ns - last_title_ns_ < kTitleIntervalNs) return;
   last_title_ns_ = now_ns;
-  std::string title =
-      std::format("{} | tick {} | {}", setup_.title, NextTick() - 1,
-                  LifecycleStateName(lifecycle_.State()));
+  std::string title = std::format("{} | tick {} | {}", setup_.title, LastTick(),
+                                  LifecycleStateName(lifecycle_.State()));
   // Test builds show the pacer's mode, rate, interval, latency and misses.
   if (kRuntimeTestHooks) title += " | " + pacer_.Summary();
   window_->SetTitle(title);
@@ -1565,7 +1592,7 @@ void App::LogProgress(std::uint64_t now_ns) {
   if (now_ns - last_log_ns_ < kLogIntervalNs) return;
   last_log_ns_ = now_ns;
   SE_LOG_INFO("tick {} | {} | {} iterates, {} presented, {} NULL acquires | {}",
-              NextTick() - 1, LifecycleStateName(lifecycle_.State()), iterates_,
+              LastTick(), LifecycleStateName(lifecycle_.State()), iterates_,
               presented_frames_, lifecycle_.NullAcquires(), pacer_.Summary());
   if (renderer_ != nullptr) {
     const Renderer2DStats& last = renderer_->LastFrame();
@@ -1889,7 +1916,9 @@ void App::OnPower(PowerChange change) noexcept {
   } else {
     lifecycle_.OnPowerResume();
   }
-  suspended_flag_.store(lifecycle_.Suspended(), std::memory_order_release);
+  // An App that idles keeps waiting for events across the change.
+  suspended_flag_.store(lifecycle_.Suspended() || lifecycle_.Idle(),
+                        std::memory_order_release);
 }
 
 void App::OnModalChanged(bool modal) noexcept {

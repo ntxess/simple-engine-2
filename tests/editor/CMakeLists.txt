@@ -1,10 +1,13 @@
-# Editor tests (docs/milestone-specs.md M10a "Tests (M10a)"; test names
-# start with "editor."). Headless everywhere: ImGui frames without a window
+# Editor tests (docs/milestone-specs.md M10a "Tests (M10a)" and
+# "Integration (M10a + M10b + M12 + M14)"; test names start with
+# "editor."). Headless everywhere: ImGui frames without a window
 # (se_imgui's HeadlessFrames), documents and commands on rampage's
-# registry, Play on the editor's sessions, the dialog mailbox and the lane
-# (label unit; TSan in WSL where threads are involved). The desktop tests
-# run the simple_editor executable through scripts (label desktop,
-# tests/editor/*.py).
+# registry, Play on the editor's sessions and their dump streams, the
+# dialog mailbox and the lane (label unit; TSan in WSL where threads are
+# involved). The script tests run the simple_editor executable, with the
+# panels of se_editor_panels docked in it, headless and in a window (label
+# desktop, tests/editor/*.py). The hang in editor Play is
+# crash.editor_play_hang (tests/crash).
 
 se_add_module(se_editor_tests KIND EXECUTABLE
   SOURCES
@@ -13,6 +16,7 @@ se_add_module(se_editor_tests KIND EXECUTABLE
     document_test.cc
     idle_test.cc
     imgui_context_test.cc
+    play_dump_test.cc
     play_session_test.cc
     recovery_test.cc
     script_test.cc
@@ -24,6 +28,8 @@ se_add_module(se_editor_tests KIND EXECUTABLE
     game_rampage
     rampage_test_support
     se_core
+    se_replay_dump
+    se_runtime
     se_sim
     Catch2::Catch2WithMain
   TEST)
@@ -69,6 +75,11 @@ if(NOT CMAKE_BUILD_TYPE STREQUAL "Release" AND TARGET simple_editor)
       LABELS desktop TIMEOUT 180)
   endfunction()
 
+  # The panels in the editor (the M10a + M10b + M12 + M14 integration):
+  # every panel draws, an edit is a command, Play registers the Play-start
+  # dump stream and lists the fork sites, Stop leaves the document's hash.
+  _se_editor_script(panels panels --replay $<TARGET_FILE:se_replay>
+    --expect "editor: dock layout seeded (8 panels)")
   _se_editor_script(edit_commands edit_commands --scene-copy "${_se_sandbox}")
   # The hotkeys as ImGui key events: Ctrl+Z, Ctrl+Y, Ctrl+S (saved through
   # the lane), F5, F10, Shift+F5.
@@ -98,7 +109,13 @@ if(NOT CMAKE_BUILD_TYPE STREQUAL "Release" AND TARGET simple_editor)
     --scene-copy "${_se_sandbox}" --expect-recovery-file
     --expect "recovery file")
 
-  # In a window shown without focus (M10a's desktop tests).
+  # In a window shown without focus, the panels docked in it. The World is
+  # drawn into the Viewport panel's ViewportTarget, so --readback reads that
+  # target (the composite behind the UI is the clear colour).
+  _se_editor_desktop(panels panels --readback 200
+    --replay $<TARGET_FILE:se_replay>
+    --expect "editor: dock layout seeded (8 panels)"
+    --expect "editor: viewport 'scene'")
   _se_editor_desktop(play_session play_session --readback 200
     --replay $<TARGET_FILE:se_replay>)
   _se_editor_desktop(tick_fault tick_fault --expect-fault-files)
@@ -107,4 +124,18 @@ if(NOT CMAKE_BUILD_TYPE STREQUAL "Release" AND TARGET simple_editor)
     --expect-scene-contains "321")
   _se_editor_desktop(dialog_quit dialog_quit
     --expect "1 answered during the quit")
+  # M12 beside M10's Idle: an editor that waits for events is not a hang
+  # (a 200 ms watchdog period, 4 s of Idle, then WM_CLOSE; Windows only:
+  # the test finds the editor's window with user32).
+  if(WIN32)
+    add_test(NAME editor.desktop.idle_watchdog
+      COMMAND Python3::Interpreter
+              "${CMAKE_CURRENT_SOURCE_DIR}/idle_watchdog_test.py"
+              --editor $<TARGET_FILE:simple_editor>
+              --script "${_se_scripts}/idle.editor"
+              --work "${CMAKE_CURRENT_BINARY_DIR}/idle_watchdog")
+    set_tests_properties(editor.desktop.idle_watchdog PROPERTIES
+      LABELS desktop TIMEOUT 120
+      ENVIRONMENT "SE_NO_MESSAGE_BOX=1")
+  endif()
 endif()

@@ -15,8 +15,9 @@
 //     outside ticks and SessionLog entries);
 //   - changes go through EditorCommands in Edit mode (commands non-null),
 //     and through PlayEdits in Play (play_edits non-null, SessionLog
-//     entries against a tick); in Play.Faulted both are null: the World is
-//     read-only;
+//     entries against a tick); in Play.Faulted commands is null and
+//     play_edits takes only Select (its Submit drops the command): the
+//     World is read-only but stays inspectable (ADR-111);
 //   - textures are shown through TextureIds, resolved every frame; a panel
 //     keeps Handle<Texture>, never an ImTextureID or an SDL_GPUTexture*
 //     (checks.gpu_texture_members);
@@ -121,7 +122,8 @@ struct PanelContext {
 
   // Additions to the spec's fields (ADR-095):
   bool paused = false;                   // Play.Paused or Play.Stepping
-  PlayEdits* play_edits = nullptr;       // non-null while playing, not faulted
+  PlayEdits* play_edits = nullptr;       // non-null in Play; when faulted,
+                                         // for Select only
   EditorViewports* viewports = nullptr;  // null without a renderer
 };
 

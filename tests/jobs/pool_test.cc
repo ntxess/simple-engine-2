@@ -33,16 +33,22 @@
 #include <stdexcept>
 #include <stop_token>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
 
+#include "se_core/component_registry.h"
+#include "se_core/core_components.h"
 #include "se_core/error.h"
+#include "se_core/input_frame.h"
 #include "se_core/jobs.h"
 #include "se_core/profile_clock.h"
+#include "se_core/schedule.h"
 #include "se_core/thread_registry.h"
 #include "se_core/thread_role.h"
 #include "se_core/thread_safety.h"
+#include "se_core/world.h"
 #include "se_os/thread.h"
 #include "support/fork_config.h"
 #include "support/test_roles.h"
@@ -723,6 +729,70 @@ TEST_CASE("Each efficiency class is calibrated when the workers start",
     CHECK(c.chunk_max_us >= c.chunk_p50_us);
     CHECK(c.wall_ms > 0.0);
     CHECK(c.relative_speed > 0.0);
+  }
+}
+
+// A system that forks through the pool's test site, and one that does not.
+struct ForkingSystem {
+  static constexpr std::string_view kName = "Forking";
+  void Run(World& /*world*/, const TickContext& context)
+      SE_REQUIRES(g_sim_owner) {
+    jobs::ForkSite& site = context.jobs.Site(TestSite());
+    // 12 chunks of work a worker is worth waking for.
+    context.jobs.ParallelFor(site, 12, [](jobs::ChunkRange) {
+      const std::uint64_t start = ProfileNowNs();
+      while (ProfileNowNs() - start < 20'000) {
+      }
+    });
+  }
+};
+struct SerialSystem {
+  static constexpr std::string_view kName = "Serial";
+  void Run(World& /*world*/, const TickContext& /*context*/) {}
+};
+
+TEST_CASE("The Schedule tells a system's time inside threaded forks",
+          "[jobs][pool]") {
+  const testing::MainThreadScope main;
+  const InlineOwnerScope owner(OnMainThread());
+  ComponentRegistry registry;
+  RegisterCoreComponents(registry);
+  registry.Seal();
+  for (const int workers : {0, 3}) {
+    INFO("W = " << workers);
+    Schedule schedule;
+    const SystemId forking = schedule.Add<ForkingSystem>(Phase::kMovement);
+    const SystemId serial = schedule.Add<SerialSystem>(Phase::kGameRules);
+    schedule.Seal();
+    World world(registry, {});
+    ForkTestOptions options;
+    options.chunks_per_participant = 4;
+    jobs::ForkJoinPool pool(ForkTestConfig(workers, options));
+    InputFrame frame;
+    std::uint64_t fork_ns = 0;
+    for (int i = 0; i < 50; ++i) {
+      schedule.Step(world, frame, pool);
+      const SystemStats& stats = schedule.Stats()[forking];
+      // The parallel part is inside the run.
+      REQUIRE(stats.last_fork_ns <= stats.last_ns);
+      fork_ns += stats.last_fork_ns;
+    }
+    const auto stats = schedule.Stats();
+    REQUIRE(stats[serial].last_fork_ns == 0);
+    REQUIRE(stats[Schedule::kCleanupId].last_fork_ns == 0);
+    if (workers == 0) {
+      // Inline forks are serial time.
+      REQUIRE(fork_ns == 0);
+      REQUIRE(pool.ThreadedJoinNs() == 0);
+    } else {
+      const jobs::ForkSite* site = pool.FindSite("test.site");
+      REQUIRE(site != nullptr);
+      REQUIRE(site->stats.threaded_forks == 50);
+      REQUIRE(fork_ns > 0);
+      // Every join is counted once: the systems' parts add up to the
+      // pool's total.
+      CHECK(fork_ns == pool.ThreadedJoinNs());
+    }
   }
 }
 

@@ -1,0 +1,20 @@
+# A hang in editor Play (crash.editor_play_hang; the integration of M12 and
+# M10): the editor runs with --hang-test after-ticks:240, so main loops
+# inside the HangTest system at tick 240 of the Play session. Before that
+# the script edits the play World twice (a SessionLog entry while running,
+# one while paused): the dump's Play-start stream carries them, and
+# se_replay --from-dump replays the session to tick 240 with them.
+expect-state edit
+play
+wait-ticks 60
+set 5a4db0c5-0000-4000-8000-000000000001 Transform {"pos":{"x":100,"y":100},"rot":0,"scale":{"x":1,"y":1},"teleport_tick":0}
+wait-ticks 40
+pause
+destroy 5a4db0c5-0000-4000-8000-000000000002
+wait-frames 2
+expect-entities play 16
+step 3
+resume
+expect-dump-stream yes
+# Tick 240 never ends.
+wait-ticks 400

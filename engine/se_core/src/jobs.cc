@@ -847,6 +847,7 @@ void ForkJoinPool::RecordJoin(ForkSite& site, std::uint64_t join_ns,
                               std::uint64_t generation) {
   ForkStats& stats = site.stats;
   site.joins.Record(join_ns);
+  threaded_join_ns_ += join_ns;
   const auto participants = static_cast<std::uint32_t>(woken.size() + 1);
   stats.participants = participants;
   stats.max_participants = std::max(stats.max_participants, participants);

@@ -18,6 +18,7 @@ se_add_module(se_editor KIND STATIC
     src/edit_document.cc
     src/editor.cc
     src/editor_actions.cc
+    src/editor_dump.cc
     src/editor_ui.cc
     src/json_value.cc
     src/log_view.cc

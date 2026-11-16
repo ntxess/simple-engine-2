@@ -313,6 +313,17 @@ std::uint64_t PlaySession::Hash() const {
   return states_ ? states_->Hash().Folded() : 0;
 }
 
+ReplayHeader PlaySession::Header() const {
+  return MakeReplayHeader(start_.bytes, start_.seed, start_.tick_rate);
+}
+
+std::vector<std::byte> PlaySession::DumpBytes() const {
+  ReplayRecorder file;
+  file.Begin(Header(), start_.bytes);
+  file.RecordSession(log_);
+  return file.Finish();
+}
+
 std::vector<std::byte> PlaySession::FinishReplay() {
   if (!recorder_.Active()) return {};
   recorder_.RecordSession(log_);

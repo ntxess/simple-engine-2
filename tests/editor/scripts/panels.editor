@@ -1,0 +1,66 @@
+# The panels in the editor (the integration of M10a, M10b, M12 and M14):
+# the seeded dock layout shows Hierarchy, Viewport, Inspector and Log; every
+# other panel draws once its tab is brought forward; the Viewport shows the
+# World through a ViewportTarget (in a window); an edit is a command; Play
+# registers the Play-start dump stream and lists the pool's fork sites
+# (none enabled, no worker); Stop leaves the document's hash; undo returns
+# the initial one. Headless and in a window.
+expect-state edit
+wait-frames 12
+expect-panel Hierarchy
+expect-panel Viewport
+expect-panel Inspector
+expect-panel Log
+expect-viewport window
+show-panel Profiler
+wait-frames 3
+expect-panel Profiler
+show-panel Schedule
+wait-frames 3
+expect-panel Schedule
+show-panel Stress generator
+wait-frames 3
+expect-panel Stress generator
+show-panel Scene settings
+wait-frames 3
+expect-panel Scene settings
+show-panel Inspector
+show-panel Log
+wait-frames 4
+expect-panel Inspector
+expect-panel Log
+# Edit mode: select the player and move it; one undo step.
+select 5a4db0c5-0000-4000-8000-000000000000
+set 5a4db0c5-0000-4000-8000-000000000000 Transform {"pos":{"x":300,"y":250},"rot":0,"scale":{"x":1,"y":1},"teleport_tick":0}
+wait-frames 2
+expect-dirty yes
+expect-dump-stream no
+play
+wait-ticks 300
+expect-state playing
+expect-dump-stream yes
+expect-viewport window
+expect-panel Viewport
+expect-panel Hierarchy
+# The pool's sites as the Profiler and Schedule panels list them.
+expect-fork-sites 5
+show-panel Profiler
+wait-frames 3
+expect-panel Profiler
+show-panel Schedule
+wait-frames 3
+expect-panel Schedule
+pause
+expect-state paused
+step 5
+expect-state paused
+show-panel Log
+stop
+wait-frames 2
+expect-state edit
+expect-dump-stream no
+expect-hash document play-start
+expect-viewport window
+undo
+expect-hash document initial
+quit discard

@@ -377,6 +377,12 @@ class App final : public WindowListener {
   }
   [[nodiscard]] MonitorHandle Monitor() const noexcept { return monitor_; }
   [[nodiscard]] Tick NextTick() const noexcept;
+  // The last tick run: 0 before the first, and while an extension has no
+  // session (the editor in Edit mode, whose next tick is 0).
+  [[nodiscard]] Tick LastTick() const noexcept {
+    const Tick next = NextTick();
+    return next == 0 ? 0 : next - 1;
+  }
   [[nodiscard]] std::uint64_t Iterates() const noexcept { return iterates_; }
   [[nodiscard]] std::uint64_t PresentedFrames() const noexcept {
     return presented_frames_;
@@ -443,6 +449,9 @@ class App final : public WindowListener {
   // of the window's monitor, else SDL's (ADR-055).
   [[nodiscard]] double PacingRefreshHz() const noexcept;
   void LogProgress(std::uint64_t now_ns);
+  // A callback starts: the watchdog's suspended flag follows the lifecycle
+  // again, and an Idle wait that an event ended is logged (ADR-111).
+  void EndIdleWait();
   // The M4 exit hooks (test builds): the tick they act after (0: none),
   // the frame's plan cut so that it ends at that tick, and the action.
   [[nodiscard]] std::int64_t ExitTestTick() const noexcept;
@@ -536,6 +545,8 @@ class App final : public WindowListener {
   ExtensionSession ext_session_;
   std::vector<ViewportDraw> ext_viewports_;
   SwapchainOverlay* ext_overlay_ = nullptr;
+  // The extension's readback target of the frame (null: the composite).
+  const ViewportTarget* ext_readback_ = nullptr;
   ClearColor ext_clear_;
   bool ext_frame_ready_ = false;
   // M8: gamepads are opened on main as SDL reports them; the sampler
@@ -569,9 +580,14 @@ class App final : public WindowListener {
 
   // Read by the watchdog (integration). The heartbeat flag is raised only
   // by KnownLongWork (M12: the session-end recovery hook; M10's loads and
-  // saves).
+  // saves). The suspended flag is also up while the App waits for events
+  // in Idle, between the iterate that entered the wait and the next
+  // callback (ADR-111).
   std::atomic<std::uint64_t> iterate_counter_{0};
   std::atomic<bool> suspended_flag_{false};
+  // The App returned to SDL to wait for events (Idle), and since when.
+  bool idle_waiting_ = false;
+  std::uint64_t idle_wait_start_ns_ = 0;
   std::atomic<bool> modal_flag_{false};
   std::atomic<bool> heartbeat_flag_{false};
   LongWorkStats long_work_;

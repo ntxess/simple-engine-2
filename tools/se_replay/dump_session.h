@@ -4,11 +4,18 @@
 // minidump layout tools/minidump/read_dump.py decodes, for the streams a
 // replay needs: the session header (kind 6: module, scene, seed, tick rate,
 // build, start tick, the last published tick hash), the InputFrame ring
-// (kind 3) and main's breadcrumb (kind 1, ThreadRegistry slot 0); and the
-// replay of a dumped rampage session headless up to main's breadcrumb tick.
+// (kind 3), main's breadcrumb (kind 1, ThreadRegistry slot 0) and, for an
+// editor Play session, the Play-start stream (kind 7: the session's replay
+// file without frames, ADR-111); and the replay of a dumped rampage session
+// headless up to main's breadcrumb tick.
 //
 //   auto session = ReadDumpedSession(dump_bytes);
-//   FromDumpResult result = ReplayDumpedRampage(*session, repo_root);
+//   FromDumpResult result = ReplayDumpedRampage(*session, repo_root, scene);
+//
+// A game's session starts from its scene file under the root. An editor
+// Play session (the header's kSessionFlagPlayStart) starts from the
+// Play-start bytes of the dump, written to |start_scene| and loaded from
+// there, and applies the dump's SessionLog (the edits made during Play).
 //
 // The minidump is parsed from its header and stream directory only (the
 // MINIDUMP_HEADER signature "MDMP", little-endian); first-party streams are
@@ -46,6 +53,9 @@ struct DumpedSession {
   // Main's breadcrumb (ThreadRegistry slot 0) when that slot was live.
   bool main_live = false;
   BreadcrumbFields main;
+  // The Play-start stream's bytes (an editor Play session: a replay file
+  // without frames); empty when the dump has none.
+  std::vector<std::byte> play_start;
 };
 
 // Decodes |minidump|. Errors (kCorrupt): not a minidump, a missing or
@@ -83,10 +93,13 @@ struct FromDumpResult {
 
 // Replays a dumped rampage session headless (the module, the scene under
 // |root|, whose hash must match, the seed and the frames from the dump) up
-// to main's breadcrumb tick, and checks the dump's last published hash.
-[[nodiscard]] FromDumpResult ReplayDumpedRampage(const DumpedSession& session,
-                                                 const std::string& root)
-    SE_REQUIRES(g_main) SE_EXCLUDES(g_sim_owner);
+// to main's breadcrumb tick, and checks the dump's last published hash. An
+// editor Play session's Play-start bytes are written to |start_scene|
+// (required for one) and its SessionLog is applied.
+[[nodiscard]] FromDumpResult ReplayDumpedRampage(
+    const DumpedSession& session, const std::string& root,
+    const std::string& start_scene = {}) SE_REQUIRES(g_main)
+    SE_EXCLUDES(g_sim_owner);
 
 }  // namespace se::replay
 

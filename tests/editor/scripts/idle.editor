@@ -1,0 +1,7 @@
+# The script ends at once: the editor stays in Edit mode with nothing to
+# wait for, and idles after 1 s without input (editor.desktop.idle_watchdog
+# checks that the watchdog does not take the idle wait for a hang, then
+# closes the window).
+expect-state edit
+wait-frames 4
+expect-state edit

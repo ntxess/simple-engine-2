@@ -492,6 +492,12 @@ class ForkJoinPool {
   // Threads that run chunks besides the caller: 0 until the workers start.
   [[nodiscard]] int ActiveWorkers() const noexcept;
   [[nodiscard]] PoolStats Stats() const;
+  // The time of every threaded fork so far, publish to join, summed (the
+  // owner's data, like the sites' stats): the Schedule reads it around a
+  // system to tell the system's parallel part from its serial one.
+  [[nodiscard]] std::uint64_t ThreadedJoinNs() const noexcept {
+    return threaded_join_ns_;
+  }
   // Each worker's wake word and what it saw (tests, the soak).
   [[nodiscard]] std::vector<WorkerWake> WorkerWakes() const;
   [[nodiscard]] std::span<const Calibration> Calibrations() const noexcept {
@@ -546,6 +552,7 @@ class ForkJoinPool {
   bool on_battery_ = false;
   std::uint64_t battery_checked_ns_ = 0;
   std::uint64_t threaded_forks_ = 0;
+  std::uint64_t threaded_join_ns_ = 0;
   std::uint64_t missed_wakes_ = 0;
   std::uint64_t late_wakes_ = 0;
 };

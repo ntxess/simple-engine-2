@@ -87,6 +87,10 @@ struct ExtensionFrame {
   std::vector<ViewportDraw>* viewports = nullptr;
   SwapchainOverlay* overlay = nullptr;
   ClearColor clear;
+  // Where the World is drawn when it is not in the composite (the editor's
+  // scene viewport): the --readback hooks read this target instead. Null:
+  // the composite.
+  const ViewportTarget* readback = nullptr;
 };
 
 class AppExtension {

@@ -77,6 +77,7 @@ void SessionHeaderStream::Begin(const SessionHeaderInfo& info) noexcept {
   record.start_tick = info.start_tick;
   record.first_frame = info.first_frame;
   record.tick_rate = info.tick_rate;
+  record.flags = info.flags;
   CopyText(record.module, info.module);
   CopyText(record.build, info.build);
   CopyText(record.platform, info.platform);

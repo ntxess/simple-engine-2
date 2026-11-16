@@ -4025,3 +4025,177 @@ wake over 2 ms in the soak". The soak does both in part: no wake over 2 ms
 in its quiet windows, and every stall elsewhere attributed to measured load
 (saturated, or the canary late) or reported beside it; the run was not on
 an idle machine, so the whole-run bound and the trace remain gates.
+
+## ADR-111 Dumps of the editor's Play replay with their edits; an idle App is not a hang (2026-11-16)
+
+**Decision.** The integration of M12 with M10 (docs/milestone-specs.md
+"Integration (M10a + M10b + M12 + M14)"):
+
+- **The session header follows the editor's mode.** The process has one
+  session header (ADR-106). The editor begins it again at every change:
+  at boot and at Stop with `kSessionFlagNoSession` (flags bit 1: no session
+  runs, nothing to replay), at Play with `kSessionFlagPlayStart` (bit 0),
+  the session's seed, tick rate and build, start tick 1, the dump ring's
+  head as its first frame, the hash of the Play-start bytes as its scene
+  hash and the document's name as its scene. `SessionHeaderInfo` gained
+  `flags`; the record's `flags` field was reserved (0) until now, so a
+  game's header is unchanged. The Play session's SimDriver latches its
+  InputFrames into the process's dump ring (`PlaySession::
+  AttachInputRing`), and the editor publishes the last tick's hash after
+  each frame's ticks, as the App does for a game.
+- **The Play-start stream is the session's replay file without frames.**
+  M12 registered "the Play-start bytes" (stream 0x53450006, kind 7) and
+  left their use to this integration. A hang dump must replay to the
+  hanging tick, and a Play session is its start bytes, its InputFrames and
+  its SessionLog (every edit made during Play, each against a tick): the
+  start bytes alone replay only a session nobody edited. So the stream
+  holds `PlaySession::DumpBytes()`: a replay file (se_sim/replay.h) of the
+  session's header, the Play-start bytes and the SessionLog so far, with
+  no frames and no hashes (the ring and the header carry those). The
+  editor attaches it when Play starts and again, before the frame's ticks,
+  whenever the SessionLog has gained an entry (`PlayStartStream::Attach`
+  replaces the bytes and reuses crashpad's entry; a copy of the scene's
+  bytes, tens of kilobytes, on frames with an edit), and withdraws it at
+  Stop. read_dump.py still shows the stream as bytes.
+- **se_replay --from-dump replays editor sessions.** The reader takes the
+  stream (a withdrawn one is an entry without bytes: none). For a header
+  with `kSessionFlagPlayStart` it opens the stream as a replay file,
+  writes the start bytes to `--start-scene FILE` (default
+  `DUMP.play-start.scene.json`), runs them as the scene with the
+  SessionLog applied and the ring's frames as input, to main's breadcrumb
+  tick, and checks the published hash, exactly as for a game. A header
+  with `kSessionFlagNoSession` is reported as nothing to replay; a Play
+  header without the stream is an error.
+- **Idle is not a hang.** The editor idles in Edit mode after 1 s without
+  input: SDL calls no iterate until an event arrives, so main's iterate
+  counter stands still by design, and M12's watchdog, merged unchanged,
+  declared a hang after 5 s of it. The App now raises the watchdog's
+  suspended flag when an iterate returns to SDL in Idle and drops it when
+  the next callback starts (an event or an iterate), so the wait itself is
+  excused and nothing inside a callback is: a hang in the frame after the
+  wake is declared as before. No new watchdog input: to the watchdog an
+  App that waits for events by design is what a Suspended one is. The
+  wait's start and end are logged at debug level ("idle: waiting for
+  events", "idle: the wait ended after X s").
+- **Known long work in the editor.** Opening a document and starting Play
+  (the serializer round trip into the play World) run on main inside
+  `App::KnownLongWork` scopes (ADR-105's heartbeat), as M12 intended for
+  M10's loads. Extra OS windows of ImGui's multi-viewports are presented
+  inside a `DriverWaitScope`.
+- **The flight-recorder button** of the Profiler panel asks the crash
+  handler for a dump of the process as it is (`integration::
+  RequestFaultDump`): the breadcrumbs, the log rings, the InputFrame ring,
+  the session header and, in Play, the Play-start stream.
+
+**Why.** The spec's exit for this step is "a hang in editor Play dumps and
+the editor-session replay reaches the hanging tick". Without the
+SessionLog in the dump that holds only for sessions without edits, and an
+editor's sessions are the ones with edits. Reusing the replay file format
+means the dump path and the `last-play.sereplay` path (ADR-097) read the
+same bytes with the same reader, and adds no stream type. The idle rule
+is the smallest one that keeps both milestones' contracts: M10's Idle
+stays a real `waitevent` (no timer wake-ups to feed the watchdog), and
+M12's rule "nothing but Suspended, Modal, known long work and a debugger
+excuses a hang" stays true for every callback.
+
+**Consequences.** A dump taken between an edit and the next frame's ticks
+(the edit queued, the stream not yet attached again) replays without that
+edit; the edit applies at a tick boundary, so the published hashes up to
+the dump still match. An App that is flagged idle and never woken is not
+watched: SDL's event wait is trusted, as its Suspended wait is. A second
+Play in one process begins a new session in the header (its session
+number grows) whose frames follow the earlier session's in the ring.
+
+**Checked by.** `crash.editor_play_hang` (label desktop): simple_editor
+with `--hang-test after-ticks:240` and tests/editor/scripts/
+play_hang.editor (an edit while running, one while paused, three steps),
+the dump within 6 s of the hang's start, its header (flag 1) and
+Play-start stream decoded by read_dump.py, `se_replay --from-dump`
+reaching tick 240 with tick 239's hash matching. `editor.A dump taken
+during Play replays to its tick, edits included` and `editor.A Play dump
+without its start, or from Edit mode, says so` (every platform, on a
+synthetic minidump of the real streams; the first also shows that the
+replay diverges without the SessionLog). `editor.desktop.idle_watchdog`:
+4 s of Idle at a 200 ms watchdog period (a hang would be 1 s), no hang,
+then WM_CLOSE ends the wait and the editor quits. The script verb
+`expect-dump-stream` in `editor.script.panels`.
+
+## ADR-112 The panels in the editor: one frame's contract, the World in the Viewport, parallel time (2026-11-16)
+
+**Decision.** What the integration settled between M10a's shell, M10b's
+panels and M14's pool:
+
+- **simple_editor docks the panels.** apps/editor links se_editor_panels
+  and hands `MakeDefaultPanels()` to `Editor::AddPanel`, one by one. The
+  seeded layout (a pref directory without a saved one): Hierarchy left,
+  Viewport in the centre, Log, Profiler and Schedule at the bottom,
+  Inspector, Stress generator and Scene settings right, with the shell's
+  own Play and Document panels above them. A dock node shows the tab of
+  the window that had the focus when a frame ended, so the layout's first
+  tabs (Play, Log, Inspector, Hierarchy, Viewport) are focused one a frame
+  after the seeding. M10a's Play and Document panels stay: they are the
+  transport controls and the document's state, which no M10b panel shows.
+- **Play.Faulted keeps the selection.** panel.h said that in Play.Faulted
+  both `commands` and `play_edits` are null, which left a faulted World
+  with a frozen selection: the Hierarchy could not select what the
+  Inspector should show. The context now keeps `play_edits` in
+  Play.Faulted for its `Select` only; `Submit` logs and drops the command
+  (the panels' EditSink already refuses edits when `faulted`). The World
+  stays read-only and becomes inspectable entity by entity.
+- **The World is drawn in the Viewport panel.** While a panel asks
+  EditorViewports for a target, the editor sends the World's layers into
+  that target and none into the composite, which shows the clear colour
+  behind the UI. `ExtensionFrame` gained `readback`: the target the
+  `--readback` test hooks read instead of the composite, set by the editor
+  to its first viewport, so the desktop tests still check the World's
+  pixels.
+- **Parallel time is measured by the Schedule.** The Schedule panel is to
+  show serial and parallel time per phase; EditorStats had no such number.
+  `ForkJoinPool::ThreadedJoinNs()` is the sum of every threaded fork's
+  publish-to-join time (owner data, one add per threaded join), the
+  Schedule reads it before and after each system and keeps the difference
+  as `SystemStats::last_fork_ns`, and the editor sums it by phase into
+  `EditorStats::phase_parallel_ns`. A phase's serial time is its systems'
+  time minus that. Inline forks (every site disabled, the shipped state)
+  count as serial time: parallel is 0. A context without the measurement
+  (the span empty) shows "n/a" once a site is enabled, as before.
+- **ForkStats come from the pool's records.** `Editor::FillForkStats`
+  copies `ForkJoinPool::Sites()` (name, enabled, the fallback window only
+  while it is open on the pool's clock, the ForkStats) and
+  `ActiveWorkers()` into EditorStats every frame. The records are the tick
+  owner's data; the editor ticks inline, so between ticks they are main's.
+  Sites exist once a system has used them, so the tables fill at the
+  first Play.
+- **Script verbs for the panels.** `show-panel NAME`, `expect-panel NAME`
+  (it drew in the last frame), `expect-viewport [yes|no|window]`,
+  `expect-fork-sites N` (at least N listed, none enabled, no worker) and
+  `expect-dump-stream [yes|no]`.
+- **tools/lint/run_lint.py batches its files.** clang-format and cpplint
+  got every file on one command line; with the editor's files that passed
+  Windows' 32767 characters in a longer checkout path. They now run in
+  batches of at most 24000 characters; every file is still checked and
+  the first failing batch's code is the result.
+
+**Why.** Each item is the smallest change that makes the merged parts one
+editor: the Faulted rule is what "the World stays inspectable" needs, the
+readback target keeps M10a's pixel check meaningful once the World moved
+into a panel, and the parallel time had to be measured where a system's
+time is measured to be attributable to a phase (the pool does not know
+phases; site names are not system names).
+
+**Consequences.** `Schedule::Step` reads one more counter twice per
+system. A panel that is not the visible tab of its dock node does not
+draw (ImGui's Begin returns false): M10b's stress generator spreads an
+Edit-mode press over frames inside one coalesce scope, so hiding its tab
+in the middle of a press holds the scope open until the tab shows again
+(M10b's open issue; M11's prefab work revisits the generator). The
+composite readback of an editor with a visible Viewport panel is one
+colour by design.
+
+**Checked by.** `editor.script.panels` (headless) and
+`editor.desktop.panels` (a window: `--readback` of the Viewport's target
+is not one colour, the log names the viewport); the existing
+`editor.desktop.*` and `editor.script.*` tests now run with the panels
+docked. `jobs.The Schedule tells a system's time inside threaded forks`
+(W = 0: no parallel time; W = 3: the systems' parts add up to the pool's
+total; TSan in WSL). `editor_panels.*` unchanged (60 tests).

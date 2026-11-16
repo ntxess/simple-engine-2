@@ -45,6 +45,7 @@
 #include "se_core/breadcrumb.h"
 #include "se_core/error.h"
 #include "se_core/input_frame.h"
+#include "se_core/input_frame_ring.h"
 #include "se_core/jobs.h"
 #include "se_core/thread_role.h"
 #include "se_core/thread_safety.h"
@@ -213,6 +214,24 @@ class PlaySession {
   [[nodiscard]] std::vector<std::byte> FinishReplay();
   [[nodiscard]] bool ReplayFinished() const noexcept {
     return !recorder_.Active();
+  }
+
+  // Dumps (M12 in the editor; ADR-111). Every InputFrame the session
+  // latches also goes into |ring| (the process's dump ring).
+  void AttachInputRing(InputFrameRing* ring) noexcept {
+    driver_.AttachInputRing(ring);
+  }
+  // The session's replay header (its build, the hash of the Play-start
+  // bytes, the seed and the tick rate).
+  [[nodiscard]] ReplayHeader Header() const;
+  // What a replay from a dump needs besides the InputFrames: the session's
+  // replay file without frames (the header, the Play-start bytes and the
+  // SessionLog so far).
+  [[nodiscard]] std::vector<std::byte> DumpBytes() const;
+  // Grows with every SessionLog entry (edits and markers): DumpBytes()
+  // changed.
+  [[nodiscard]] std::size_t LogEntries() const noexcept {
+    return log_.Applied().size() + log_.PendingCount();
   }
 
  private:

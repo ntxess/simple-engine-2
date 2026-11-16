@@ -20,6 +20,7 @@
 #include "se_core/handle.h"
 #include "se_core/log.h"
 #include "se_core/thread_role.h"
+#include "se_platform/driver_wait.h"
 #include "se_render/gpu_device.h"
 #include "se_render/gpu_resources.h"
 #include "se_render/renderer_2d.h"
@@ -186,6 +187,9 @@ ImDrawData* ImGuiRenderer::Render() {
 void ImGuiRenderer::RenderPlatformWindows() {
   AssertMainThread();
   if ((ImGui::GetIO().ConfigFlags & ImGuiConfigFlags_ViewportsEnable) != 0) {
+    // The backend acquires and presents each extra window's swapchain: a
+    // hang in there is a GPU or compositor stall to the watchdog (M12).
+    const DriverWaitScope in_driver;
     ImGui::RenderPlatformWindowsDefault();
   }
 }

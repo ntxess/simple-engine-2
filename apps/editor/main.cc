@@ -1,7 +1,10 @@
 // Copyright 2026 The simple-engine-2 Authors.
 //
-// simple_editor (docs/milestone-specs.md M10a): the editor shell on SDL's
-// main callbacks, editing rampage's scenes with rampage's GameModule.
+// simple_editor (docs/milestone-specs.md M10 and "Integration (M10a + M10b
+// + M12 + M14)"): the editor shell on SDL's main callbacks, editing
+// rampage's scenes with rampage's GameModule, with the panels of
+// se_editor_panels docked in it (Hierarchy, Inspector, Viewport, Log,
+// Profiler, Schedule, Stress generator, Scene settings).
 //
 //   simple_editor [runtime options] [-- --scene FILE] [--editor-script FILE]
 //                 [--viewports]
@@ -30,8 +33,11 @@
 #include "se_core/world.h"
 #include "se_editor/editor.h"
 #include "se_editor/editor_game.h"
+#include "se_editor/panel.h"
+#include "se_editor_panels/panels.h"
 #include "se_runtime/app.h"
 #include "se_runtime/app_config.h"
+#include "se_runtime/integration.h"
 #include "se_runtime/pacer_policy.h"
 #include "se_runtime/quit.h"
 
@@ -101,6 +107,18 @@ std::expected<se::GameSetup, se::Error> MakeEditor(
   }
   auto editor = std::make_shared<se::editor::Editor>(RampageForTheEditor(),
                                                      std::move(options));
+  // The panels, in their dock order. The Profiler's button asks the crash
+  // handler for a dump of the process as it is: the flight recorder (the
+  // breadcrumbs, the log rings, the InputFrame ring, the session header
+  // and, in Play, the Play-start stream).
+  se::editor::PanelOptions panel_options;
+  panel_options.dump_flight_recorder = [] {
+    se::integration::RequestFaultDump("editor: flight recorder dump");
+  };
+  for (std::unique_ptr<se::editor::Panel>& panel :
+       se::editor::MakeDefaultPanels(std::move(panel_options))) {
+    editor->AddPanel(std::move(panel));
+  }
   se::GameSetup setup;
   setup.module = &se::rampage::RampageModule();
   setup.title = "simple_editor";

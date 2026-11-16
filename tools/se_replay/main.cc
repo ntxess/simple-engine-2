@@ -13,6 +13,7 @@
 //             [--jitter-ms MS] [--hash-out FILE] [--projection-out FILE]
 //             [--record FILE] [--jobs W] [--expect-golden NAME]
 //   se_replay --from-dump DUMP [--root DIR] [--hash-out FILE]
+//             [--start-scene FILE]
 //
 // --jobs W runs the session on a threaded ForkJoinPool of W workers with
 // every fork site enabled (M14); the hashes do not depend on W, and
@@ -26,7 +27,11 @@
 // (default the repository), and must hash as the dump's did; the dump's
 // last published tick hash is checked. It prints the tick reached, the
 // hashes of the last ticks before it and whether the check passed;
-// --hash-out writes every tick's hash.
+// --hash-out writes every tick's hash. A dump taken during the editor's
+// Play carries the session's Play-start bytes and SessionLog (ADR-111):
+// the bytes are written to --start-scene FILE (default DUMP.play-start.
+// scene.json) and run as the scene, with the log's edits applied; a dump
+// from Edit mode has nothing to replay.
 //
 // With --inputs, the replay's SessionLog is applied (an editor Play
 // session's edits and markers, M10a), and --start-scene FILE writes the
@@ -142,7 +147,8 @@ void Usage() {
                "[--expect-golden NAME]\n"
                "                 [--edges-out FILE] [--start-scene FILE]\n"
                "       se_replay --from-dump DUMP [--root DIR] "
-               "[--hash-out FILE]\n");
+               "[--hash-out FILE]\n"
+               "                 [--start-scene FILE]\n");
 }
 
 std::optional<Args> Parse(int argc, char** argv) {
@@ -484,8 +490,23 @@ int RunFromDump(const Args& args) SE_REQUIRES(g_main) SE_EXCLUDES(g_sim_owner) {
   }
   const std::string root =
       args.root.empty() ? testing::RampageRepoRoot() : args.root;
+  // An editor Play session starts from the dump's Play-start bytes, written
+  // next to the dump unless --start-scene names a file.
+  const bool editor_play = (header.flags & kSessionFlagPlayStart) != 0;
+  const std::string start_scene =
+      !editor_play ? std::string()
+                   : (args.start_scene.empty()
+                          ? args.from_dump + ".play-start.scene.json"
+                          : args.start_scene);
+  if (editor_play) {
+    std::fputs(std::format("se_replay: an editor Play session: its Play-start "
+                           "stream ({} bytes) goes to {}\n",
+                           session->play_start.size(), start_scene)
+                   .c_str(),
+               stdout);
+  }
   const replay::FromDumpResult result =
-      replay::ReplayDumpedRampage(*session, root);
+      replay::ReplayDumpedRampage(*session, root, start_scene);
   if (result.hashes.empty() && !result.error.empty()) {
     std::fprintf(stderr, "se_replay: --from-dump: %s\n", result.error.c_str());
     return 2;

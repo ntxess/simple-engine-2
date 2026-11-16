@@ -17,7 +17,7 @@ behaviour reference until every rule and editor operation is ported.
 | [gates.md](gates.md) | Verification gates that need hardware or setup not on the dev machine |
 | [ledger.md](ledger.md) | Completeness ledger: every legacy feature ported, re-specified or deleted |
 | [implementation-plan.md](implementation-plan.md) | The approved milestone plan (M0-M19) |
-| [milestone-specs.md](milestone-specs.md) | Detailed specs for M1 to M10, M12, M14 and M17a |
+| [milestone-specs.md](milestone-specs.md) | Detailed specs for M1 to M10, M12, M14 and M17a, and their integrations |
 | [rules/gameplay-rules.md](rules/gameplay-rules.md) | Declared gameplay rules R1-R13 applied to the legacy reference (milestones M1b and M3a) |
 | [../tests/fixtures/reference/README.md](../tests/fixtures/reference/README.md) | The legacy reference scenarios, inputs and golden projections (legacy_replay, tests/legacy, ref.sandbox) |
 | [../bench/thresholds.json](../bench/thresholds.json) | se_bench gates and the measurements behind them |
@@ -26,7 +26,7 @@ behaviour reference until every rule and editor operation is ported.
 
 | Target | Directory | What it is |
 |---|---|---|
-| se_core | engine/se_core | Kernel: World, Schedule, component registry, hashing, detmath, jobs, time (M2); the input placement rule (edge_placement.h: PlaceEdge, the Locked and Free tick windows the stepper uses) and the input buffer window (input_buffer.h) (M8, ADR-073); the PCM type the lane and the audio engine share (pcm.h, ADR-087); the dedicated driver's channels: SpscQueue, Doorbell, FaultBox, the Snapshot slot and the SnapshotChannel, and SimOwnerScope (M17a, ADR-083, ADR-085); the threaded ForkJoinPool (jobs.h: sites kept by the pool, per-worker wake words, batch claims, ChunkOutputs, the fork fault boundary, ForkStats with join tails, the 4x-median fallback, per-efficiency-class calibration, the spin, chaos mode; the built-in PrevTransformCopy is a fork site) (M14, ADR-107 to ADR-109) |
+| se_core | engine/se_core | Kernel: World, Schedule, component registry, hashing, detmath, jobs, time (M2); the input placement rule (edge_placement.h: PlaceEdge, the Locked and Free tick windows the stepper uses) and the input buffer window (input_buffer.h) (M8, ADR-073); the PCM type the lane and the audio engine share (pcm.h, ADR-087); the dedicated driver's channels: SpscQueue, Doorbell, FaultBox, the Snapshot slot and the SnapshotChannel, and SimOwnerScope (M17a, ADR-083, ADR-085); the threaded ForkJoinPool (jobs.h: sites kept by the pool, per-worker wake words, batch claims, ChunkOutputs, the fork fault boundary, ForkStats with join tails, the 4x-median fallback, per-efficiency-class calibration, the spin, chaos mode; the built-in PrevTransformCopy is a fork site) (M14, ADR-107 to ADR-109); the Schedule keeps each system's time inside threaded forks (`SystemStats::last_fork_ns`, from `ForkJoinPool::ThreadedJoinNs()`), and the session header's flags tell an editor Play (its start in the Play-start stream) and "no session" from a game's session (ADR-111, ADR-112) |
 | se_os | engine/se_os | The headless OS layer for threads: StartThread and RoleScope (names, roles, registry slots, QoS, CPU sets), the CPU topology and pool sizes, the unbiased clock, debugger detection, ExecutableDir; depends on se_core only (M4, ADR-029); the sim thread's PreciseTimer (precise_wait.h, M17a, ADR-084); ForkWorkers, the fork pool's worker threads (fork_workers.h: role kForkWorker, Qos::kHigh, placement by efficiency class, BatteryPowered, ChaosSeedFromEnv) and ReadSystemCpuTimes (process.h) (M14, ADR-107, ADR-108) |
 | se_log | engine/se_log | The log worker: drains the per-thread log rings into the spdlog file, stderr and panel sinks; the only module that includes spdlog (M4, ADR-032) |
 | se_sim | engine/se_sim | Game modules, GameStateStack, SessionLog, replays, SimDriver (M2); AudioEvents and the AudioSink contract (M8); the TickGate (M9); the dedicated sim driver, headless: SimThread (role kSim; sessions built and destroyed on it, M17a's commands, the tick as a fault boundary), PacedClock (absolute deadlines, the timer-plus-spin wait with a capped margin, phi, catch-up and dilation; ManualClock for tests) and the InputFolder (M8's half-open placement, holder counts) (M17a, ADR-083, ADR-084, ADR-086); GameStateStack::Revision, which the snapshot generation follows (ADR-086); the App keeps the inline driver until M17b |
@@ -37,19 +37,19 @@ behaviour reference until every rule and editor operation is ported.
 | game_rampage | games/rampage | The legacy Sandbox's gameplay on the kernel: components, systems, scenes and prefabs (assets/), legacy scenarios, projections (M3) |
 | se_platform | engine/se_platform | SDL3 on the main thread: SDL's initialisation, the event filter and Inbox, WakeMain, the window and its Win32 subclass (Modal, session end, power), se::fs on SDL's filesystem API (M9: stepwise FileReader with FILE_SHARE_DELETE on Windows, FileWriter, TryReplace with POSIX semantics and sharing violations as kBusy, the fault and delay injector in test builds; ADR-080), fault dialogs off under SE_NO_MESSAGE_BOX=1 and in every test executable (SDL's assertion dialog included: a failed SDL assertion prints and aborts, ADR-070) (M5); the input sampler (role kInputSampler: SDL_UpdateGamepads at 1000 Hz on AC and 250 Hz on battery, parked on a doorbell while Suspended or Idle, inside ADR-047's window) and the open gamepads (M8, ADR-075); the display outputs (QueryDisplayConfig's current mode of the window's monitor, ADR-055) and the vblank sampler (role kVblankSampler: WaitForVBlank on the window's DXGI output, stamps in the SDL_GetTicksNS domain, a median period; a stub elsewhere) (M6b, ADR-056) |
 | se_render | engine/se_render | The SDL_GPU device (D3D12 on Windows, Vulkan on Linux) (M5); Renderer2D on main: the frame transaction (FrameRecorder, its fault boundary and the --inject-frame-fault hook), GpuResources (texture handles with a magenta fallback, the retire queue, the 8 MB upload queue, device-loss release and recreation), the sprite and blit pipelines, the composite and ViewportTargets, the texture table and PNGs through stb; HLSL shaders in shaders/, SPIR-V committed in shaders/generated/, DXIL built with the SDK's dxc (M7, ADR-059 to ADR-063); `se::present` (present.h): the SDL presentation patch's frame-latency wait, present statistics, GPU timestamps, native handles, device status and present mode, all unsupported in the unpatched build (M6a, ADR-050 to ADR-053) |
-| se_runtime | engine/se_runtime | The App on SDL's main callbacks: boot steps, the frame, the lifecycle and two-phase quit state machines, BasicInputService, the noexcept callbacks (`SE_DEFINE_SDL_APP`) (M5); the main thread's RoleScope, crash capture and its dump streams, the log worker and the watchdog in boot order (integration.h; ADR-042); the InputService (stamped edges latched per tick by the placement rule, held state, axes, focus-loss clears with source `cleared`) and the ActionMap (the game's bindings and the settings file's key-bindings as SDL keycodes, default pad bindings, unknown names a boot error), the settings file reader (user_settings.h), `--record` session replays and `--no-raw-keyboard` (M8, ADR-073, ADR-074), replacing BasicInputService; the AudioBridge (each World's audio events started at max(now, tick anchor + D), D = B + T/2 from the plan and the pacer, late and cosmetic rules, a voice scope per World), the audio engine at boot step 10 with the sound table's sounds and `--audio device|null|none` / SE_AUDIO (M8, ADR-076, ADR-077); the FramePacer over the pure PacerPolicy (Paced, Standard, VRR, HalfRate, adaptive latency, misses from present statistics or the latency wait; `--pacing`) and the PresentPort it presents through (M6b, ADR-054, ADR-057, ADR-058); RenderPresentPort, the adapter over `se::present` and Renderer2D, misses from the frame-latency wait on the vblank grid whenever it can resolve a present, with present statistics counted beside it (and checked on their own after DWM's composition offset, ADR-072) and the source only without a waitable (ADR-066), HalfRate that backs off instead of flapping (ADR-071), the GPU timings as FrameCosts' g, and device loss (DeviceLost, recreation on main, `--inject-device-lost`) (M6/M7 integration, ADR-066 to ADR-068); the background lane and the AssetRegistry in the boot and shutdown order (asset_runtime.h: an AssetScope per GameState, the hold until it is resident through SimDriver's TickGate, GpuResources behind the registry's upload port, the lane's QuitProvider for Durable jobs; `--cooked-root`, `--hot-reload`, `--lane-step-trace`) (M9, ADR-081) |
+| se_runtime | engine/se_runtime | The App on SDL's main callbacks: boot steps, the frame, the lifecycle and two-phase quit state machines, BasicInputService, the noexcept callbacks (`SE_DEFINE_SDL_APP`) (M5); the main thread's RoleScope, crash capture and its dump streams, the log worker and the watchdog in boot order (integration.h; ADR-042); the InputService (stamped edges latched per tick by the placement rule, held state, axes, focus-loss clears with source `cleared`) and the ActionMap (the game's bindings and the settings file's key-bindings as SDL keycodes, default pad bindings, unknown names a boot error), the settings file reader (user_settings.h), `--record` session replays and `--no-raw-keyboard` (M8, ADR-073, ADR-074), replacing BasicInputService; the AudioBridge (each World's audio events started at max(now, tick anchor + D), D = B + T/2 from the plan and the pacer, late and cosmetic rules, a voice scope per World), the audio engine at boot step 10 with the sound table's sounds and `--audio device|null|none` / SE_AUDIO (M8, ADR-076, ADR-077); the FramePacer over the pure PacerPolicy (Paced, Standard, VRR, HalfRate, adaptive latency, misses from present statistics or the latency wait; `--pacing`) and the PresentPort it presents through (M6b, ADR-054, ADR-057, ADR-058); RenderPresentPort, the adapter over `se::present` and Renderer2D, misses from the frame-latency wait on the vblank grid whenever it can resolve a present, with present statistics counted beside it (and checked on their own after DWM's composition offset, ADR-072) and the source only without a waitable (ADR-066), HalfRate that backs off instead of flapping (ADR-071), the GPU timings as FrameCosts' g, and device loss (DeviceLost, recreation on main, `--inject-device-lost`) (M6/M7 integration, ADR-066 to ADR-068); the background lane and the AssetRegistry in the boot and shutdown order (asset_runtime.h: an AssetScope per GameState, the hold until it is resident through SimDriver's TickGate, GpuResources behind the registry's upload port, the lane's QuitProvider for Durable jobs; `--cooked-root`, `--hot-reload`, `--lane-step-trace`) (M9, ADR-081); an App that idles (the editor in Edit mode waits for events) is no hang to the watchdog between the iterate that entered the wait and the next callback, and an AppExtension names the viewport the `--readback` hooks read (ADR-111, ADR-112) |
 | se_imgui | engine/se_imgui | Dear ImGui v1.93.0-docking, the only target that compiles it: ImGui's sources, imgui_stdlib and the first-party SDL3 and SDL_GPU backends, with se_imgui/imconfig_se.h as IMGUI_USER_CONFIG (GImGui thread_local, IM_ASSERT on in every build); the editor's one context on main (`se::imgui::Context`: docking, gamepad navigation, multi-viewports opt-in, settings in memory) and HeadlessFrames for tests without a window (M10a, ADR-095) |
-| se_editor | engine/se_editor | The editor shell (M10a): the panel interface M10b's panels build on (panel.h: Panel, PanelContext, EditorCommands, PlayEdits, EditorViewports), the command kinds and their undo (commands.h: set, add, remove a component, create and destroy an entity, path points, groups), Selection, TextureIds, EditorStats and LogView (ADR-095, ADR-096); the EditDocument (a kEditDocument World behind its command gate, undo, coalescing, dirty), the PlaySession (Play, Play game, Pause, Step, Stop, edits as SessionLog entries, Play.Faulted with a fault boundary for its ticks and render builds), the DialogMailbox, recovery files and autosave, the test script, and the Editor: the App's AppExtension that runs them with ImGui on the single loop (ADR-097 to ADR-099) |
+| se_editor | engine/se_editor | The editor shell (M10a): the panel interface M10b's panels build on (panel.h: Panel, PanelContext, EditorCommands, PlayEdits, EditorViewports), the command kinds and their undo (commands.h: set, add, remove a component, create and destroy an entity, path points, groups), Selection, TextureIds, EditorStats and LogView (ADR-095, ADR-096); the EditDocument (a kEditDocument World behind its command gate, undo, coalescing, dirty), the PlaySession (Play, Play game, Pause, Step, Stop, edits as SessionLog entries, Play.Faulted with a fault boundary for its ticks and render builds), the DialogMailbox, recovery files and autosave, the test script, and the Editor: the App's AppExtension that runs them with ImGui on the single loop (ADR-097 to ADR-099). Integration: while Play runs, the process's session header describes the Play session, its InputFrames go into the dump ring and the Play-start stream holds the session's replay file without frames (its SessionLog included), so a dump replays with `se_replay --from-dump`; EditorStats carries the pool's fork sites and each phase's parallel time; Play.Faulted keeps the selection (ADR-111, ADR-112) |
 | se_editor_panels | engine/se_editor/panels | The editor's panels on se_editor's Panel interface (M10b): Hierarchy, Inspector (a reflection drawer generated from the registry's JSON hooks, the ported Stats, EffectSource and Team drawers, the Path list and the waypoint canvas whose rules become path commands), Viewport (an editor camera into a ViewportTarget shown through TextureIds, pan and zoom, picking by the broadphase scratch, exact bounds or brute force in Play.Faulted, the move gizmo and the ported overlays), Log, Profiler (the legacy axis rule), Schedule, Stress generator, Scene settings; every edit through EditorCommands (Edit) or PlayEdits (Play); the one editor module that links game_rampage (ADR-100 to ADR-103) |
-| simple_editor | apps/editor | The editor executable (M10a): se_editor on se_runtime's App with rampage's GameModule, opening assets/scenes/sandbox.scene.json (`-- --scene FILE`), Standard pacing at frame latency 2, raw keyboard off; `-- --editor-script FILE` (test builds) runs editor actions at frame boundaries |
+| simple_editor | apps/editor | The editor executable (M10): se_editor on se_runtime's App with rampage's GameModule and the panels of se_editor_panels docked in it (Hierarchy left, Viewport in the centre, Log, Profiler and Schedule at the bottom, Inspector, Stress generator and Scene settings right, the shell's Play and Document panels above them), opening assets/scenes/sandbox.scene.json (`-- --scene FILE`), Standard pacing at frame latency 2, raw keyboard off; `-- --editor-script FILE` (test builds) runs editor actions at frame boundaries (se_editor/editor_script.h lists them); the runtime's test hooks apply too (`--hang-test after-ticks:N` hangs inside a tick of Play) |
 | rampage | games/rampage/app | The rampage executable: the sandbox scene at 120 Hz in a window (M5), drawn textured by Renderer2D (M7) from the cooked pages of config/texture.json loaded through the background lane, hot-reloading a changed texture (M9); crashpad_handler is copied next to it |
 | asset_cook | tools/asset_cook | Cooks the textures of config/texture.json into `.seatlas` pages (a header and independent LZ4 blocks of about 256 KB of RGBA8), one per texture; CMake runs it at build time into `<build>/bin/cooked` (M9, ADR-078) |
 | input_probe | tools/input_probe | A window that logs each real key event's SDL stamp (SDL's raw-input thread with `--raw-keyboard on`, the Win32 message time with `off`) and its poll delay, and reports the stamps' resolution; needs a person (docs/gates.md "Win32 key stamp resolution"); only `--help` runs unattended (`tools.input_probe.usage`) (M8) |
 | make_sounds | tools/audio/make_sounds.py | Writes rampage's sounds (assets/sounds/hit.wav, death.wav) by integer synthesis; `--check` is `checks.sounds_fresh` (Python 3, stdlib only) (M8) |
-| se_editor_tests | tests/editor | The editor headless (`editor.*`, label unit): the ImGui context is thread_local and draws without a window, every command kind applies, reverts and redoes on the sandbox document with the document hash restored, path points, coalescing, commands as SessionLog entries, the EditDocument, Play/Pause/Step/Stop, SessionLog edits, Play.Faulted from a tick and a render throw, a Play session replayed headless to the same hashes, the DialogMailbox from another thread (TSan in WSL), recovery files through the lane, the script parser; `editor.script.*` run simple_editor headless on tests/editor/scripts (run_editor.py; the session replay through se_replay, 'Play game', the hotkeys as ImGui key events), `editor.desktop.*` in an unfocused window (label desktop) (M10a) |
+| se_editor_tests | tests/editor | The editor headless (`editor.*`, label unit): the ImGui context is thread_local and draws without a window, every command kind applies, reverts and redoes on the sandbox document with the document hash restored, path points, coalescing, commands as SessionLog entries, the EditDocument, Play/Pause/Step/Stop, SessionLog edits, Play.Faulted from a tick and a render throw, a Play session replayed headless to the same hashes, the DialogMailbox from another thread (TSan in WSL), recovery files through the lane, the script parser; `editor.script.*` run simple_editor headless on tests/editor/scripts (run_editor.py; the session replay through se_replay, 'Play game', the hotkeys as ImGui key events), `editor.desktop.*` in an unfocused window (label desktop) (M10a). Integration: `editor.script.panels` and `editor.desktop.panels` (every panel draws, the Viewport's target read back, the fork sites, the Play-start stream), the Play session's dump streams replayed through se_replay's dump reader, edits included (`editor.A dump taken during Play ...`), `editor.desktop.idle_watchdog` (an idle editor is no hang), and `crash.editor_play_hang` in tests/crash (a hang in Play: the dump within 6 s, replayed to the hanging tick) (ADR-111, ADR-112) |
 | se_editor_panel_tests | tests/editor_panels | The panels headless (`editor_panels.*`, labels unit and editor): their pure parts (canvas rules, axis rule, picking, stress plan, letterbox, gizmo, overlays) and every panel in a headless ImGui context driven by synthetic ImGui IO events, against a test World whose gate stays closed and a recording EditorCommands or PlayEdits (M10b) |
 | se_audio_tests | tests/audio | se_audio and the AudioBridge mixed offline or on the null backend (`audio.*`, label unit, TSan and ASan in WSL): 8.33 ms between two ticks' sounds by onset detection, late and cosmetic rules, voice-cap stealing, the end ring and the sweep, stop, scope release and reload while a mixer thread plays, the fallback; the real device at volume 0 (label desktop) |
-| se_replay | tools/se_replay | Headless runs of a game module: per-tick hashes, replays, projections; `--edges-out` lists a replay's recorded edges with their sources (M8); `--from-dump DUMP` replays a crash or hang dump's rampage session (its session header and InputFrame ring, read by dump_session.h) to main's breadcrumb tick and checks the dump's last published hash (M12, ADR-106) |
+| se_replay | tools/se_replay | Headless runs of a game module: per-tick hashes, replays, projections; `--edges-out` lists a replay's recorded edges with their sources (M8); `--from-dump DUMP` replays a crash or hang dump's rampage session (its session header and InputFrame ring, read by dump_session.h) to main's breadcrumb tick and checks the dump's last published hash (M12, ADR-106); a dump taken during the editor's Play replays from its Play-start stream (written to `--start-scene FILE`) with the SessionLog's edits applied (ADR-111) |
 | render_shot | tools/render_shot | A rampage scenario at one tick rendered offscreen by se_render into a PNG, and the image comparison (`--compare`, the golden tolerance: the spec's three conditions, 90% of the drawn pixels, every sprite-sized object at least a quarter within, no solid block drawn in one image only, no fallback magenta; ADR-065, ADR-069); drives the legacy image comparison (whose legacy image must equal tests/golden/render/legacy/) and the rampage fault-injection tests, `render.fault.<driver>.device_lost` included (M7, ADR-065; ADR-068) |
 | build_shaders | tools/shaders/build_shaders.py | Compiles the renderer's HLSL: SPIR-V headers through glslang (committed; `--check` is the WSL freshness test), DXIL headers through dxc at build time (Python 3, stdlib only) |
 | compare_images | tools/render_shot/compare_images.py | Compares two PNGs with the renderer's tolerance (the same rule as render_shot, ADR-069) and writes a diff image (Python 3, stdlib only) |
@@ -87,7 +87,7 @@ logs the teardown as "shutdown order: ...":
 | sim | kSim | se_sim | `SimThread::Start` (tests; the App wires it in M17b) | Quit, `SimThread::Stop` | the dedicated sim driver: owns its session's Worlds and runs SimDriver::RunTick on PacedClock deadlines (M17a) |
 | fork-worker-<i> | kForkWorker | se_core's ForkJoinPool, started by se_os ForkWorkers | when a site of the pool is first enabled (none is in a shipped build, so none starts) | the pool's destructor (with its session) | deterministic fork-join chunks, at most W_max = ForkPoolSize (M14, ADR-107) |
 
-The editor (M10a) adds no thread of its own: SDL's file-dialog thread
+The editor (M10) adds no thread of its own: SDL's file-dialog thread
 runs the DialogMailbox's callback (copy the paths, WakeMain, return), and
 test builds play that thread with a named kLibrary thread
 (`dialog-callback ... from-thread`).
@@ -99,8 +99,21 @@ separate process.
 
 ## The editor
 
-`simple_editor` (M10a) edits rampage's scenes: the sandbox opens in Edit
-mode; Play serializes it into a play World (every Play is a serializer
+`simple_editor` (M10) edits rampage's scenes: the sandbox opens in Edit
+mode, with the panels docked around the Viewport: Hierarchy (left),
+Inspector, Stress generator and Scene settings (right, under the shell's
+Play and Document panels), Log, Profiler and Schedule (bottom). The layout
+is seeded once and then kept in <pref>editor-layout.ini. The Viewport panel
+shows the World through an editor camera in an offscreen target (pan with
+the right or middle button, zoom with the wheel, click to pick, drag the
+gizmo to move); every edit a panel makes is an undoable command in Edit
+mode and a SessionLog entry in Play. The Profiler and Schedule panels show
+the pacer, each system's timing ring, each phase's serial and parallel
+time and the fork-join pool's sites (all disabled: no worker runs); the
+Profiler's "Dump flight recorder" button writes a dump of the process as
+it is.
+
+Play serializes the document into a play World (every Play is a serializer
 round trip), Play game runs rampage's start state on it, Pause, Step and
 Stop take effect between frames and are logged with their tick, and Stop
 leaves the document's hash unchanged. Edits during Play go to the play
@@ -117,6 +130,50 @@ Ctrl+S, Ctrl+Z, Ctrl+Y, F5 (Play or Resume), Shift+F5 (Stop), F10 (Step).
 out\build\msvc-dev\bin\simple_editor --audio null
 out\build\msvc-dev\bin\se_replay --module rampage --inputs %APPDATA%\simple-engine\simple_editor\sessions\last-play.sereplay --start-scene start.scene.json
 ```
+
+In Edit mode the editor idles after 1 s without input (it waits for
+events; the watchdog does not take that for a hang). While Play runs, a
+dump of the process (a hang, a crash, Play.Faulted, the flight-recorder
+button) carries the Play session: the session header, the InputFrames and
+the Play-start stream with the document as Play serialized it and the
+edits made since. `se_replay --from-dump DUMP` replays it to the tick main
+was in (ADR-111).
+
+Test builds run a script of editor actions at frame boundaries, in a
+window or headless; se_editor/editor_script.h lists the actions and
+tests/editor/scripts has the ones the tests use (run_editor.py runs them:
+`editor.script.*` headless, `editor.desktop.*` in a window that never takes
+the focus). A script never uses real input:
+
+```bat
+out\build\msvc-dev\bin\simple_editor --audio null --no-activate -- --editor-script tests/editor/scripts/panels.editor
+out\build\msvc-dev\bin\simple_editor --audio null --headless --fixed-frame-dt 8.3333 -- --editor-script tests/editor/scripts/play_session.editor
+```
+
+## The fork-join pool
+
+`jobs::ForkJoinPool` (se_core, M14) runs a system's `ParallelFor` chunks on
+the caller and on up to W_max fork workers (role kForkWorker, started by
+se_os when a site is first enabled). Every fork site ships disabled, so a
+shipped build starts no worker and every fork runs inline;
+`checks.no_fork_site_enabled` keeps it so until M16 enables sites one by
+one. The results never depend on W: `jobs.*` compares per-tick hashes for
+W = 0, 1, 3 and 7.
+
+- Chaos mode permutes each fork's claim order from a seed and injects
+  yields, short delays and late wakes (ADR-109): `set SE_CHAOS_SEED=0x51C3`
+  (decimal or 0x hex) turns it on for an App and for the tests' pools; the
+  tests run eight seeds. Results never depend on it.
+- `se_replay --module rampage --jobs 3 ...` runs a session on three workers
+  with every site enabled; the hashes equal the inline run's.
+- `ctest --test-dir out/build/msvc-dev -R "^jobs[.]"` runs the pool's
+  properties and the determinism matrix (TSan in the WSL preset);
+  `out\build\msvc-release\bin\se_wake_soak.exe --strict` is the 10-minute
+  wake soak for an idle machine (docs/gates.md).
+- In the editor, the Profiler and Schedule panels list the pool's sites
+  (state, forks, inline forks, join p99.9, late and missed wakes,
+  fallbacks) and each phase's parallel time, which is 0 while the sites
+  are disabled.
 
 ## Building
 
@@ -302,7 +359,13 @@ It reaches main's breadcrumb tick and checks the dump's hash. In a test
 build `rampage --audio null --hang-test after-ticks:240` loops forever in a
 system at tick 240 (`:for-ms:MS` for a while, `:in-driver` inside a driver
 wait); tests/platform/watchdog_manual.md has the manual sleep and debugger
-checks.
+checks. The same hook hangs the editor inside a tick of Play
+(`simple_editor --audio null --hang-test after-ticks:240 -- --editor-script
+tests/editor/scripts/play_hang.editor`, the test `crash.editor_play_hang`):
+the dump then carries the Play-start stream (0x53450006), and `se_replay
+--from-dump DUMP --start-scene start.scene.json` starts from it. An App
+that waits for events (the editor idle in Edit mode) is not a hang; a dump
+taken then says in its session header that no session runs.
 
 `scripts/ci.ps1` runs the commit gate (msvc-dev, msvc-asan, clangcl-dev,
 including the `lint` and `checks` test labels; `-Presets msvc-unpatched-dev`

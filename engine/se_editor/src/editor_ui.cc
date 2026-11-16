@@ -1,10 +1,10 @@
 // Copyright 2026 The simple-engine-2 Authors.
 //
 // The Editor's ImGui shell: the DockSpace (seeded once with DockBuilder),
-// the menus, the two built-in panels of M10a ("Play" and "Document"; the
-// real panels are M10b's), the modals (the quit prompt and its progress,
-// the recovery offer, the fault screen) and the PanelContext every panel
-// draws from.
+// the menus, the two built-in panels ("Play" and "Document") beside the
+// panels of se_editor_panels the executable adds, the modals (the quit prompt
+// and its progress, the recovery offer, the fault screen) and the PanelContext
+// every panel draws from.
 
 #include <imgui.h>
 #include <imgui_internal.h>
@@ -32,9 +32,17 @@ constexpr const char* kQuitPopup = "Unsaved changes";
 constexpr const char* kSavingPopup = "Saving";
 constexpr const char* kRecoveryPopup = "Recover unsaved changes";
 
-// Where the seeded layout docks a panel, by its window title (M10b's
-// names; unknown ones go right).
+// Where the seeded layout docks a panel, by its window title (the names
+// of se_editor_panels; unknown ones go right). The built-in Play and
+// Document panels sit above the right node.
 enum class Dock : std::uint8_t { kLeft, kRight, kBottom, kCenter };
+
+// The tabs a seeded layout shows first, the last one focused (one a frame,
+// so the layout has settled kFocusAfterFrames + 5 frames after the seeding).
+constexpr const char* kFirstTabs[] = {"Play", "Log", "Inspector", "Hierarchy",
+                                      "Viewport"};
+// Frames after the seeding until the windows exist and can be focused.
+constexpr int kFocusAfterFrames = 2;
 
 Dock DockOf(std::string_view name) {
   if (name == "Hierarchy") return Dock::kLeft;
@@ -63,12 +71,15 @@ void Editor::DrawDockSpace() {
       ImGuiID center = dock;
       const ImGuiID left = ImGui::DockBuilderSplitNode(center, ImGuiDir_Left,
                                                        0.20F, nullptr, &center);
-      const ImGuiID right = ImGui::DockBuilderSplitNode(
+      const ImGuiID right_all = ImGui::DockBuilderSplitNode(
           center, ImGuiDir_Right, 0.28F, nullptr, &center);
       const ImGuiID bottom = ImGui::DockBuilderSplitNode(
           center, ImGuiDir_Down, 0.28F, nullptr, &center);
-      ImGui::DockBuilderDockWindow("Play", right);
-      ImGui::DockBuilderDockWindow("Document", right);
+      ImGuiID right = right_all;
+      const ImGuiID controls = ImGui::DockBuilderSplitNode(
+          right, ImGuiDir_Up, 0.24F, nullptr, &right);
+      ImGui::DockBuilderDockWindow("Play", controls);
+      ImGui::DockBuilderDockWindow("Document", controls);
       for (const auto& panel : panels_) {
         const std::string name(panel->Name());
         switch (DockOf(name)) {
@@ -87,7 +98,9 @@ void Editor::DrawDockSpace() {
         }
       }
       ImGui::DockBuilderFinish(dock);
-      SE_LOG_INFO("editor: dock layout seeded");
+      focus_delay_ = kFocusAfterFrames;
+      for (const char* tab : kFirstTabs) focus_queue_.emplace_back(tab);
+      SE_LOG_INFO("editor: dock layout seeded ({} panels)", panels_.size());
     }
   }
   // The central node lets the composite (the World) show through.
@@ -331,17 +344,37 @@ void Editor::DrawUi(App& app, const FrameReport& report) {
                              play_->State() == PlayState::kStepping);
   context.selection = document_ ? &document_->GetSelection() : nullptr;
   context.commands = play_ || !document_ ? nullptr : commands_.get();
-  context.play_edits = context.playing ? play_edits_.get() : nullptr;
+  // Play.Faulted keeps the PlayEdits for its Select only: the frozen World
+  // stays inspectable, and Submit drops everything (ADR-111).
+  context.play_edits = play_ ? play_edits_.get() : nullptr;
   context.textures = textures_.get();
   context.stats = &stats_;
   context.log = &log_;
   context.real_delta_sec = report.clock.real_delta;
   context.viewports = app.Renderer() != nullptr ? viewports_.get() : nullptr;
   DrawBuiltInPanels(context);
-  for (const auto& panel : panels_) {
-    const std::string name(panel->Name());
-    if (ImGui::Begin(name.c_str())) panel->Draw(context);
+  ++ui_frame_;
+  for (std::size_t i = 0; i < panels_.size(); ++i) {
+    Panel& panel = *panels_[i];
+    const std::string name(panel.Name());
+    if (ImGui::Begin(name.c_str())) {
+      panel.Draw(context);
+      ++panel_draws_[i];
+      panel_frame_[i] = ui_frame_;
+    }
     ImGui::End();
+  }
+  // A seeded layout shows its first tabs; a script brings a panel forward.
+  // One window a frame: a dock node selects the tab of the window that has
+  // the focus when the frame ends.
+  if (focus_delay_ > 0) {
+    --focus_delay_;
+  } else if (!focus_queue_.empty()) {
+    const std::string& name = focus_queue_.front();
+    if (ImGui::FindWindowByName(name.c_str()) != nullptr) {
+      ImGui::SetWindowFocus(name.c_str());
+    }
+    focus_queue_.pop_front();
   }
   DrawModals(app);
   if (show_demo_) ImGui::ShowDemoWindow(&show_demo_);

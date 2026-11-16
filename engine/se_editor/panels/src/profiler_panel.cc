@@ -54,7 +54,7 @@ void Row(const char* label, const std::string& value) {
 void DrawForkSites(std::span<const ForkSiteStats> sites, int workers) {
   ImGui::Text("Fork-join pool: %d worker(s)", workers);
   if (sites.empty()) {
-    ImGui::TextDisabled("No fork sites (they arrive with M14's pool)");
+    ImGui::TextDisabled("No fork sites");
     return;
   }
   constexpr ImGuiTableFlags kFlags =
@@ -246,13 +246,17 @@ void SchedulePanel::Draw(const PanelContext& context) {
     ImGui::TextDisabled("No stats this frame");
     return;
   }
-  // Serial time per phase: the editor's phase totals of the last tick, or
-  // the sum of the phase's systems' last runs. Parallel time is what fork
-  // chunks ran on workers; at W = 0 (sites disabled) it is 0.
+  // Per phase: the systems' time of the last tick (the editor's phase
+  // totals, or the sum of the phase's systems' last runs), split into the
+  // time inside threaded forks (parallel: publish to join) and the rest
+  // (serial). With every site disabled the parallel part is 0. A context
+  // without the measurement (phase_parallel_ns empty) shows "n/a" once a
+  // site is enabled.
   bool any_enabled = false;
   for (const ForkSiteStats& site : stats->fork_sites) {
     any_enabled = any_enabled || site.enabled;
   }
+  const bool measured = !stats->phase_parallel_ns.empty();
   constexpr ImGuiTableFlags kFlags =
       ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders;
   if (ImGui::BeginTable("##phases", 4, kFlags)) {
@@ -270,19 +274,28 @@ void SchedulePanel::Draw(const PanelContext& context) {
         serial += s.last_ns;
         ++systems;
       }
+      std::uint64_t parallel = 0;
+      for (const SystemStats& s : stats->systems) {
+        if (s.phase == phase) parallel += s.last_fork_ns;
+      }
       if (static_cast<std::size_t>(p) < stats->phase_ns.size()) {
         serial = stats->phase_ns[static_cast<std::size_t>(p)];
       }
+      if (static_cast<std::size_t>(p) < stats->phase_parallel_ns.size()) {
+        parallel = stats->phase_parallel_ns[static_cast<std::size_t>(p)];
+      }
+      if (!measured) parallel = 0;
+      serial = serial > parallel ? serial - parallel : 0;
       ImGui::TableNextRow();
       ImGui::TableNextColumn();
       ImGui::TextUnformatted(std::string(PhaseName(phase)).c_str());
       ImGui::TableNextColumn();
       ImGui::Text("%.3f", Ms(serial));
       ImGui::TableNextColumn();
-      if (any_enabled) {
+      if (!measured && any_enabled) {
         ImGui::TextDisabled("n/a");
       } else {
-        ImGui::Text("%.3f", 0.0);
+        ImGui::Text("%.3f", Ms(parallel));
       }
       ImGui::TableNextColumn();
       ImGui::Text("%d", systems);

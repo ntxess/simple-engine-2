@@ -88,8 +88,9 @@ std::string_view PhaseName(Phase phase) noexcept {
   return "?";
 }
 
-void SystemStats::Record(std::uint64_t ns) noexcept {
+void SystemStats::Record(std::uint64_t ns, std::uint64_t fork_ns) noexcept {
   const std::uint32_t value = ClampNs(ns);
+  last_fork_ns = ClampNs(fork_ns);
   ring_ns[head] = value;
   head = static_cast<std::uint32_t>((head + 1) % kSystemRingSize);
   count = std::min<std::uint32_t>(count + 1, kSystemRingSize);
@@ -154,17 +155,21 @@ void Schedule::Step(World& world, const InputFrame& input,
     if (phase == Phase::kMovement) {
       crumb.SetSystem(kPrevTransformCopyId);
       SE_PROFILE_ZONE("PrevTransformCopy");
+      const std::uint64_t forked = jobs.ThreadedJoinNs();
       const std::uint64_t start = ProfileNowNs();
       CopyPrevTransforms(world, jobs);
-      stats_[kPrevTransformCopyId].Record(ProfileNowNs() - start);
+      stats_[kPrevTransformCopyId].Record(ProfileNowNs() - start,
+                                          jobs.ThreadedJoinNs() - forked);
     }
     while (next < entries_.size() && entries_[next].phase == phase) {
       const Entry& entry = entries_[next++];
       crumb.SetSystem(entry.id);
       SE_PROFILE_ZONE_DYNAMIC(stats_[entry.id].name);
+      const std::uint64_t forked = jobs.ThreadedJoinNs();
       const std::uint64_t start = ProfileNowNs();
       entry.run(world, context);
-      stats_[entry.id].Record(ProfileNowNs() - start);
+      stats_[entry.id].Record(ProfileNowNs() - start,
+                              jobs.ThreadedJoinNs() - forked);
     }
     if (phase == Phase::kCleanup) {
       crumb.SetSystem(kCleanupId);

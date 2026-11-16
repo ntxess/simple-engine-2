@@ -78,6 +78,7 @@
 #include "se_render_core/render_list.h"
 #include "se_runtime/app.h"
 #include "se_runtime/app_extension.h"
+#include "se_runtime/integration.h"
 #include "se_runtime/quit.h"
 #include "se_sim/game_state.h"
 
@@ -157,6 +158,17 @@ class Editor final : public AppExtension, public QuitProvider {
     return script_failures_;
   }
   [[nodiscard]] bool ScriptDone() const noexcept { return script_done_; }
+  // The last frame's stats, as the panels saw them (their spans and
+  // pointers are valid until the next frame).
+  [[nodiscard]] const EditorStats& Stats() const noexcept { return stats_; }
+  // The Play-start dump stream is registered (Play runs).
+  [[nodiscard]] bool PlayDumpAttached() const noexcept {
+    return play_stream_.Attached();
+  }
+  // How often each panel drew (its window was visible), by Name(), and
+  // whether it drew in the last frame.
+  [[nodiscard]] std::uint64_t PanelDraws(std::string_view name) const noexcept;
+  [[nodiscard]] bool PanelDrewLastFrame(std::string_view name) const noexcept;
 
  private:
   class Commands;
@@ -241,6 +253,21 @@ class Editor final : public AppExtension, public QuitProvider {
   void DrawModals(App& app) SE_REQUIRES(g_main);
   void DrawBuiltInPanels(const PanelContext& context) SE_REQUIRES(g_main);
   void FillStats(App& app, const FrameReport& report) SE_REQUIRES(g_main);
+  // The pool's fork sites and each phase's parallel time (editor_dump.cc).
+  void FillForkStats(App& app) SE_REQUIRES(g_main);
+
+  // Dumps (editor_dump.cc; ADR-111). The session header says that no
+  // session runs (Edit mode).
+  void BeginIdleHeader() SE_REQUIRES(g_main);
+  // Play started: the session header describes it, its InputFrames go into
+  // the dump ring and the Play-start stream holds its replay file without
+  // frames.
+  void AttachPlayDump() SE_REQUIRES(g_main);
+  // The Play-start stream again when the SessionLog gained an entry.
+  void SyncPlayDump() SE_REQUIRES(g_main);
+  // The frame's last tick hash into the session header.
+  void PublishPlayTicks() SE_REQUIRES(g_main);
+  void DetachPlayDump() SE_REQUIRES(g_main);
   void ApplyQueued() SE_REQUIRES(g_main);
   // The play World's RenderLists on the guarded path, the viewports.
   void BuildRender(App& app, const FrameReport& report, ExtensionFrame& frame)
@@ -293,14 +320,32 @@ class Editor final : public AppExtension, public QuitProvider {
   std::vector<std::vector<RenderLayer>> viewport_layers_;
   // A second render fault while faulted: the World is not drawn again.
   bool render_discarded_ = false;
+  // The last frame drew the World into a panel's viewport.
+  bool viewport_drawn_ = false;
   std::string fault_directory_;
   // 'Play game' and the view (no ImGui window) has the input.
   bool game_input_focus_ = false;
   // A document to open at the next frame start (a dialog's result).
   std::optional<std::string> pending_open_;
 
+  // Dumps: the Play-start stream while Play runs, and the SessionLog
+  // entries it was attached with.
+  static constexpr std::size_t kNoPlayStream = ~std::size_t{0};
+  integration::PlayStartStream play_stream_;
+  std::size_t play_stream_entries_ = kNoPlayStream;
+
   // Panels and what they see.
   std::vector<std::unique_ptr<Panel>> panels_;
+  std::vector<std::uint64_t> panel_draws_;
+  // The UI frame each panel last drew in, and the UI frames so far.
+  std::vector<std::uint64_t> panel_frame_;
+  std::uint64_t ui_frame_ = 0;
+  // Windows to bring to the front, one a frame (a dock node selects the
+  // tab of the window focused when the frame ends): a seeded layout's
+  // first tabs, and the script's show-panel. focus_delay_ frames pass
+  // first (a seeded layout's windows exist by then).
+  std::deque<std::string> focus_queue_;
+  int focus_delay_ = 0;
   std::unique_ptr<Commands> commands_;
   std::unique_ptr<PlayEditsImpl> play_edits_;
   std::unique_ptr<Viewports> viewports_;
@@ -309,6 +354,8 @@ class Editor final : public AppExtension, public QuitProvider {
   std::string last_edit_error_;
   EditorStats stats_;
   std::vector<std::uint64_t> phase_ns_;
+  std::vector<std::uint64_t> phase_parallel_ns_;
+  std::vector<ForkSiteStats> fork_sites_;
   LogView log_;
   std::uint64_t log_serial_ = 0;
   bool show_demo_ = false;

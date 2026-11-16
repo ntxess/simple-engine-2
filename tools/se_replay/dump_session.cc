@@ -40,6 +40,7 @@ constexpr std::size_t kDirectoryEntrySize = 12;
 constexpr std::uint32_t kBreadcrumbsStream = 0x53450001;
 constexpr std::uint32_t kInputFrameRingStream = 0x53450002;
 constexpr std::uint32_t kSessionHeaderStream = 0x53450005;
+constexpr std::uint32_t kPlayStartStream = 0x53450006;
 constexpr std::uint64_t kTickWrap = kBreadcrumbTickMask + 1;
 constexpr std::uint8_t kSlotLive = 1;
 
@@ -221,6 +222,15 @@ std::expected<DumpedSession, Error> ReadDumpedSession(
   if (const auto table = Find(*streams, kBreadcrumbsStream)) {
     ReadMain(*table, session);
   }
+  // A withdrawn Play-start stream is an entry without bytes.
+  if (const auto start = Find(*streams, kPlayStartStream);
+      start && !start->empty()) {
+    auto bytes = StreamHeader(*start, DumpStreamKind::kBytes, 1, "Play-start");
+    if (!bytes) return std::unexpected(std::move(bytes.error()));
+    const std::span<const std::byte> payload =
+        start->subspan(sizeof(DumpStreamHeader), bytes->capacity);
+    session.play_start.assign(payload.begin(), payload.end());
+  }
   return session;
 }
 
@@ -254,9 +264,16 @@ std::vector<std::byte> WriteMinidump(std::span<const MinidumpStream> streams) {
 }
 
 FromDumpResult ReplayDumpedRampage(const DumpedSession& session,
-                                   const std::string& root) {
+                                   const std::string& root,
+                                   const std::string& start_scene) {
   FromDumpResult result;
   const SessionHeaderRecord& header = session.header;
+  if ((header.flags & kSessionFlagNoSession) != 0) {
+    result.error =
+        "the dump holds no running session (the editor was in Edit mode): "
+        "nothing to replay";
+    return result;
+  }
   if (Text(header.module) != "rampage") {
     result.error = std::format(
         "the dump's session runs module '{}'; --from-dump replays rampage",
@@ -270,7 +287,43 @@ FromDumpResult ReplayDumpedRampage(const DumpedSession& session,
         header.start_tick, header.tick_rate, kDefaultTickRate);
     return result;
   }
-  const std::string scene = root + "/" + std::string(Text(header.scene));
+  // The scene: the game's file under the root, or the editor Play's start
+  // bytes from the dump, with the SessionLog of the edits made during Play.
+  const bool editor_play = (header.flags & kSessionFlagPlayStart) != 0;
+  std::string scene = root + "/" + std::string(Text(header.scene));
+  std::vector<std::byte> session_log;
+  if (editor_play) {
+    if (session.play_start.empty()) {
+      result.error =
+          "the dump's session is an editor Play, but the dump has no "
+          "Play-start stream (0x53450006)";
+      return result;
+    }
+    if (start_scene.empty()) {
+      result.error =
+          "an editor Play session needs a file for its Play-start "
+          "bytes (--start-scene)";
+      return result;
+    }
+    auto file = ReplayReader::Open(session.play_start);
+    if (!file) {
+      result.error =
+          "the dump's Play-start stream: " + std::move(file.error().message);
+      return result;
+    }
+    const std::span<const std::byte> start = file->StartBytes();
+    std::ofstream out(start_scene, std::ios::binary | std::ios::trunc);
+    out.write(reinterpret_cast<const char*>(start.data()),
+              static_cast<std::streamsize>(start.size()));
+    out.close();
+    if (!out) {
+      result.error = "cannot write the Play-start bytes to " + start_scene;
+      return result;
+    }
+    scene = start_scene;
+    const std::span<const std::byte> log = file->SessionBytes();
+    session_log.assign(log.begin(), log.end());
+  }
   const std::optional<std::vector<std::byte>> bytes = ReadFile(scene);
   if (!bytes) {
     result.error = "cannot read the session's scene " + scene;
@@ -311,6 +364,7 @@ FromDumpResult ReplayDumpedRampage(const DumpedSession& session,
   options.scene.legacy_root = root;
   options.seed = header.seed;
   options.ticks = result.last_tick;
+  options.session = std::move(session_log);
   testing::FrameListInput input(session.frames);
   options.input = &input;
   testing::RampageSessionResult run = testing::RunRampageSession(options);

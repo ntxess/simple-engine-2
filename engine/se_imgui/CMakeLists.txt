@@ -46,6 +46,7 @@ se_add_module(se_imgui KIND STATIC
     $<TARGET_OBJECTS:se_imgui_third_party>
   PUBLIC_DEPS
     se_core
+    se_platform
     se_render
     SDL3::SDL3-static
   FORBID

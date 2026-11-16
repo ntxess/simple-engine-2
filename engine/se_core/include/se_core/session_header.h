@@ -49,6 +49,8 @@ struct SessionHeaderInfo {
   Tick start_tick = 1;
   // InputFrameRing::Head() when the session began.
   std::uint64_t first_frame = 0;
+  // kSessionFlag* (se_core/dump_stream.h).
+  std::uint32_t flags = 0;
 };
 
 class SessionHeaderStream {

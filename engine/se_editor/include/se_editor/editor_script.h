@@ -54,6 +54,19 @@
 //   expect-entities document|play N
 //   expect-recovery [yes|no]       the document's recovery file exists
 //   expect-quit-pending [yes|no]
+//   show-panel NAME                brings the panel's window (its dock tab)
+//                                  to the front; NAME is the rest of the
+//                                  line ("Stress generator")
+//   expect-panel NAME              the panel drew in the last frame
+//   expect-viewport [yes|no|window]
+//                                  a panel asked for an offscreen viewport
+//                                  in the last frame (the World is drawn
+//                                  into it, not into the composite);
+//                                  "window": exactly when the editor has a
+//                                  window (headless has no viewports)
+//   expect-fork-sites N            the frame's stats list at least N fork
+//                                  sites, none enabled, with no worker
+//   expect-dump-stream [yes|no]    the Play-start dump stream is registered
 //   dump-hash FILE                 writes "document H", "play H", "tick T"
 //   throttle-disk MS               every file write step takes MS ms more
 //                                  (se::fs's fault injector, test builds)

@@ -35,12 +35,14 @@
 #include "se_editor/edit_document.h"
 #include "se_editor/editor.h"
 #include "se_editor/editor_script.h"
+#include "se_editor/editor_stats.h"
 #include "se_editor/play_session.h"
 #include "se_editor/recovery.h"
 #include "se_os/thread.h"
 #include "se_platform/fs.h"
 #include "se_platform/fs_faults.h"
 #include "se_runtime/app.h"
+#include "se_runtime/heartbeat.h"
 #include "src/editor_internal.h"
 #include "src/json_value.h"
 #include "src/play_states.h"
@@ -139,6 +141,11 @@ constexpr VerbSpec kVerbs[] = {
     {"expect-quit-pending", 0, 1, false},
     {"terminate", 0, 0, false},
     {"key", 1, 1, false},
+    {"show-panel", 1, 1, true},
+    {"expect-panel", 1, 1, true},
+    {"expect-viewport", 0, 1, false},
+    {"expect-fork-sites", 1, 1, false},
+    {"expect-dump-stream", 0, 1, false},
 };
 
 // "ctrl+z", "shift+f5", "f10": modifiers, then one of ImGui's named keys
@@ -270,6 +277,8 @@ std::expected<void, Error> Editor::OpenDocument(App& app,
   if (play_) {
     return Fail(ErrorCode::kInvalidArgument, "Stop before opening a document");
   }
+  // A synchronous load on main: known long work to the watchdog (M12).
+  const HeartbeatScope beat = app.KnownLongWork("open document");
   auto text = fs::ReadTextFile(path);
   if (!text) return std::unexpected(std::move(text.error()));
   DocumentDesc desc;
@@ -589,14 +598,21 @@ void Editor::StartPlay(App& app, PlayKind kind) {
     }
   }
   const std::vector<std::byte> start_bytes = start.bytes;
-  auto session = PlaySession::Start(*app.GameInstance(), *app.GamePool(), game_,
-                                    std::move(start), app.Assets());
+  std::expected<std::unique_ptr<PlaySession>, Error> session;
+  {
+    // The serializer round trip into the play World, on main: known long
+    // work to the watchdog (M12).
+    const HeartbeatScope beat = app.KnownLongWork("play start");
+    session = PlaySession::Start(*app.GameInstance(), *app.GamePool(), game_,
+                                 std::move(start), app.Assets());
+  }
   if (!session) {
     SE_LOG_ERROR("play: {}", session.error().message);
     return;
   }
   play_ = std::move(*session);
   ++play_count_;
+  AttachPlayDump();
   // Gameplay assets freeze until Stop; visual swaps go to the SessionLog.
   if (AssetRuntime* assets = app.Assets()) {
     assets->Registry().SetGameplayFrozen(true);
@@ -630,6 +646,8 @@ void Editor::StopPlay(App& app) {
     SubmitWrite(app, app.Paths().pref + "sessions/last-play.sereplay",
                 std::move(replay), /*durable=*/true);
   }
+  // The dump streams describe no session from here on.
+  DetachPlayDump();
   // Its voices stop with its World (the AudioEvents' scope).
   play_.reset();
   // Gameplay assets changed during Play reload now.
@@ -1206,6 +1224,65 @@ bool Editor::RunAction(App& app, const ScriptAction& action) {
     const bool want = YesNo(action, true);
     const bool have = document_ && document_->Dirty();
     if (want != have) ScriptFailure(action, have ? "dirty" : "not dirty");
+    return true;
+  }
+  if (verb == "show-panel") {
+    bool known = false;
+    for (const auto& panel : panels_) known = known || panel->Name() == args[0];
+    if (!known) {
+      ScriptFailure(action, "no panel '" + args[0] + "'");
+      return true;
+    }
+    // Taken by the next UI frames (DrawUi), one window a frame.
+    focus_queue_.push_back(args[0]);
+    return true;
+  }
+  if (verb == "expect-panel") {
+    if (!PanelDrewLastFrame(args[0])) {
+      ScriptFailure(action,
+                    std::format("panel '{}' did not draw in the last frame "
+                                "({} draws so far)",
+                                args[0], PanelDraws(args[0])));
+    }
+    return true;
+  }
+  if (verb == "expect-viewport") {
+    // "window": exactly when the editor draws to a window (a headless
+    // editor has no renderer and no viewports).
+    const bool window = !args.empty() && args[0] == "window";
+    const bool want = window ? app.Renderer() != nullptr : YesNo(action, true);
+    const bool have = viewport_drawn_;
+    if (want != have) {
+      ScriptFailure(action,
+                    have ? "a viewport was drawn" : "no viewport was drawn");
+    }
+    return true;
+  }
+  if (verb == "expect-fork-sites") {
+    const auto count = ParseU64(args[0]);
+    if (!count) {
+      ScriptFailure(action, "bad count");
+      return true;
+    }
+    std::size_t enabled = 0;
+    for (const ForkSiteStats& site : fork_sites_) {
+      if (site.enabled) ++enabled;
+    }
+    if (fork_sites_.size() < *count || enabled != 0 ||
+        stats_.fork_workers != 0) {
+      ScriptFailure(action, std::format("{} fork sites, {} enabled, {} workers",
+                                        fork_sites_.size(), enabled,
+                                        stats_.fork_workers));
+    }
+    return true;
+  }
+  if (verb == "expect-dump-stream") {
+    const bool want = YesNo(action, true);
+    const bool have = PlayDumpAttached();
+    if (want != have) {
+      ScriptFailure(action, have ? "the Play-start stream is registered"
+                                 : "no Play-start stream is registered");
+    }
     return true;
   }
   if (verb == "expect-state") {

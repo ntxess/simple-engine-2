@@ -5,7 +5,7 @@
 // M10, the panel interface and the Profiler and Schedule panels; ADR-095).
 // The pointers and spans are valid for the frame's Draw calls only; any
 // may be null or empty (a headless editor has no pacer or renderer, and
-// fork sites arrive with M14's pool).
+// headless panel tests fill only what they show).
 
 #ifndef SE_EDITOR_EDITOR_STATS_H_
 #define SE_EDITOR_EDITOR_STATS_H_
@@ -24,11 +24,13 @@
 
 namespace se::editor {
 
-// One fork site's state (M14: the pool's ForkStats; sites ship disabled).
+// One fork site's state (the pool's record: ForkJoinPool::Sites(); sites
+// ship disabled).
 struct ForkSiteStats {
   std::string_view name;
   bool enabled = false;
-  // The site runs inline after a slow join until this time (ns, 0: no).
+  // The site runs inline after a slow join until this time (ns on the
+  // pool's clock; 0: no fallback window is open).
   std::uint64_t inline_until_ns = 0;
   jobs::ForkStats stats;
 };
@@ -64,14 +66,18 @@ struct EditorStats {
 
   // The module's systems: per-system timing rings (built-ins first).
   std::span<const SystemStats> systems;
-  // Phase totals of the last tick, serial time (ns), by Phase.
+  // Phase totals of the last tick (ns), by Phase: the systems' time, of
+  // which phase_parallel_ns was spent inside threaded forks (publish to
+  // join; 0 while every fork site runs inline). The serial time of a phase
+  // is the difference. phase_parallel_ns is empty when it is not measured.
   std::span<const std::uint64_t> phase_ns;
+  std::span<const std::uint64_t> phase_parallel_ns;
 
   // The renderer's last frame and totals.
   const Renderer2DStats* render = nullptr;
   const Renderer2DTotals* render_totals = nullptr;
 
-  // Fork sites and the pool (M14).
+  // The pool's fork sites, and its workers (0 until a site is enabled).
   std::span<const ForkSiteStats> fork_sites;
   int fork_workers = 0;
 };
