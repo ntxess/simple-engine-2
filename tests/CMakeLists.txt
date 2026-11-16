@@ -129,6 +129,7 @@ if(NOT CMAKE_BUILD_TYPE STREQUAL "Release")
     "view_after_structural_change|a structural change invalidated this ParallelView"
     "view_after_remove_and_emplace|a structural change invalidated this ParallelView"
     "play_mutation_gate_closed|Play World mutated while its MutationGate is closed"
+    "document_mutation_outside_command|document World mutated outside an editor command"
     "access_from_another_thread|World accessed from a thread that does not own it"
     "inline_owner_off_main|InlineOwnerScope outside the main thread"
     "duplicate_guid|Guid already in use in this World"
@@ -200,6 +201,8 @@ if(SE_BUILD_PLATFORM)
   add_subdirectory(render_gpu)
   # M9: the background lane and the AssetRegistry.
   add_subdirectory(assets)
+  # M10a: the editor shell (headless; its desktop tests through scripts).
+  add_subdirectory(editor)
   add_subdirectory("${CMAKE_SOURCE_DIR}/tools/render_shot"
                    "${CMAKE_BINARY_DIR}/tools/render_shot")
   # M10b: the editor's panels, headless.

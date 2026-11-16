@@ -243,6 +243,12 @@ function(se_register_checks)
   set_tests_properties(checks.gpu_texture_members
     checks.planted.gpu_texture_member
     checks.planted.gpu_texture_member_allowed PROPERTIES LABELS checks)
+  # M10a: ImTextureID (and ImTextureRef) members are texture members too.
+  add_test(NAME checks.planted.imtexture_member
+    COMMAND Python3::Interpreter "${_tools}/check_gpu_members.py"
+            --planted "${_planted}/imtexture_member")
+  set_tests_properties(checks.planted.imtexture_member PROPERTIES
+    LABELS checks)
 
   # Linters.
   find_program(SE_CLANG_FORMAT clang-format)
