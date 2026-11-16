@@ -41,21 +41,45 @@ def run(cmd, **kwargs):
     return subprocess.run(cmd, capture_output=True, text=True, **kwargs)
 
 
+# Windows' CreateProcess takes at most 32767 characters of command line:
+# the file list is passed in batches below that (every file is still
+# checked; the first failing batch's code is the result).
+MAX_COMMAND_CHARS = 24000
+
+
+def batches(files):
+    batch, size = [], 0
+    for path in map(str, files):
+        if batch and size + len(path) + 3 > MAX_COMMAND_CHARS:
+            yield batch
+            batch, size = [], 0
+        batch.append(path)
+        size += len(path) + 3
+    if batch:
+        yield batch
+
+
+def run_batched(prefix, files, **kwargs):
+    code, outputs = 0, []
+    for batch in batches(files):
+        result = run([*prefix, *batch], **kwargs)
+        if result.returncode != 0 and code == 0:
+            code = result.returncode
+        output = (result.stdout + result.stderr).strip()
+        if output:
+            outputs.append(output)
+    return code, "\n".join(outputs)
+
+
 def clang_format(tool, files, fix):
     if fix:
-        result = run([tool, "-i", "--style=file", *map(str, files)])
-    else:
-        result = run([tool, "--dry-run", "--Werror", "--style=file",
-                      *map(str, files)])
-    output = (result.stdout + result.stderr).strip()
-    return result.returncode, output
+        return run_batched([tool, "-i", "--style=file"], files)
+    return run_batched([tool, "--dry-run", "--Werror", "--style=file"], files)
 
 
 def cpplint(files):
-    result = run([sys.executable, "-m", "cpplint", "--quiet",
-                  *map(str, files)], cwd=REPO)
-    output = (result.stdout + result.stderr).strip()
-    return result.returncode, output
+    return run_batched([sys.executable, "-m", "cpplint", "--quiet"], files,
+                       cwd=REPO)
 
 
 def clang_tidy_one(tool, build_dir, path):

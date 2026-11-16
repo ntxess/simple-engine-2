@@ -3029,6 +3029,270 @@ settles` appends to a watched file every 25 ms for 400 ms under a 100 ms
 scan: the old rule reported once per scan during the writes, the new one
 reports the finished size once (twice at most on a stalled writer).
 
+## ADR-095 se_imgui and the panel interface's details (2026-11-10)
+
+**Decision.** The M10 panel interface (docs/milestone-specs.md "The panel
+interface") is engine/se_editor/include/se_editor/panel.h, namespace
+`se::editor`, with the spec's PanelContext fields, Panel and
+EditorCommands as written, and these details the spec leaves open:
+- PanelContext gains three fields after the spec's: `paused` (Play.Paused
+  or Stepping), `play_edits` (a `PlayEdits*`, non-null while playing and
+  not faulted) and `viewports` (an `EditorViewports*`, null without a
+  renderer). `commands` stays null while playing or faulted, as the spec
+  says; edits of the play World (the inspector during Play, the stress
+  generator's spawns) go through `PlayEdits::Submit(command, tick)`, which
+  turns the command into SessionLog entries (EditorCommand::ToSession)
+  against a tick (0: the next), applied at once while paused and
+  discarded at Stop. `EditorViewports::Viewport(name)` hands a panel an M7
+  ViewportTarget that the editor draws the context's World into before
+  the ImGui pass (created on first use, destroyed at the next frame start
+  when a frame did not ask for it); the panel shows its TargetTexture()
+  through TextureIds.
+- `EditorCommand` (commands.h): `Kind()` (a CommandKind enum, because RTTI
+  is banned and coalescing needs to compare kinds), `Label()`, `Target()`,
+  `Apply(World&)` and `Revert(World&)` returning `std::expected<void,
+  Error>`, `ToSession(registry, tick)` and `Absorb(next)` for coalescing.
+  The kinds are SetComponentCommand (before and after JSON; an empty
+  before adds and its revert removes), AddComponentCommand,
+  RemoveComponentCommand (its value captured when it applies),
+  CreateEntityCommand and DestroyEntityCommand (the entity stored as
+  every registered component it holds except IdComponent and
+  DestroyRequest, Spawned and PrevTransform included, so an undone
+  destroy hashes the same), PathPointCommand (Insert, Move, Delete of one
+  point of a path component's "points" array; before and after JSON
+  computed when it is made from the World the panel sees) and
+  CommandGroup (one undo step of several). All work through the
+  ComponentRegistry's JSON hooks; the editor's small JSON model
+  (src/json_value.h) edits path points without glaze.
+- `TextureIds` is an abstract class (`Id(handle)` and `Size(handle)`):
+  the editor's implementation resolves through GpuResources and the
+  SDL_GPU backend, M10b's tests give a fake. `EditorStats` is a struct of
+  values and frame-valid pointers (the pacer's frame and totals, the
+  plan, the stepper's stats, the Schedule's SystemStats, Renderer2D's
+  stats, ForkSiteStats for M14). `LogView` is a fixed ring of formatted
+  lines with their levels and the log rings' drop and rate-limit counts.
+  `Selection` holds Guids.
+- se_imgui builds ImGui's sources, imgui_stdlib and the SDL3 and SDL_GPU
+  backends from the pinned archive as an OBJECT library folded into
+  se_imgui, without the engine's warning set and outside lint. Its
+  IMGUI_USER_CONFIG, se_imgui/imconfig_se.h, makes GImGui a
+  `thread_local` (`g_se_imgui_context`), keeps IM_ASSERT on in every
+  build through se::AssertFailed, turns IM_DEBUG_BREAK into the same
+  failure (no debugger break in the process), and disables ImGui's own
+  Win32 and shell calls (the SDL3 backend provides them) and the obsolete
+  API. `se::imgui::Context` creates the one context on main with docking
+  and gamepad navigation on, multi-viewports opt-in, ImGui's default font
+  in the dynamic atlas and no ini file (settings to and from memory);
+  `HeadlessFrames` runs frames without a window or GPU, answering the
+  atlas's texture requests, for the editor's and M10b's tests.
+- check_gpu_members.py treats `ImTextureID` and `ImTextureRef` as texture
+  types (every module but se_render), with the planted fixture
+  tools/checks/planted/imtexture_member (`checks.planted.imtexture_member`)
+  and allowed forms in gpu_texture_member_allowed.
+
+**Why.** The spec's PanelContext names commands as null while Playing, yet
+the design queues edits during Play in the SessionLog and M10b's stress
+generator spawns through it in Play: a separate interface keeps the
+spec's field meaning and gives Play edits their own path. The viewport
+panel needs targets the editor owns (Renderer2D creates them on main and
+the frame draws them), which nothing in the spec's context provides. The
+headers are what M10b builds against, so later changes to them are
+additive only.
+
+## ADR-096 Document Worlds are closed outside commands (2026-11-10)
+
+**Decision.** World::Reg() and MutableClock() assert an open MutationGate
+for `WorldKind::kEditDocument` Worlds as they already do for kPlay
+(se_core/src/world.cc; "document World mutated outside an editor
+command"). The editor opens a kLoad gate to load a document and a
+kEditorCommand gate around each command's Apply or Revert; nothing else
+may change a document. `death.document_mutation_outside_command` checks
+the assert. A path-point command that changes the point count restarts the
+path's progress (segment, u, done) when its segment no longer exists, so
+a SessionLog edit during Play never leaves a path pointing past its
+points.
+
+**Why.** The spec's "a headless test fails on any Edit-mode mutation made
+outside commands (the World's mutation gate, M2, closed while in Edit
+mode outside command application)". Using M2's gate means every path into
+the registry is covered (Reg(), Create, RequestDestroy, the clock), with
+no second mechanism.
+
+## ADR-097 The editor is the App's extension; its sessions are GameStateStacks (2026-11-10)
+
+**Decision.** The editor runs on se_runtime's App (boot, lifecycle,
+FramePacer, FixedStepper, background lane, Renderer2D, shutdown order)
+through `AppExtension` (se_runtime/app_extension.h), which
+`GameSetup::extension` installs; se_runtime never links ImGui. The App
+calls the extension's OnEvent before its own event handling (input the
+extension takes skips the game's InputService), BeginFrame after the
+quit poll (the frame's session: which GameStateStack loads assets and
+draws, whether ticks run, editor Play, Idle allowed, an accumulator
+reset), TickFrame instead of ticking the game's stack, BuildFrame every
+iterate (rendered or not, so a headless App still runs the UI frame),
+OnRenderFault, EndFrame, OnDeviceLost and OnDeviceRecreated,
+ShutdownWorlds (shutdown step 5) and ShutdownUi (step 11). `GameSetup`
+gains `push_start_state` (the editor starts in Edit mode with the game's
+stack empty), `default_pacing` and `frame_latency` (what `--pacing auto`
+means: the editor's Standard with latency 2), and `raw_keyboard` (off for
+the editor: IME, hotkeys); `Lifecycle::SetIdleAllowed` switches Idle per
+frame (Edit mode only). The App exposes `GameInstance()`, `GamePool()` and
+`Logs()`.
+- The editor's sessions are GameStateStacks: the document state (the
+  EditDocument's World, never stepped), the Play stack (the play World as
+  the one state, registered under the module's start-state id so that the
+  stack's per-tick hash is the one a headless run of the same start bytes
+  computes) and 'Play game' (the module's own stack from its start state,
+  pointed at the Play-start bytes written to <pref>play-game.scene.json
+  through `EditorGame::set_play_game_scene`). Each Play session has its
+  own SimDriver (from tick 1), SessionLog and ReplayRecorder, the game's
+  Schedule and pool, and the AssetRuntime as its TickGate. An editor
+  AssetScope retains every texture and sound of the tables, so switching
+  stacks reloads nothing.
+- The game's scene loader and writer reach the editor as `EditorGame`
+  (se_editor/editor_game.h), filled by the editor executable: se_editor
+  never links a game module (FORBID game_rampage).
+- Edits during Play are SessionLog entries (`PlayEdits`, ADR-095). Pause
+  and Step stop the play state's SimRunning, so SessionLog::Enqueue
+  applies them at once and logs them against the next tick. Play game's
+  states are the module's: while it is paused its edits wait for its next
+  tick (the one difference from Play).
+- Pause does not write the play World. The design's "Pause sets prev :=
+  current once" (no backward snap on resume) is `PlaySession::DrawsStill()`:
+  the World draws at alpha 1 while Paused, Stepping or Faulted and after a
+  Resume until the first tick has run, which shows what prev := current
+  would show. Writing PrevTransform at the Pause would change a hashed
+  component outside a tick, so the paused World's hash would no longer be
+  the last tick's recorded hash (what the script's `expect-hash play`, a
+  fault's replay and se_replay compare); the next tick's PrevTransformCopy
+  overwrites it either way.
+- se_replay replays an editor session: `--inputs REPLAY --start-scene FILE`
+  writes the replay's start bytes (the Play-start bytes) to FILE and runs
+  them as the scene, and the replay's SessionLog is applied (rampage's own
+  replays carry an empty one).
+- The editor's frame input: ImGui first; the game's InputService only in
+  'Play game' while no ImGui window wants the input; Play itself runs on
+  empty InputFrames (recorded, so it replays).
+- The 60 Hz preview caps the editor's frames at 60 Hz with a sleep after
+  the pacer's wait (the stepper then sees 60 Hz frames).
+- FramePacer: in Standard mode a present is targeted L vblanks after the
+  frame's vblank (L - 1 presents are queued ahead of it at frame latency
+  L). Before, every present at latency 2 counted one vblank late and
+  HalfRate entered by misses on an editor that presented every vblank
+  (measured on the 165 Hz display: 139 of 152 presents "missed"; 0 of 152
+  with the change). Latency 1 is unchanged. `pacing.Standard at frame
+  latency 2: a present behind one is on time` checks it on the fake
+  display, whose waits follow the set frame latency when a test asks
+  (FakePresentPort::model_frame_latency).
+
+**Why.** The spec puts the editor on "the single loop": duplicating the
+App's boot, pacing and shutdown order in se_editor would fork them; hooks
+keep them in one place. GameStateStacks for the sessions keep the asset
+scopes, holds, render sources and SimDriver as they are.
+
+## ADR-098 ImGui in the swapchain pass; saves, recovery and dialogs (2026-11-10)
+
+**Decision.**
+- Renderer2D draws a `SwapchainOverlay` (FrameRequest::overlay) inside the
+  swapchain pass after the composite's blit, and again in RepresentLast()
+  (HalfRate's re-present shows the same UI). `se::imgui::ImGuiRenderer` is
+  that overlay: BeforeFrame runs ImGui's texture updates (the backend
+  submits each in a command buffer of its own, so before the frame's),
+  Prepare runs PrepareDrawData on the frame's command buffer outside any
+  pass, Draw runs RenderDrawData through a debug wrapper. The backend's
+  vertex and index buffers are pre-sized at 128 K vertices and 384 K
+  indices; a frame that needs more grows them (doubling) and the growth is
+  logged at the next NewFrame. ImGui v1.93.0's backend no longer calls
+  SDL_WaitForGPUIdle when it grows a buffer (the archive's changelog,
+  2026-02-25), so growth costs a buffer recreation, not the GPU stall the
+  spec expected.
+- GpuResources keeps a release log (builds with asserts, 256 entries per
+  frame): `MarkFrameStart()` at the editor's frame start, every texture
+  release recorded, a texture created again at the same address dropped
+  from it. The debug wrapper asserts that no user texture the draw data
+  binds (ImGui's own atlas aside) is in it.
+- `TextureIds` resolves a Handle<Texture> through GpuResources every
+  frame; headless it returns placeholder ids.
+- The document's saves, autosaves, the dock layout, the Play-start bytes,
+  the last Play session's replay and a fault's files go through the
+  background lane as SaveRequests (Durable ones in the Urgent class, and
+  the quit waits for them; autosaves and the Play-start bytes as
+  Background jobs). The editor follows its tickets through
+  `AssetRuntime::SetForeignListener`. A recovery file is
+  <pref>recovery/<name>-<hash>.serecovery (se-recovery-v1: the document's
+  path, name, revision and scene text, se_editor/recovery.h); it is
+  written after 2 s without input or document change, once per revision,
+  removed when the document is saved, offered when the document is opened
+  again (a modal, or the script's `recovery accept|discard`), and written
+  synchronously by the recovery hook (WM_QUERYENDSESSION, TERMINATING)
+  with se::fs::WriteFileAtomic.
+- The quit (QuitProvider "editor"): kPending while a file dialog is open;
+  a dirty document opens the prompt (Save, Don't Save, Cancel; a script
+  answers with `quit save|discard|cancel`); Save submits the document and
+  the dock layout as Durable jobs and a progress modal waits for their
+  completions; a failed save keeps the document dirty, shows its error and
+  answers kCancel.
+- DialogMailbox: a shared_ptr whose SDL userdata is a heap ticket holding
+  a reference; the callback (any thread) copies the paths, counts, calls
+  WakeMain (which pushes only inside ADR-047's window) and returns.
+  Results that arrive while a quit is pending are counted and ignored;
+  Close() at shutdown step 5 marks later ones as late.
+- Editor Play freezes gameplay assets (AssetRegistry::SetGameplayFrozen:
+  prefab and scene-chunk changes wait for Stop) and reports visual swaps
+  (textures, sounds) to the play session's SessionLog as kAssetSwap
+  entries. The play World never reads gameplay assets after its start in
+  M10 (its scene is the flattened Play-start bytes), so the freeze has no
+  effect on rampage yet.
+
+**Why.** The design's frame order (ImGui after the blit, PrepareDrawData
+before the pass, texture uploads before the frame) and red team C2 (a
+texture-backed view cached across frames) fix the overlay's steps; the
+lane already gives Durable, revisioned, renamed writes, so every editor
+file goes through it.
+
+## ADR-099 Play.Faulted's fault boundary; the editor script (2026-11-10)
+
+**Decision.**
+- ADR-006's list of `// se-fault-boundary` files gains
+  engine/se_editor/src/play_fault_boundary.cc: RunContained catches what a
+  play tick (SimDriver::TickInline of the play session) or the play
+  World's RenderList build throws, copies what() into a fixed buffer
+  first (ADR-038) and returns it with the main thread's breadcrumb. The
+  session enters Play.Faulted: no more ticks or edits, drawn at alpha 1 on
+  the guarded path (the editor builds the play World's RenderLists itself,
+  in the boundary, and hands Renderer2D the lists), the replay, SessionLog,
+  breadcrumb stream and a fault.txt saved under
+  <pref>faults/play-N-tick-T/ as Durable lane jobs, and a fault dump
+  requested (integration::RequestFaultDump). A second render throw stops
+  drawing the World; the panels still read it until Stop. A render-build
+  fault Renderer2D reports while playing (OnRenderFault) is handled the
+  same way.
+- Test hooks: `inject-throw tick` throws from the tick's audio drain,
+  inside SimDriver::RunTick after the Worlds stepped (no system of the game
+  is changed); `inject-throw render` throws from the next guarded
+  RenderList build.
+- `--editor-script FILE` (test builds; se_editor/editor_script.h): one
+  action per frame at the frame start, so a command applies (after this
+  frame's ImGui::Render) before the next action looks at the document;
+  waits (`wait-ticks`, `wait-frames`, `wait-ms`, `step`) hold the script
+  for at most 60 s. The script's quit does not end it (dialogs and saves
+  drain while it waits), and a failed action makes the process exit with a
+  failure. The script tests run headless (SDL's dummy video and
+  `--fixed-frame-dt 8.3333`: one tick a frame, so a 300-tick play takes
+  well under a second) and in an unfocused window (label desktop).
+- The editor's hotkeys are ImGui global shortcuts (`ImGui::Shortcut` with
+  `ImGuiInputFlags_RouteGlobal`, submitted from the menu bar): Ctrl+S
+  saves, Ctrl+Z and Ctrl+Y undo and redo (Edit mode only; a focused text
+  field keeps its own), F5 plays or resumes, Shift+F5 stops, F10 steps.
+  The script's `key CHORD` feeds a chord to ImGui's event queue
+  (io.AddKeyEvent, pressed for one frame; never OS input), which is how
+  `editor.script.hotkeys` tests them headless.
+
+**Why.** The design names Play tick and render isolation as fault
+boundaries; building the play World's lists in the editor's own boundary
+contains a game's render throw without a second boundary in se_render and
+works headless, where the tests run everywhere.
+
 ## ADR-104 Hangs are counted from the last observed progress; the watchdog samples four times a period (2026-11-10)
 
 **Decision.** M12 turns hang declaration on (`HangDetectorConfig::

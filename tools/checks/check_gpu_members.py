@@ -1,4 +1,5 @@
-"""Bans SDL_GPUTexture members outside se_render (docs/milestone-specs.md M7).
+"""Bans SDL_GPUTexture members outside se_render (docs/milestone-specs.md M7)
+and ImTextureID members (M10a).
 
 GpuResources::Resolve returns a texture that is valid for the current frame
 only: SDL's D3D12 backend frees a texture's client container when it is
@@ -13,6 +14,10 @@ form (ADR-069):
     SDL_GPUTextureSamplerBinding, SDL_GPUBlitInfo and the others below);
   - a member whose type is an alias (using, typedef) of any of these,
     aliases of aliases included, wherever the alias is declared.
+An ImTextureID names the same per-frame texture (the SDL_GPU backend's id
+is the SDL_GPUTexture*), so ImTextureID and ImTextureRef, which carries one,
+are texture types too (M10a, ADR-095): the editor's panels ask TextureIds
+for an id every frame and never keep it.
 Member function declarations that take or return one are fine, and so are
 function-pointer members, locals and parameters. A std::function member
 whose signature returns one is reported too (keep a Handle).
@@ -53,6 +58,9 @@ TEXTURE_TYPES = (
     "SDL_GPUDepthStencilTargetInfo",
     "SDL_GPUTextureSamplerBinding",
     "SDL_GPUStorageTextureReadWriteBinding",
+    # Dear ImGui's texture ids (M10a).
+    "ImTextureID",
+    "ImTextureRef",
 )
 ACCESS_SPECIFIERS = {"public", "private", "protected"}
 CLASS_HEAD_RE = re.compile(
@@ -285,8 +293,9 @@ def scan_text(text, aliases):
 def scan_file(path, aliases):
     text = path.read_text(encoding="utf-8", errors="replace")
     lines = text.splitlines()
-    return [f"{path}:{number}: SDL_GPUTexture stored as a member outside "
-            f"se_render (keep a Handle<Texture> and resolve it every frame): "
+    return [f"{path}:{number}: a texture (SDL_GPUTexture or ImTextureID) "
+            f"stored as a member outside se_render (keep a Handle<Texture> "
+            f"and resolve it every frame): "
             f"{lines[number - 1].strip() if number <= len(lines) else ''}"
             for number in scan_text(text, aliases)]
 

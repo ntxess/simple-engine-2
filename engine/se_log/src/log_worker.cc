@@ -113,11 +113,25 @@ class PanelSink final : public spdlog::sinks::sink {
     lines_[next_].assign(msg.payload.data(), msg.payload.size());
     next_ = (next_ + 1) % lines_.size();
     count_ = std::min(count_ + 1, lines_.size());
+    ++total_;
   }
   void flush() override {}
   void set_pattern(const std::string& /*pattern*/) override {}
   void set_formatter(
       std::unique_ptr<spdlog::formatter> /*sink_formatter*/) override {}
+
+  bool TryCopySince(std::uint64_t& serial, std::vector<std::string>& out) {
+    const std::unique_lock lock(mutex_, std::try_to_lock);
+    if (!lock.owns_lock()) return false;
+    const std::uint64_t oldest = total_ - count_;
+    const std::uint64_t from = std::max(serial, oldest);
+    for (std::uint64_t line = from; line < total_; ++line) {
+      const std::size_t back = static_cast<std::size_t>(total_ - line);
+      out.push_back(lines_[(next_ + lines_.size() - back) % lines_.size()]);
+    }
+    serial = total_;
+    return true;
+  }
 
   bool TryCopy(std::vector<std::string>& out) {
     const std::unique_lock lock(mutex_, std::try_to_lock);
@@ -136,6 +150,7 @@ class PanelSink final : public spdlog::sinks::sink {
   std::vector<std::string> lines_;
   std::size_t next_ = 0;
   std::size_t count_ = 0;
+  std::uint64_t total_ = 0;
 };
 
 // One call site's rate-limit window.
@@ -541,6 +556,12 @@ bool LogWorker::Running() const noexcept {
 bool LogWorker::TryCopyPanelLines(std::vector<std::string>& lines) const {
   return state_ != nullptr && state_->panel != nullptr &&
          state_->panel->TryCopy(lines);
+}
+
+bool LogWorker::TryCopyPanelLinesSince(std::uint64_t& serial,
+                                       std::vector<std::string>& lines) const {
+  return state_ != nullptr && state_->panel != nullptr &&
+         state_->panel->TryCopySince(serial, lines);
 }
 
 LogWorkerStats LogWorker::Stats() const noexcept {

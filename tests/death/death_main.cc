@@ -261,6 +261,18 @@ void PlayMutationWithGateClosed() {
   static_cast<void>(play.Create(Guid{0, 2}));
 }
 
+// M10a: a document World changes only inside an editor command's gate.
+void DocumentMutationOutsideCommand() {
+  const testing::MainThreadScope main_thread;
+  const InlineOwnerScope owner(OnMainThread());
+  World document(CoreRegistry(), {.kind = WorldKind::kEditDocument});
+  {
+    MutationGate gate = document.OpenGate(GateReason::kEditorCommand);
+    static_cast<void>(document.Create(Guid{0, 1}));
+  }
+  static_cast<void>(document.Create(Guid{0, 2}));
+}
+
 void AccessFromAnotherThread() {
   World world(CoreRegistry(), {});
   std::thread other([&] { TouchRegistry(world); });
@@ -305,6 +317,7 @@ const std::map<std::string, std::function<void()>>& Scenarios() {
       {"view_after_structural_change", ViewAfterStructuralChange},
       {"view_after_remove_and_emplace", ViewAfterRemoveAndEmplace},
       {"play_mutation_gate_closed", PlayMutationWithGateClosed},
+      {"document_mutation_outside_command", DocumentMutationOutsideCommand},
       {"access_from_another_thread", AccessFromAnotherThread},
       {"inline_owner_off_main", InlineOwnerOffMain},
       {"duplicate_guid", DuplicateGuid},

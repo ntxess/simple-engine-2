@@ -344,10 +344,14 @@ FrameClock FramePacer::BeginFrame(bool modal, FixedStepper& stepper) {
                     reading.last_vblank_ns, vblank_ns);
       if (mode_ == PacingMode::kStandard) {
         // The frame starts just after a flip and presents at the next
-        // vblank. In HalfRate a frame holds the screen for two vblanks: its
-        // present targets two vblanks after the previous frame's own was
-        // taken, unless that has passed (ADR-071).
-        frame_target_ns_ = latest + ToNs(vblank_ns * 1e-9);
+        // vblank (with latency 1). In HalfRate a frame holds the screen for two
+        // vblanks: its present targets two vblanks after the previous frame's
+        // own was taken, unless that has passed (ADR-071). With frame latency
+        // L, L - 1 presents are queued ahead of it, one taken per vblank (M10a:
+        // the editor's latency 2; ADR-097).
+        const int queued_ahead = std::max(0, latency_.Latency() - 1);
+        frame_target_ns_ =
+            latest + ToNs(vblank_ns * (1.0 + queued_ahead) * 1e-9);
         if (interval == 2 && half_rate_take_ns_ != 0) {
           frame_target_ns_ =
               std::max(frame_target_ns_,

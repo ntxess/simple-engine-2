@@ -564,6 +564,11 @@ void GpuResources::ReleaseNow(GpuObjectKind kind, void* object) noexcept {
   switch (kind) {
     case GpuObjectKind::kTexture:
       SDL_ReleaseGPUTexture(device, static_cast<SDL_GPUTexture*>(object));
+#if SE_ASSERTS
+      if (released_count_ < released_.size()) {
+        released_[released_count_++] = object;
+      }
+#endif
       break;
     case GpuObjectKind::kBuffer:
       SDL_ReleaseGPUBuffer(device, static_cast<SDL_GPUBuffer*>(object));
@@ -606,8 +611,23 @@ SDL_GPUTexture* GpuResources::CreateGpuTexture(
     const SDL_GPUTextureCreateInfo& info) noexcept {
   SE_ASSERT_GPU_THREAD();
   SDL_GPUTexture* texture = SDL_CreateGPUTexture(Native(), &info);
-  if (texture != nullptr) Created(GpuObjectKind::kTexture);
+  if (texture != nullptr) {
+    Created(GpuObjectKind::kTexture);
+    // A new texture at a released one's address is not that texture.
+    for (std::size_t i = 0; i < released_count_; ++i) {
+      if (released_[i] == texture) released_[i] = nullptr;
+    }
+  }
   return texture;
+}
+
+bool GpuResources::ReleasedThisFrame(
+    const SDL_GPUTexture* texture) const noexcept {
+  if (texture == nullptr) return false;
+  for (std::size_t i = 0; i < released_count_; ++i) {
+    if (released_[i] == texture) return true;
+  }
+  return false;
 }
 
 SDL_GPUBuffer* GpuResources::CreateGpuBuffer(

@@ -1,0 +1,8 @@
+# A file dialog open at the quit: the quit waits for it; its callback
+# arrives on another thread after the quit started, changes nothing, and
+# the quit then ends (M10a).
+dialog-open save
+quit discard
+wait-frames 10
+expect-quit-pending yes
+dialog-callback assets/scenes/sandbox.scene.json from-thread

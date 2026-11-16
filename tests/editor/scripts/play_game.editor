@@ -1,0 +1,14 @@
+# 'Play game': the module's own GameStateStack from its start state, on the
+# document as Play serialized it; Pause, Step and Stop as for Play (M10a).
+play-game
+wait-ticks 120
+expect-state playing
+expect-entities play 17
+pause
+step 2
+expect-state paused
+stop
+wait-frames 2
+expect-state edit
+expect-hash document initial
+quit discard

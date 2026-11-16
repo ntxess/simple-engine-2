@@ -1,0 +1,5 @@
+# The start after autosave.editor offers its recovery file; accepted, the
+# document holds the unsaved change (M10a).
+recovery accept
+expect-dirty yes
+quit discard

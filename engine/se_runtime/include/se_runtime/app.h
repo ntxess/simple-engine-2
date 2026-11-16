@@ -143,6 +143,7 @@
 #include "se_render/texture_table.h"
 #include "se_render_core/render_components.h"
 #include "se_runtime/app_config.h"
+#include "se_runtime/app_extension.h"
 #include "se_runtime/asset_runtime.h"
 #include "se_runtime/frame_pacer.h"
 #include "se_runtime/heartbeat.h"
@@ -247,6 +248,20 @@ struct GameSetup {
   std::function<void(App& app)> on_boot;
   std::function<void(App& app, const FrameReport& report)> on_frame;
   std::function<void(App& app, SDL_AppResult result)> on_shutdown;
+
+  // M10a: an extension that owns the frame's session and adds its UI (the
+  // editor; app_extension.h). The App keeps it until its teardown ends.
+  std::shared_ptr<AppExtension> extension;
+  // Push the module's start state at boot (false: the extension decides
+  // what runs; the editor starts in Edit mode).
+  bool push_start_state = true;
+  // What --pacing auto means for this program (the editor: Standard), and
+  // the frame latency the pacer starts with (the editor: 2).
+  PacingRequest default_pacing = PacingRequest::kAuto;
+  int frame_latency = 1;
+  // SDL's raw keyboard (the editor turns it off: IME, hotkeys); also
+  // --no-raw-keyboard.
+  bool raw_keyboard = true;
 };
 
 using GameFactory =
@@ -297,6 +312,14 @@ class App final : public WindowListener {
   void OnModalChanged(bool modal) noexcept override;
 
   [[nodiscard]] const AppConfig& Config() const noexcept { return config_; }
+  // The game's module instance and fork pool (boot step 10 to shutdown
+  // step 6), for an extension's sessions; null outside them.
+  [[nodiscard]] ModuleInstance* GameInstance() noexcept;
+  [[nodiscard]] jobs::ForkJoinPool* GamePool() noexcept;
+  // The log worker (boot step 2 to shutdown step 16), or null.
+  [[nodiscard]] integration::Logging* Logs() noexcept {
+    return logging_ ? &*logging_ : nullptr;
+  }
   [[nodiscard]] const ContentPaths& Paths() const noexcept { return paths_; }
   [[nodiscard]] const Lifecycle& GetLifecycle() const noexcept {
     return lifecycle_;
@@ -391,6 +414,13 @@ class App final : public WindowListener {
   // An Error is a fault of the render build phase.
   std::expected<void, Error> RenderFrame(FrameReport& report, double& wait_sec)
       SE_REQUIRES(g_main);
+  // The frame's layers from |states|' render sources (M10a: split out of
+  // RenderFrame for the extension).
+  void FillLayers(const GameStateStack& states, const StepPlan& plan)
+      SE_REQUIRES(g_main);
+  // The stack whose assets load and whose Worlds draw: the extension's
+  // session, else the game's.
+  [[nodiscard]] const GameStateStack& ActiveStates() const;
   [[nodiscard]] Camera2D CameraFor(const World& world) const;
   // The --reload-texture hooks due at this iterate (through the lane, M9)
   // and the M7 readbacks.
@@ -502,6 +532,12 @@ class App final : public WindowListener {
   UserSettings settings_;
   std::unique_ptr<audio::AudioEngine> audio_;
   std::unique_ptr<GameRuntime> game_;
+  // M10a: the extension's session of this frame and its render request.
+  ExtensionSession ext_session_;
+  std::vector<ViewportDraw> ext_viewports_;
+  SwapchainOverlay* ext_overlay_ = nullptr;
+  ClearColor ext_clear_;
+  bool ext_frame_ready_ = false;
   // M8: gamepads are opened on main as SDL reports them; the sampler
   // updates them.
   Gamepads gamepads_;

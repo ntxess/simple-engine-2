@@ -523,7 +523,8 @@ bool Renderer2D::DrawTarget(FrameRecorder& recorder,
 }
 
 void Renderer2D::Blit(FrameRecorder& recorder, SDL_GPUTexture* swapchain,
-                      const ClearColor& clear) noexcept {
+                      const ClearColor& clear,
+                      SwapchainOverlay* overlay) noexcept {
   SDL_GPUColorTargetInfo info{};
   info.texture = swapchain;
   info.clear_color = ToFColor(clear);
@@ -541,6 +542,10 @@ void Renderer2D::Blit(FrameRecorder& recorder, SDL_GPUTexture* swapchain,
         resources_->Resolve(composite_).texture, nearest_};
     SDL_BindGPUFragmentSamplers(pass, 0, &binding, 1);
     SDL_DrawGPUPrimitives(pass, 3, 1, 0, 0);
+  }
+  if (overlay != nullptr) {
+    overlay->Draw(recorder.Commands(), pass, recorder.SwapchainWidth(),
+                  recorder.SwapchainHeight());
   }
   recorder.EndRenderPass();
 }
@@ -635,7 +640,10 @@ FrameResult Renderer2D::Frame(const FrameRequest& request) {
   last_.quads = frame_quads_;
   last_.batches = static_cast<std::uint32_t>(draws_.size());
 
-  // 2. Prepare.
+  // 2. Prepare. The overlay's own submissions (ImGui's texture uploads)
+  // go first.
+  last_overlay_ = request.overlay;
+  if (request.overlay != nullptr) request.overlay->BeforeFrame();
   PrepareOptions options;
   options.uploads = planned_upload_bytes_ > 0;
   auto recorder =
@@ -671,10 +679,14 @@ FrameResult Renderer2D::Frame(const FrameRequest& request) {
     if (target.composite) composite_drawn_ = true;
   }
   if (request.present && device_->ClaimedWindow() != nullptr) {
+    // The overlay's copies, outside any pass, before the acquire.
+    if (request.overlay != nullptr) {
+      request.overlay->Prepare(recorder->Commands());
+    }
     SDL_GPUTexture* swapchain = recorder->AcquireSwapchain();
     if (swapchain != nullptr) {
-      // 4. The swapchain pass.
-      Blit(*recorder, swapchain, request.clear);
+      // 4. The swapchain pass: the blit, then the overlay.
+      Blit(*recorder, swapchain, request.clear, request.overlay);
     } else {
       result.null_acquire = true;
       last_.null_acquire = true;
@@ -704,7 +716,7 @@ FrameResult Renderer2D::RepresentLast() {
   if (device_->ClaimedWindow() != nullptr) {
     SDL_GPUTexture* swapchain = recorder->AcquireSwapchain();
     if (swapchain != nullptr) {
-      Blit(*recorder, swapchain, ClearColor{});
+      Blit(*recorder, swapchain, ClearColor{}, last_overlay_);
     } else {
       result.null_acquire = true;
       ++totals_.null_acquires;

@@ -1,0 +1,16 @@
+# A throw in the play World's RenderList build: Play.Faulted, the editor
+# alive, the World inspectable and drawn on the guarded path (M10a).
+play
+wait-ticks 60
+inject-throw render
+wait-frames 3
+expect-faulted yes
+expect-state faulted
+expect-entities play 17
+wait-frames 10
+expect-faulted yes
+stop
+wait-frames 2
+expect-state edit
+expect-hash document initial
+quit discard

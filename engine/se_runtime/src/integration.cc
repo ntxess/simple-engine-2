@@ -19,6 +19,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include "se_core/assert.h"
 #include "se_core/dump_stream.h"
@@ -285,6 +286,15 @@ void Logging::Stop() noexcept {
   worker_->Stop();
   worker_.reset();
   std::fflush(stderr);
+}
+
+bool Logging::TryCopyPanelLinesSince(std::uint64_t& serial,
+                                     std::vector<std::string>& lines) const {
+  return worker_ != nullptr && worker_->TryCopyPanelLinesSince(serial, lines);
+}
+
+LogWorkerStats Logging::WorkerStats() const noexcept {
+  return worker_ != nullptr ? worker_->Stats() : LogWorkerStats{};
 }
 
 bool Logging::Running() const noexcept {

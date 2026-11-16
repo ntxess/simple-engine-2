@@ -67,6 +67,30 @@ struct RenderLayer {
   float alpha = 1.0F;
 };
 
+// Drawn into the swapchain after the composite's blit (M10a: the editor's
+// ImGui, ADR-098). Renderer2D calls it on main during Frame(), and again
+// from RepresentLast() with the same frame's data; nothing in it may
+// throw (the frame transaction's recording steps are noexcept).
+class SwapchainOverlay {
+ public:
+  SwapchainOverlay() = default;
+  SwapchainOverlay(const SwapchainOverlay&) = delete;
+  SwapchainOverlay& operator=(const SwapchainOverlay&) = delete;
+  virtual ~SwapchainOverlay() = default;
+
+  // After the build phase, before the frame's command buffer is acquired:
+  // work with submissions of its own (ImGui's texture uploads), which
+  // therefore reach the GPU before the frame's.
+  virtual void BeforeFrame() noexcept = 0;
+  // On the frame's command buffer, outside any pass, before the swapchain
+  // is acquired: copies (ImGui's vertices and indices).
+  virtual void Prepare(SDL_GPUCommandBuffer* commands) noexcept = 0;
+  // Inside the swapchain pass, after the blit, on a |width| x |height|
+  // swapchain texture.
+  virtual void Draw(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass,
+                    std::uint32_t width, std::uint32_t height) noexcept = 0;
+};
+
 // An offscreen colour target with its own size and camera, for M10's
 // editor viewports. Renderer2D owns it (CreateViewport).
 class ViewportTarget {
@@ -121,6 +145,9 @@ struct FrameRequest {
   std::span<const ViewportDraw> viewports;
   // Acquire the swapchain and blit the composite (false: offscreen only).
   bool present = true;
+  // Drawn after the blit (M10a); kept for RepresentLast() until the next
+  // Frame() or ForgetOverlay().
+  SwapchainOverlay* overlay = nullptr;
 };
 
 struct FrameResult {
@@ -216,8 +243,13 @@ class Renderer2D {
 
   [[nodiscard]] FrameResult Frame(const FrameRequest& request)
       SE_REQUIRES(g_main);
-  // The blit of the last composite again: no new RenderList.
+  // The blit of the last composite again: no new RenderList (the last
+  // frame's overlay draws again over it).
   [[nodiscard]] FrameResult RepresentLast() SE_REQUIRES(g_main);
+  // |overlay| is going away: RepresentLast() no longer draws it.
+  void ForgetOverlay(const SwapchainOverlay* overlay) noexcept {
+    if (last_overlay_ == overlay) last_overlay_ = nullptr;
+  }
   // Iterates that do not render: residency, then the uploads alone.
   void PumpUploads() SE_REQUIRES(g_main);
 
@@ -298,7 +330,8 @@ class Renderer2D {
   bool DrawTarget(FrameRecorder& recorder, const TargetPlan& target) noexcept
       SE_REQUIRES(g_main);
   void Blit(FrameRecorder& recorder, SDL_GPUTexture* swapchain,
-            const ClearColor& clear) noexcept SE_REQUIRES(g_main);
+            const ClearColor& clear, SwapchainOverlay* overlay) noexcept
+      SE_REQUIRES(g_main);
   // |timed|: a Frame() submission, whose GPU duration CollectGpuTimes
   // reads (not RepresentLast's blit).
   void KeepFence(SDL_GPUFence* fence, bool timed) noexcept SE_REQUIRES(g_main);
@@ -324,6 +357,8 @@ class Renderer2D {
 
   TextureHandle composite_;
   bool composite_drawn_ = false;
+  // The last Frame()'s overlay, drawn again by RepresentLast().
+  SwapchainOverlay* last_overlay_ = nullptr;
   std::uint32_t fixed_width_ = 0;
   std::uint32_t fixed_height_ = 0;
   std::vector<std::unique_ptr<ViewportTarget>> viewports_;

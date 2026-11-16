@@ -66,6 +66,9 @@ struct RampageSessionOptions {
   AudioSink* audio = nullptr;
   // Record a replay (start bytes: the scene file).
   bool record = false;
+  // A SessionLog to apply (SessionLog::Write bytes: a replay's session, an
+  // editor Play session's edits and markers, M10a); empty: none.
+  std::vector<std::byte> session;
   // Called with the sandbox World after the load (tick 0) and after every
   // tick; ticks then run one at a time.
   std::function<void(const World&)> on_world;
