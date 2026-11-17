@@ -4370,3 +4370,126 @@ hashed, so no golden changed.
 **Checked by.** `rampage.scene.A prefab root's Guid is fixed`, the
 serialization round trips, and the determinism and reference suites
 unchanged.
+
+## ADR-115 The scene writer's prefab mode: two passes, what each leaves out, and its fallback (2026-11-17)
+
+**Decision.** `SaveScene(world, name, {.mode = kPrefabs})` writes every
+entity in spawn order: one without PrefabInstance as kFlatten writes it
+("components" whole), an instance as `"prefab"` plus `"overrides"` (left
+out when empty; never "components", never Spawned). The overrides of all
+instances of one save are computed together:
+
+1. **Pass 1, against a bare instance.** One scratch World holds one bare
+   instance of each prefab the save uses (Guid PrefabRootGuid(ref)). Per
+   component in registration order, the scene form (stats and textures by
+   name) of the entity's against the bare instance's: equal, nothing;
+   absent from the prefab, the whole value; absent from the entity, null;
+   otherwise `json::MergeDiff` (objects member by member, arrays and
+   scalars whole, a member the entity lacks as null). Left out, as the
+   spec lists them: Transform (R12 may place it), what FinishLoad derives
+   (PathCache, ActiveEffects, PairCooldowns) and what the ticks set
+   (MoveIntent, ActionBuffer, Moved). FinishLoad derives only the first
+   three; the spec groups the runtime state with them, and the rule is the
+   same for all six: pass 2 writes them when they differ.
+2. **Pass 2, against the loaded instance.** A second scratch World loads
+   every instance with pass 1's overrides (the loader, R12 and FinishLoad
+   included). Each serialized, non-reserved component whose registry JSON
+   still differs is written as its merge diff against the scratch entity's
+   scene form (absent from the entity: null; absent from the scratch: the
+   whole value). If a component pass 1 already wrote still differs (no
+   fixture does), it is rewritten as the diff of the prefab's own text
+   against the entity's scene form, which rebuilds the value exactly. The
+   overrides are then put in registration order.
+
+Pass 1 diffs against the loaded bare instance, not the prefab's text,
+because that keeps the output minimal: a prefab's `"Path": {"points": [],
+"loop": true}` loads to a Path with segment, u and done, so a diff against
+the text would write those three members on every enemy. `json::Equal`
+compares numbers by value and objects regardless of member order; it is
+what the "saves back to its own content" test means by parsed equality.
+
+**Why.** The spec's two passes, made concrete. Both passes batch every
+instance into one scratch World each, and each prefab is read once per
+call, so a save costs two scratch loads, not two per entity.
+
+**Consequences.** One limit, recorded rather than worked around: an
+instance that lost a component FinishLoad derives while keeping its source
+(ActiveEffects without Stats) saves the derived one as null, and the load
+derives it again. Neither the Inspector (ActiveEffects and PairCooldowns
+are not kEditorVisible) nor RemovedWith's groups produce that state.
+kFlatten is M3's writer unchanged (the same code, PrefabInstance dropped
+as reserved). A prefab that cannot be read fails a kPrefabs save
+(ADR-114).
+
+**Checked by.** `rampage.scene.Load, save and load again give identical
+Worlds for every scene fixture` (both modes), `rampage.scene.The sandbox
+scene saves back to its own content`, `rampage.scene.A mid-game World saves
+with prefabs and loads back` (600 ticks in: path progress, effects,
+cooldowns), `rampage.scene.Instances changed in the World save as their
+overrides`, `rampage.scene.Flatten mode writes what M3's writer wrote`,
+`rampage.Merge diffs turn one value into another`.
+
+## ADR-116 Prefab documents keep their file's form; rebases and baselines load scratch Worlds (2026-11-17)
+
+**Decision.**
+
+- **LoadPrefabDocument** creates the root (PrefabRootGuid(ref), the
+  prefab's "name" as its Name) from the prefab's components through the
+  scene loader's entity path (stats and textures by name, R12, FinishLoad),
+  with the default settings and |options.rules| in the ctx. The root has
+  no PrefabInstance: it is the prefab. The loaded components object is
+  kept in the World's ctx (`PrefabDocumentSource`, private to scene.cc).
+- **SavePrefabDocument** writes `{"format", "name", "components"}` with the
+  root's components in scene form, except FinishLoad's derived ones unless
+  the file itself wrote them. Where the World has its source, each
+  component the file wrote is the file's own value with the merge diff of
+  (what that value loads to, what the root holds) applied over it: an
+  untouched component keeps its text (`"Path": {"points": [], "loop":
+  true}`, `"ready_on_start": true`), an edit changes only its members. A
+  component the file did not write is written whole. A World without the
+  root fails with kNotFound.
+- **PrefabBaseline** loads one bare instance (the entity's Guid and
+  prefab) into a scratch World. **RebasePrefabInstances** computes every
+  instance's overrides with the writer's two passes against |old_text|
+  (the resolver answers |ref| with it), loads them all over |new_text| in
+  one scratch World, and returns the instances whose EntityComponentsJson
+  changed, in spawn order. Merge patches are applied as written: a null
+  for a component the new prefab lacks is a no-op (it stays removed), an
+  override of a member the new prefab renamed stays as an added member (a
+  stat by its old name), and a component whose hook rejects the merged
+  JSON fails the rebase with that error.
+- **Scratch Worlds.** The writer, the baseline and the rebase create
+  Worlds of the source World's registry on the calling thread, fill them
+  with LoadScene and drop them. `ScratchLoad` is marked
+  SE_NO_THREAD_SAFETY_ANALYSIS: g_sim_owner is the ownership of the
+  running Worlds, and a World this call created and nothing else can reach
+  is not one of them; the World's own owner-thread check still runs.
+  Scratch loads never call on_prefab.
+- **NameTable::Remove(id)** forgets a name (false when there is none), for
+  M11b's undo of a stat name it added.
+- **RemovedWith and Removable** read one table written beside FinishLoad
+  (Path: PathCache; Stats: ActiveEffects; EffectSource: PairCooldowns) and
+  the five fixed names.
+
+**Why.** The spec's test that a prefab document "saves back to its file"
+with parsed JSON equality cannot pass if the writer writes components
+whole (the files are minimal: `"Transform": {}`) or as diffs against the
+defaults (`"ready_on_start": true` equals the default yet is in the
+file). Keeping the text it was loaded from is the one rule that gives the
+file back unchanged and keeps a saved edit's diff to the members it
+touched, as a user expects of a file under version control. The source
+lives in the ctx because SavePrefabDocument receives only the World.
+
+**Consequences.** A prefab document's ctx carries its source; World::Clone
+does not copy ctx, so a clone saves its components whole (equal on load,
+not in form). A rebase or a baseline costs one or two scratch loads per
+call, not per instance.
+
+**Checked by.** `rampage.scene.A prefab document saves back to its file`
+(both prefabs; an edit touches only its members; a World built in place),
+`rampage.scene.A prefab root's Guid is fixed`, `rampage.scene.Overrides
+survive a prefab change` (also the renamed stat), `rampage.scene.A removed
+prefab component saves as null and stays removed` (also across two
+rebases), `rampage.scene.A prefab baseline is a bare instance`,
+`rampage.scene.Every component FinishLoad adds is removed with its
+source`, `rampage.scene.A stat name can be forgotten`.

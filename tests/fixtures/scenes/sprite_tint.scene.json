@@ -1,0 +1,19 @@
+{
+  "format": "se-scene-v1",
+  "name": "sprite_tint",
+  "settings": {"bounds": {"w": 1920, "h": 1080}, "seed": 9, "event_watchdog_ms": 36000},
+  "entities": [
+    {"guid": "11a00000-0000-4000-8000-000000000601", "name": "red enemy",
+     "prefab": "prefabs/enemy.prefab.json",
+     "overrides": {"SpriteRenderer": {"tint": {"r": 255, "g": 64, "b": 64, "a": 200},
+                                      "layer": 2, "flip_x": true},
+                   "Path": {"points": [{"x": 300, "y": 300}, {"x": 600, "y": 300}]}}},
+    {"guid": "11a00000-0000-4000-8000-000000000602", "name": "coin",
+     "components": {"Transform": {"pos": {"x": 1000, "y": 500}},
+                    "SpriteRenderer": {"texture": "coin",
+                                       "region": {"x": 0, "y": 0, "w": 16, "h": 16},
+                                       "origin": {"x": 8, "y": 8},
+                                       "tint": {"r": 255, "g": 215, "b": 0, "a": 255},
+                                       "z": 0.5}}}
+  ]
+}
