@@ -97,6 +97,8 @@ TEST_CASE("A texture changed on disk while rampage runs is hot-reloaded",
 
   GameSetup setup;
   setup.module = &rampage::RampageModule();
+  // The sandbox (M13b: rampage's session starts at the Title).
+  setup.start_state = std::string(rampage::kSandboxState);
   setup.title = "se_render_gpu_tests hot reload";
   setup.org = "simple-engine-tests";
   setup.app = "render_gpu";

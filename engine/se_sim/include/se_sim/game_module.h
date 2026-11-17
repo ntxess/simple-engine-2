@@ -45,6 +45,10 @@ struct GameModule {
   void (*register_states)(GameStateFactory& factory) = nullptr;
   std::string_view start_state;
   ActionMapDefaults actions;
+  // The state a player's session starts in (rampage: "title"); the
+  // runtime and the editor's 'Play game' start here. start_state stays
+  // the one-World state editor Play, se_replay and the goldens use.
+  std::string_view game_start_state;
 };
 
 // The engine side of a loaded module. Not movable: Worlds and stacks keep

@@ -262,6 +262,22 @@ struct GameSetup {
   // SDL's raw keyboard (the editor turns it off: IME, hotkeys); also
   // --no-raw-keyboard.
   bool raw_keyboard = true;
+
+  // M13: the game's states and their content (ADR-122).
+  // The state the App pushes at boot (empty: the module's
+  // game_start_state, else its start_state).
+  std::string start_state;
+  // The files a loaded text needs too (rampage: a scene's prefabs), by
+  // path relative to the content root.
+  std::function<std::vector<std::string>(std::string_view path,
+                                         std::string_view text)>
+      text_dependencies;
+  // Focus lost while a session runs: the GameState command the game wants
+  // (rampage: push "pause" when "gameplay" is on top), queued in the
+  // SessionLog against the next tick, so a replay pauses where the live
+  // session did.
+  std::function<std::optional<StateCommand>(std::string_view top_state)>
+      on_focus_lost;
 };
 
 using GameFactory =

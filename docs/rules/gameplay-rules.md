@@ -10,7 +10,8 @@ at `legacy-ref-v2` all thirteen, and M3 compares the two trees through the
 projections of `legacy-ref-v2`: at the M3 integration game_rampage's
 projections of the three scenarios are byte-identical to these goldens over
 all 3600 ticks (`ref.sandbox.*`), and to the legacy-ref-v1 goldens with
-R11 to R13 turned off (`ref.sandbox_v1.*`).
+R11 to R13 turned off (`ref.sandbox_v1.*`). R14 (M13b) is declared for the engine's game
+flow only: it replaces a legacy scene change the reference keeps.
 
 Conventions: time is counted in ticks of the 120 Hz simulation clock
 (LegacySimTime). An authored duration of `ms` milliseconds is
@@ -338,3 +339,43 @@ polygons. `effects` SpawnIndex 14, whose last point is its first, has a
 zero-length closing segment and is unchanged by this rule; SpawnIndex 15
 (three coincident points) and the one-point paths in `stress` (SpawnIndex 11)
 and `patrol` (SpawnIndex 10 and 17) never move.
+
+## R14 Escape opens Pause; Pause's Jump returns to the Title
+
+Declared for the engine only (M13b, game_rampage's FlowSystem); the legacy
+reference is not changed and its goldens are not affected. A session starts
+at the Title (the legacy MainMenu: its wallpaper, the "bg" texture over the
+arena). In each state the first matching rule applies, at most one
+transition per tick, and it takes effect at the next tick boundary (the
+GameStateStack's deferred commands), so the tick in which a key is pressed
+still runs in the old state and the next tick runs in the new one:
+
+- Title: Enter replaces it with Gameplay; Exit (Escape) pops it, which ends
+  the game (no state is left).
+- Gameplay: when no PlayerControl entity is left alive (destroyed, or
+  carrying a DestroyRequest, which R10's HP <= 0 rule adds in the same
+  tick's GameRules), GameOver replaces it; otherwise Exit pushes Pause. The
+  death wins over a pause pressed in the same tick.
+- Pause (an overlay: its World steps, the paused Gameplay below it does not,
+  and both draw): Exit pops it and Gameplay resumes; otherwise Jump (Space,
+  the pad's south button) pops it and replaces Gameplay with the Title, two
+  commands applied in order at one boundary, so the Gameplay never ticks
+  again.
+- GameOver: Enter replaces it with a fresh Gameplay (the scene loaded
+  again); otherwise Exit replaces it with the Title.
+
+A key counts in the tick whose InputFrame has its press; holding it does not
+repeat it. The "sandbox" state (the editor's Play, se_replay, the goldens)
+carries no flow role, and FlowSystem leaves its World alone.
+
+Before: Escape in the Sandbox replaced it with the MainMenu, read from the
+key events and only when the Sandbox was the root scene
+(app/scene/Sandbox.cpp:97-100); the MainMenu had no way back, and nothing
+paused or ended a game. Until M19's menus there is no text or UI: Jump in
+the Pause stands for "return to the title" (decision 3 of the M11/M13/M17b
+specs).
+
+Goldens: none of the reference's change. The engine's flow has its own
+golden, `determinism_rampage_flow` (tests/golden/*/), over a recorded
+session through every state (tests/fixtures/flow/flow.seinput); every
+earlier engine golden is unchanged.

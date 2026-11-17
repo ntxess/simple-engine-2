@@ -100,7 +100,8 @@ add_test(NAME platform.sdl_assertion_aborts
 set_tests_properties(platform.sdl_assertion_aborts PROPERTIES
   LABELS unit TIMEOUT 60)
 
-# The rampage executable (label desktop): it runs the sandbox for 300
+# The rampage executable (label desktop): it runs the sandbox
+# (--start-state sandbox: M13b's rampage starts at the Title) for 300
 # presented frames and quits through the two-phase quit, and a failure at
 # every boot step exits with SDL_APP_FAILURE, no app state and no engine
 # thread left (scripts/ci.ps1 -Desktop runs these in msvc-dev and, for ASan,
@@ -121,7 +122,7 @@ if(TARGET rampage)
             --expect "shutdown order: input-sampler, event-filter [(]4[)], worlds [(]6[)], audio [(]7[)], bg-lane [(]8[)], vblank-sampler [(]9[)], asset-scopes [(]10[)]"
             --reject "SE_ASSERT failed|ERROR|E t=[0-9]+ | [EF] [a-z-]+ t=[0-9]+ "
             -- $<TARGET_FILE:rampage> --frames 300 --no-activate
-            --pref-dir "${_se_rampage_pref}")
+            --pref-dir "${_se_rampage_pref}" -- --start-state sandbox)
   set_tests_properties(rampage.frames_300 PROPERTIES
     LABELS "desktop;gpu;rampage" TIMEOUT 120)
   # The integration (ADR-089): rampage quits with a Durable save in flight

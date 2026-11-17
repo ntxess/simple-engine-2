@@ -1586,8 +1586,13 @@ void App::RunExitTests(Tick next_tick) {
 void App::UpdateTitle(std::uint64_t now_ns) {
   if (window_ == nullptr || now_ns - last_title_ns_ < kTitleIntervalNs) return;
   last_title_ns_ = now_ns;
-  std::string title = std::format("{} | tick {} | {}", setup_.title, LastTick(),
-                                  LifecycleStateName(lifecycle_.State()));
+  // M13: the top state's id first ("-" for an empty stack).
+  const std::string_view top =
+      game_ != nullptr ? ActiveStates().TopId() : std::string_view();
+  std::string title =
+      std::format("{} | {} | tick {} | {}", setup_.title,
+                  top.empty() ? std::string_view("-") : top, LastTick(),
+                  LifecycleStateName(lifecycle_.State()));
   // Test builds show the pacer's mode, rate, interval, latency and misses.
   if (kRuntimeTestHooks) title += " | " + pacer_.Summary();
   window_->SetTitle(title);

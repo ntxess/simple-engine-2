@@ -3,7 +3,9 @@
 #   se_rampage_tests      Catch2: serialization, broadphase, effects, path,
 #                         boundary, JSON, scenes, the legacy scenarios, the
 #                         projection, sprites and the view, and
-#                         determinism (golden determinism_rampage)
+#                         determinism (golden determinism_rampage); the
+#                         game flow (rampage.flow.*, M13b) and its golden
+#                         determinism_rampage_flow
 #   replay.rampage.*      se_replay runs the module (tools)
 #   ref.sandbox.NAME      label reference: se_replay runs the legacy scenario
 #                         NAME with its inputs for 3600 ticks, and
@@ -41,6 +43,20 @@ target_include_directories(rampage_test_support PUBLIC
 target_compile_definitions(rampage_test_support PRIVATE
   SE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 
+# M13b: the game flow headless (FlowHarness, RunFlowSession) and the
+# recorded session's script (StampedInput, from se_test_support).
+se_add_module(rampage_flow_support KIND STATIC
+  SOURCES
+    support/flow_session.cc
+  PUBLIC_DEPS
+    game_rampage
+    rampage_test_support
+    se_core
+    se_sim
+    se_test_support
+  DETERMINISTIC
+  TEST)
+
 se_add_module(se_rampage_tests KIND EXECUTABLE
   SOURCES
     audio_events_test.cc
@@ -48,6 +64,8 @@ se_add_module(se_rampage_tests KIND EXECUTABLE
     broadphase_test.cc
     determinism_test.cc
     effects_test.cc
+    flow_determinism_test.cc
+    flow_test.cc
     json_test.cc
     legacy_scenario_test.cc
     path_test.cc
@@ -58,6 +76,7 @@ se_add_module(se_rampage_tests KIND EXECUTABLE
     ../support/tracy_inert_listener.cc
   PRIVATE_DEPS
     game_rampage
+    rampage_flow_support
     rampage_test_support
     se_core
     se_render_core
@@ -75,6 +94,24 @@ catch_discover_tests(se_rampage_tests
   TEST_PREFIX "rampage."
   ADD_TAGS_AS_LABELS
   PROPERTIES LABELS rampage)
+
+# The flow's recorded session (tests/fixtures/flow/flow.seinput) is this
+# generator's output; rampage.flow_input_fixture checks that it still is
+# (newlines aside: the checkout may have CRLF).
+se_add_module(rampage_flow_input_gen KIND EXECUTABLE
+  SOURCES
+    flow_input_gen.cc
+  PRIVATE_DEPS
+    rampage_flow_support
+  TEST)
+add_test(NAME rampage.flow_input_fixture
+  COMMAND Python3::Interpreter -c
+          "import sys,subprocess;subprocess.run([sys.argv[1],sys.argv[2]],check=True);a=open(sys.argv[2]).read();b=open(sys.argv[3]).read();print('same' if a==b else 'DIFFERENT');sys.exit(a!=b)"
+          $<TARGET_FILE:rampage_flow_input_gen>
+          "${_se_rampage_out}/flow.seinput"
+          "${CMAKE_SOURCE_DIR}/tests/fixtures/flow/flow.seinput")
+set_tests_properties(rampage.flow_input_fixture PROPERTIES
+  LABELS "rampage;tools")
 
 set(_se_ref "${CMAKE_SOURCE_DIR}/tests/fixtures/reference")
 set(_se_refcmp "${CMAKE_SOURCE_DIR}/tools/refcmp/refcmp.py")

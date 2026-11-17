@@ -294,7 +294,7 @@ def main():
     failures = Failures()
     result, output = run_rampage(
         args.rampage, [*expected["args"], "--no-activate", "--pref-dir",
-                       str(pref)])
+                       str(pref), "--", "--start-state", "sandbox"])
     failures.equal(result.returncode & 0xFFFFFFFF, expected["exit"],
                    "rampage exit code")
     failures.check("crash capture on" in output,

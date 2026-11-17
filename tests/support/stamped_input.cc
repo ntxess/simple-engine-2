@@ -5,6 +5,9 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
+#include <utility>
+#include <vector>
 
 #include "se_core/edge_placement.h"
 #include "se_core/guid.h"
@@ -31,7 +34,34 @@ StampedInput::StampedInput(std::uint64_t seed, std::uint64_t epoch_ns,
                                                       : tick_rate)),
       next_(Script()) {}
 
+StampedInput::StampedInput(std::vector<ScriptedEdge> script,
+                           std::uint64_t epoch_ns, std::uint32_t tick_rate)
+    : seed_(0),
+      script_(std::move(script)),
+      scripted_(true),
+      epoch_ns_(epoch_ns),
+      dt_ns_(1e9 / static_cast<double>(tick_rate == 0 ? kDefaultTickRate
+                                                      : tick_rate)),
+      next_(Script()) {}
+
 StampedInput::Edge StampedInput::Script() noexcept {
+  if (scripted_) {
+    Edge edge;
+    if (index_ >= script_.size()) {
+      edge.tick = std::numeric_limits<Tick>::max();
+      edge.stamp_ns = std::numeric_limits<std::uint64_t>::max();
+      return edge;
+    }
+    const ScriptedEdge& scripted = script_[index_];
+    edge.tick = scripted.tick;
+    edge.action = scripted.action;
+    edge.down = scripted.down;
+    edge.stamp_ns =
+        epoch_ns_ + static_cast<std::uint64_t>(std::llround(
+                        (static_cast<double>(edge.tick) - 0.5) * dt_ns_));
+    ++index_;
+    return edge;
+  }
   const auto draw = [this](std::uint32_t n) {
     return rng::At(seed_, index_, Guid{}, kEdgeStream, n);
   };

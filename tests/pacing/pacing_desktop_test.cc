@@ -469,6 +469,8 @@ TEST_CASE("display_rates", "[desktop][display]") {
 GameSetup RampageSetup() {
   GameSetup setup;
   setup.module = &rampage::RampageModule();
+  // The sandbox (M13b: rampage's session starts at the Title).
+  setup.start_state = std::string(rampage::kSandboxState);
   setup.title = "se_pacing_tests rampage";
   setup.org = "simple-engine-tests";
   setup.app = "pacing";

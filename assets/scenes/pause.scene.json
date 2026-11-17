@@ -1,0 +1,15 @@
+{
+  "format": "se-scene-v1",
+  "name": "pause",
+  "settings": {"bounds": {"w": 1920, "h": 1080}, "seed": 1},
+  "entities": [
+    {"guid": "7171e000-0000-4000-8000-000000000001", "name": "wallpaper",
+     "components": {
+       "Transform": {"pos": {"x": 0, "y": 0},
+                     "scale": {"x": 3.3333333, "y": 3.3333333}},
+       "SpriteRenderer": {"texture": "bg",
+                          "region": {"x": 0, "y": 0, "w": 576, "h": 324},
+                          "origin": {"x": 0, "y": 0},
+                          "tint": {"r": 16, "g": 16, "b": 32, "a": 160}}}}
+  ]
+}

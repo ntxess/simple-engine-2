@@ -85,6 +85,8 @@ void GameStateStack::CollectWorldRequests() {
 
 void GameStateStack::ApplyPending() {
   CollectWorldRequests();
+  const bool was_waiting = waiting_;
+  waiting_ = false;
   for (int applied = 0; !queue_.empty(); ++applied) {
     if (applied == kMaxCommandsPerBoundary) {
       SE_LOG_ERROR(
@@ -92,6 +94,19 @@ void GameStateStack::ApplyPending() {
           "{} left for the next",
           kMaxCommandsPerBoundary, queue_.size());
       break;
+    }
+    const StateCommand& front = queue_.front();
+    // The content gate: a state is created only once it is ready; the
+    // command and every one behind it wait (unknown ids are rejected by
+    // Apply as before).
+    if (gate_ != nullptr && front.op != StackOp::kPop &&
+        factory_->Contains(front.state_id) && !gate_->Ready(front.state_id)) {
+      waiting_ = true;
+      if (!was_waiting) {
+        SE_LOG_DEBUG("GameState '{}' waits at the content gate ({} queued)",
+                     front.state_id, queue_.size());
+      }
+      return;
     }
     const StateCommand command = std::move(queue_.front());
     queue_.pop_front();
@@ -133,6 +148,7 @@ void GameStateStack::Apply(const StateCommand& command) {
 
 void GameStateStack::Clear() {
   queue_.clear();
+  waiting_ = false;
   if (!stack_.empty()) ++revision_;
   while (!stack_.empty()) {
     stack_.back().state->OnExit();
@@ -197,6 +213,11 @@ std::vector<StackEntry> GameStateStack::Entries() const {
     entries.push_back({entry.id, entry.state.get()});
   }
   return entries;
+}
+
+std::string_view GameStateStack::Waiting() const noexcept {
+  if (!waiting_ || queue_.empty()) return {};
+  return queue_.front().state_id;
 }
 
 std::string_view GameStateStack::TopId() const noexcept {

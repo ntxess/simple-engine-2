@@ -76,6 +76,10 @@ struct StateAssets {
   std::vector<std::string> scene_chunks;
   std::vector<std::string> sounds;
   bool all_sounds = true;
+  // Files loaded as text through the lane before the state is created,
+  // relative to the content root, and every file text_dependencies names
+  // for them.
+  std::vector<std::string> texts;
 };
 
 struct AssetRuntimeConfig {
