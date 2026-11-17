@@ -1,0 +1,17 @@
+{
+  "format": "se-scene-v1",
+  "name": "removed_component",
+  "settings": {"bounds": {"w": 1280, "h": 720}, "seed": 7, "event_watchdog_ms": 36000},
+  "entities": [
+    {"guid": "11a00000-0000-4000-8000-000000000001", "name": "player",
+     "prefab": "prefabs/player.prefab.json"},
+    {"guid": "11a00000-0000-4000-8000-000000000002", "name": "invisible enemy",
+     "prefab": "prefabs/enemy.prefab.json",
+     "overrides": {"SpriteRenderer": null,
+                   "Path": {"points": [{"x": 600, "y": 300}, {"x": 900, "y": 300}]}}},
+    {"guid": "11a00000-0000-4000-8000-000000000003", "name": "harmless player copy",
+     "prefab": "prefabs/player.prefab.json",
+     "overrides": {"EffectSource": null, "PlayerControl": null,
+                   "Transform": {"pos": {"x": 400, "y": 500}}}}
+  ]
+}

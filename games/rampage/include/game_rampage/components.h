@@ -225,6 +225,9 @@ class NameTable {
  public:
   // Records |name| and returns its id.
   std::uint32_t Add(std::string_view name);
+  // Forgets the name of |id| (the editor's undo of a name it added, M11);
+  // false when |id| has none.
+  bool Remove(std::uint32_t id);
   // The name of |id|, or empty.
   [[nodiscard]] std::string_view Name(std::uint32_t id) const noexcept;
   [[nodiscard]] const std::vector<std::pair<std::uint32_t, std::string>>& All()

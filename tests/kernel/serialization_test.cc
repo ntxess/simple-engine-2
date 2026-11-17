@@ -33,6 +33,7 @@ const std::map<std::string_view, std::string_view>& Samples() {
                         R"("scale":{"x":1,"y":1},"tick":76})"},
       {"Spawned", R"({"spawn_tick":12,"spawn_serial":4000000000})"},
       {"DestroyRequest", R"({})"},
+      {"PrefabInstance", R"({"prefab":"prefabs/enemy.prefab.json"})"},
       {"Mover",
        R"({"center":{"x":100,"y":-50},"radius":32.5,"angular_speed":-1.25,)"
        R"("phase":0.75})"},
