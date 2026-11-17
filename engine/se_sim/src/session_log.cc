@@ -219,6 +219,13 @@ void SessionLog::Insert(SessionEntry entry) {
 void SessionLog::Enqueue(SessionEntry entry, Tick next_tick,
                          GameStateStack& states) {
   entry.seq = next_seq_++;
+  if (!states.Waiting().empty()) {
+    // M13: a state waits at the content gate; the entry applies after it,
+    // at the boundary before next_tick.
+    entry.apply_before = std::max(entry.apply_before, next_tick);
+    Insert(std::move(entry));
+    return;
+  }
   if (!states.SimRunning()) {
     // Paused at the boundary before next_tick. Finish that boundary's
     // pending work in RunTick's order, which is also a replay's order, then
@@ -242,9 +249,14 @@ void SessionLog::AddScheduled(SessionEntry entry) {
 void SessionLog::ApplyDue(Tick tick, GameStateStack& states) {
   std::size_t due = 0;
   while (due < pending_.size() && pending_[due].apply_before <= tick) {
-    if (!Apply(pending_[due], states)) ++failures_;
-    applied_.push_back(std::move(pending_[due]));
+    // M13: nothing applies while a state waits at the content gate.
+    if (!states.Waiting().empty()) break;
+    // Moved out first: applying may queue entries (a text swap logged as a
+    // state is created), which only ever land behind this one.
+    SessionEntry entry = std::move(pending_[due]);
     ++due;
+    if (!Apply(entry, states)) ++failures_;
+    applied_.push_back(std::move(entry));
   }
   pending_.erase(pending_.begin(),
                  pending_.begin() + static_cast<std::ptrdiff_t>(due));

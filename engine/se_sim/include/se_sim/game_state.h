@@ -12,6 +12,13 @@
 //
 // Systems request changes with RequestGameState(world, ...), which queues
 // the command in the World; ApplyPending collects those queues first.
+//
+// The content gate (M13): with a StateContentGate set, a push or replace
+// whose state is not ready (its files loaded, its assets resident) stays
+// at the front of the queue, with every command behind it, and Waiting()
+// names it; the next ApplyPending asks again. The runtime holds the ticks
+// while a state waits, so the command applies before the same tick as
+// without a gate (replays, tests), and asset timing changes no tick.
 
 #ifndef SE_SIM_GAME_STATE_H_
 #define SE_SIM_GAME_STATE_H_
@@ -32,6 +39,7 @@
 #include "se_core/thread_safety.h"
 #include "se_core/time.h"
 #include "se_core/world.h"
+#include "se_sim/content_source.h"
 
 namespace se {
 
@@ -51,6 +59,9 @@ struct StateEnv {
   std::uint64_t seed = 0;
   std::uint32_t tick_rate = kDefaultTickRate;
   WorldKind world_kind = WorldKind::kRuntime;
+  // Where the state's Worlds come from; null: the state reads nothing
+  // (M2's tests) or reads files itself (the sandbox state before M13).
+  const ContentSource* content = nullptr;
 };
 
 class GameState {
@@ -86,6 +97,17 @@ class GameStateFactory {
 
  private:
   std::vector<std::pair<std::string_view, StateCreator>> creators_;
+};
+
+// Asked before a push or replace creates its state (owner thread, at a
+// tick boundary).
+class StateContentGate {
+ public:
+  virtual ~StateContentGate() = default;
+  // Whether the state |state_id| may be created now: its files loaded and
+  // its assets resident.
+  [[nodiscard]] virtual bool Ready(std::string_view state_id)
+      SE_REQUIRES(g_sim_owner) = 0;
 };
 
 // A state on the stack (GameStateStack::Entries).
@@ -144,6 +166,16 @@ class GameStateStack {
     return rejected_;
   }
 
+  // A push or replace whose state |gate| does not report ready stays
+  // queued, with every command behind it (FIFO); ApplyPending returns and
+  // Waiting() names the state until a later boundary applies it. A null
+  // gate (replays, tests) applies at once, so the same commands apply
+  // before the same tick either way.
+  void SetContentGate(StateContentGate* gate) noexcept { gate_ = gate; }
+  // The state the queued push or replace at the front waits for (World
+  // requests collected first); empty when nothing waits.
+  [[nodiscard]] std::string_view Waiting() const noexcept;
+
  private:
   struct Entry {
     std::string id;
@@ -159,6 +191,9 @@ class GameStateStack {
   std::deque<StateCommand> queue_;
   std::uint32_t rejected_ = 0;
   std::uint32_t revision_ = 0;
+  StateContentGate* gate_ = nullptr;
+  // The front command waits at the gate (ApplyPending's last answer).
+  bool waiting_ = false;
 };
 
 // Queues a GameState command from a system; it applies at the next tick

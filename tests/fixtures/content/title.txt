@@ -1,0 +1,3 @@
+# content_test: the title World (tests/support/content_test_module.h)
+entity banner 0 0 0 0
+entity cursor 10 0 1 0

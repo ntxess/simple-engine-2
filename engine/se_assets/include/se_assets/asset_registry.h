@@ -6,7 +6,10 @@
 //
 // Typed stores: Texture (an atlas page on the GPU, through M7's
 // GpuResources behind TextureUploadPort), Atlas (the page's regions), Sound
-// (decoded PCM; M8 plays it), Prefab and SceneChunk (parsed payloads).
+// (decoded PCM; M8 plays it), Prefab and SceneChunk (parsed payloads; kept
+// without a consumer until M19's importer), and Text (M13: a file's bytes
+// as a shared immutable string, the scenes and prefabs GameStates build
+// their Worlds from).
 // Each entry is named by Handle<T>{index, generation}; a removed entry's
 // handles go stale (its slot's generation changes).
 //
@@ -28,7 +31,7 @@
 // World until then.
 //
 // Hot reload (dev builds): every texture's source and page, and every
-// sound, prefab and scene chunk file, is watched by the lane's 500 ms
+// sound, prefab, scene chunk and text file, is watched by the lane's 500 ms
 // scan. A change submits an Urgent reload (a changed PNG is re-cooked on
 // the lane); the old texture keeps drawing until the new one is resident,
 // when GpuResources swaps them at frame start and retires the old one. A
@@ -73,6 +76,7 @@ struct AtlasAsset {};
 struct SoundAsset {};
 struct PrefabAsset {};
 struct SceneChunkAsset {};
+struct TextAsset {};
 struct AssetScopeTag {};
 using AssetScope = Handle<AssetScopeTag>;
 
@@ -188,12 +192,16 @@ class AssetRegistry {
   Handle<SceneChunkAsset> RequestSceneChunk(AssetScope scope,
                                             std::string_view path)
       SE_REQUIRES(g_main);
+  // A text file read on the lane in steps of at most 1 MB (M13).
+  Handle<TextAsset> RequestText(AssetScope scope, std::string_view path)
+      SE_REQUIRES(g_main);
 
   // --- Lookups ---
   [[nodiscard]] AssetState State(Handle<TextureAsset> handle) const;
   [[nodiscard]] AssetState State(Handle<SoundAsset> handle) const;
   [[nodiscard]] AssetState State(Handle<PrefabAsset> handle) const;
   [[nodiscard]] AssetState State(Handle<SceneChunkAsset> handle) const;
+  [[nodiscard]] AssetState State(Handle<TextAsset> handle) const;
   [[nodiscard]] Handle<TextureAsset> FindTexture(std::string_view name) const;
   [[nodiscard]] TextureHandle GpuTexture(Handle<TextureAsset> handle) const;
   [[nodiscard]] Handle<AtlasAsset> AtlasOf(Handle<TextureAsset> handle) const;
@@ -204,12 +212,20 @@ class AssetRegistry {
       Handle<PrefabAsset> handle) const;
   [[nodiscard]] std::shared_ptr<const SceneChunkPayload> SceneChunk(
       Handle<SceneChunkAsset> handle) const;
+  // The file's bytes as loaded; a reload replaces the string, and holders
+  // of the old one keep it (null until the first load landed).
+  [[nodiscard]] std::shared_ptr<const std::string> Text(
+      Handle<TextAsset> handle) const;
+  // The file's path as requested (normalised); empty for a stale handle.
+  [[nodiscard]] std::string_view TextPath(Handle<TextAsset> handle) const;
   // Counts the loads and reloads that landed (1 after the first).
   [[nodiscard]] std::uint32_t Version(Handle<TextureAsset> handle) const;
   [[nodiscard]] std::uint32_t Version(Handle<SoundAsset> handle) const;
+  [[nodiscard]] std::uint32_t Version(Handle<TextAsset> handle) const;
   // The last failure of the entry's load or reload, or null.
   [[nodiscard]] const Error* LastError(Handle<TextureAsset> handle) const;
   [[nodiscard]] const Error* LastError(Handle<SoundAsset> handle) const;
+  [[nodiscard]] const Error* LastError(Handle<TextAsset> handle) const;
   [[nodiscard]] std::size_t TextureCount() const noexcept;
 
   // Iterate start: drains the lane's completions into the stores (and
@@ -225,7 +241,8 @@ class AssetRegistry {
   // The decoder sound loads use (M8's, at the integration).
   void SetSoundDecoder(SoundDecoder* decoder) noexcept { decoder_ = decoder; }
   // Completions the registry did not submit (saves, flushes).
-  // M10a: editor Play freezes gameplay assets (prefabs, scene chunks): a
+  // M10a: editor Play freezes gameplay assets (prefabs, scene chunks and,
+  // since M13, texts): a
   // change of one is kept and reloaded when the freeze ends. Visual assets
   // (textures, sounds) still reload; while frozen each such change is
   // reported to the swap listener (key, a hash of the file's size and
@@ -251,7 +268,13 @@ class AssetRegistry {
   void ReleaseAll() SE_REQUIRES(g_main);
 
  private:
-  enum class Kind : std::uint8_t { kTexture, kSound, kPrefab, kSceneChunk };
+  enum class Kind : std::uint8_t {
+    kTexture,
+    kSound,
+    kPrefab,
+    kSceneChunk,
+    kText
+  };
 
   struct Common {
     std::uint32_t generation = 1;
@@ -288,6 +311,11 @@ class AssetRegistry {
   struct ChunkEntry {
     Common common;
     std::shared_ptr<const SceneChunkPayload> payload;
+  };
+
+  struct TextEntry {
+    Common common;
+    std::shared_ptr<const std::string> text;
   };
 
   struct Ref {
@@ -363,6 +391,7 @@ class AssetRegistry {
   Store<SoundEntry> sounds_;
   Store<PrefabEntry> prefabs_;
   Store<ChunkEntry> chunks_;
+  Store<TextEntry> texts_;
   std::vector<Scope> scopes_;
   std::vector<std::uint32_t> free_scopes_;
   AssetScope ui_scope_;

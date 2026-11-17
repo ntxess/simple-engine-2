@@ -13,6 +13,7 @@ se_add_module(se_replay_dump KIND STATIC
     se_core
     se_sim
     rampage_test_support
+    se_content_test_support
   TEST)
 target_include_directories(se_replay_dump PUBLIC "${CMAKE_SOURCE_DIR}/tools")
 
@@ -23,6 +24,7 @@ se_add_module(se_replay KIND EXECUTABLE
     se_core
     se_sim
     se_test_support
+    se_content_test_support
     rampage_test_support
     se_replay_dump
   TEST)

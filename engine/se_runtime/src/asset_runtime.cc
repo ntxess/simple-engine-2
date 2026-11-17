@@ -7,7 +7,9 @@
 #include <algorithm>
 #include <cstdint>
 #include <expected>
+#include <format>
 #include <memory>
+#include <ranges>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -26,6 +28,7 @@
 #include "se_render/renderer_2d.h"
 #include "se_render/texture_table.h"
 #include "se_runtime/lane_quit.h"
+#include "se_sim/content_bundle.h"
 #include "se_sim/game_state.h"
 
 namespace se {
@@ -66,6 +69,14 @@ class GpuTexturePort final : public TextureUploadPort {
 };
 
 constexpr double kNsToMs = 1e-6;
+
+std::string Describe(const Error& error) {
+  std::string text = error.message;
+  if (!error.path.empty()) {
+    text += std::format(" ({}:{}:{})", error.path, error.line, error.column);
+  }
+  return text;
+}
 
 }  // namespace
 
@@ -172,6 +183,127 @@ void AssetRuntime::RequestStateAssets(StateScope& entry) {
     for (const std::string& path : config_.sounds) RequestSound(entry, path);
   }
   for (const std::string& path : wanted.sounds) RequestSound(entry, path);
+  // M13: the state's texts (their dependencies follow as they land).
+  for (const std::string& path : wanted.texts) RequestText(entry, path);
+}
+
+std::string AssetRuntime::ContentKey(std::string_view path) const {
+  return fs::Normalize(path);
+}
+
+void AssetRuntime::RequestText(StateScope& entry, std::string_view path) {
+  const std::string key = ContentKey(path);
+  const bool known = std::ranges::any_of(
+      entry.texts, [&key](const ScopeText& text) { return text.path == key; });
+  if (known) return;
+  ScopeText text;
+  text.path = key;
+  text.handle =
+      registry_->RequestText(entry.scope, fs::Join(config_.content_root, key));
+  entry.texts.push_back(std::move(text));
+}
+
+bool AssetRuntime::ExpandTexts(StateScope& entry) {
+  // By index: a dependency appends to entry.texts.
+  for (std::size_t i = 0; i < entry.texts.size(); ++i) {
+    const AssetState state = registry_->State(entry.texts[i].handle);
+    if (state == AssetState::kFailed) {
+      if (!state_error_) {
+        const Error* error = registry_->LastError(entry.texts[i].handle);
+        state_error_ = error != nullptr
+                           ? *error
+                           : Error{ErrorCode::kIo, "the text did not load",
+                                   entry.texts[i].path, 0, 0};
+        state_error_state_ = entry.id;
+        SE_LOG_ERROR(
+            "state '{}' cannot be created: its text {} did not load: {}",
+            entry.id, entry.texts[i].path, Describe(*state_error_));
+      }
+      return false;
+    }
+    if (entry.texts[i].expanded || state != AssetState::kResident) continue;
+    entry.texts[i].expanded = true;
+    if (!config_.text_dependencies) continue;
+    const std::shared_ptr<const std::string> text =
+        registry_->Text(entry.texts[i].handle);
+    if (text == nullptr) continue;
+    const std::string path = entry.texts[i].path;
+    for (const std::string& dependency :
+         config_.text_dependencies(path, *text)) {
+      RequestText(entry, dependency);
+    }
+  }
+  return true;
+}
+
+void AssetRuntime::PinTexts(StateScope& entry) {
+  for (ScopeText& text : entry.texts) {
+    text.pinned = registry_->Text(text.handle);
+    if (text.pinned == nullptr) continue;
+    const std::uint64_t hash = ContentTextHash(*text.pinned);
+    const ContentText* before = loaded_texts_.Latest(text.path);
+    const bool changed = before != nullptr && before->hash != hash;
+    loaded_texts_.Add(text.path, *text.pinned);
+    if (changed) {
+      SE_LOG_INFO(
+          "state '{}' loads {} as changed on disk (hash {:016x}): a changed "
+          "text applies to the next state that loads it",
+          entry.id, text.path, hash);
+      if (text_swap_listener_) text_swap_listener_(text.path, hash);
+    }
+  }
+}
+
+bool AssetRuntime::Ready(std::string_view state_id) {
+  AssertMainThread();
+  auto found = std::ranges::find_if(scopes_, [state_id](const StateScope& s) {
+    return s.pending && s.id == state_id;
+  });
+  if (found == scopes_.end()) {
+    StateScope scope;
+    scope.id = std::string(state_id);
+    scope.scope = registry_->CreateScope(state_id);
+    scope.created_ns = SDL_GetTicksNS();
+    scope.pending = true;
+    scopes_.push_back(std::move(scope));
+    RequestStateAssets(scopes_.back());
+    found = scopes_.end() - 1;
+  }
+  StateScope& entry = *found;
+  if (entry.ready) return true;
+  if (!ExpandTexts(entry)) return false;
+  const bool texts_landed = std::ranges::all_of(
+      entry.texts, [](const ScopeText& text) { return text.expanded; });
+  if (!texts_landed || !registry_->ScopeResident(entry.scope)) return false;
+  PinTexts(entry);
+  entry.ready = true;
+  entry.resident_logged = true;
+  const ScopeProgress progress = registry_->Progress(entry.scope);
+  SE_LOG_INFO(
+      "state '{}': its {} assets are resident after {:.1f} ms ({} failed: "
+      "placeholders; {} texts); its Worlds step",
+      entry.id, progress.assets,
+      static_cast<double>(SDL_GetTicksNS() - entry.created_ns) * kNsToMs,
+      progress.failed, entry.texts.size());
+  return true;
+}
+
+std::expected<std::string_view, Error> AssetRuntime::Text(
+    std::string_view path) const {
+  const std::string key = ContentKey(path);
+  // The newest scopes first: a state being created reads its own versions.
+  for (const StateScope& scope : scopes_ | std::views::reverse) {
+    for (const ScopeText& text : scope.texts) {
+      if (text.path == key && text.pinned != nullptr) {
+        return std::string_view(*text.pinned);
+      }
+    }
+  }
+  return std::unexpected(
+      Error{ErrorCode::kNotFound,
+            "not a text of any state on the stack (name it in the state's "
+            "StateAssets::texts, or in GameSetup::text_dependencies)",
+            key, 0, 0});
 }
 
 void AssetRuntime::RequestSound(const StateScope& entry,
@@ -207,6 +339,7 @@ void AssetRuntime::SyncScopes(const GameStateStack& states) {
   const std::vector<StackEntry> entries = states.Entries();
   // States that left the stack release their scopes.
   std::erase_if(scopes_, [&](const StateScope& scope) {
+    if (scope.pending) return false;
     const bool on_stack =
         std::ranges::any_of(entries, [&scope](const StackEntry& entry) {
           return entry.state == scope.state && entry.id == scope.id;
@@ -223,6 +356,16 @@ void AssetRuntime::SyncScopes(const GameStateStack& states) {
           return entry.state == scope.state && entry.id == scope.id;
         });
     if (known) continue;
+    // M13: a state the gate let through takes the scope Ready() made.
+    const auto pending =
+        std::ranges::find_if(scopes_, [&entry](const StateScope& scope) {
+          return scope.pending && scope.ready && scope.id == entry.id;
+        });
+    if (pending != scopes_.end()) {
+      pending->state = entry.state;
+      pending->pending = false;
+      continue;
+    }
     StateScope scope;
     scope.state = entry.state;
     scope.id = std::string(entry.id);
@@ -231,9 +374,22 @@ void AssetRuntime::SyncScopes(const GameStateStack& states) {
     scopes_.push_back(std::move(scope));
     RequestStateAssets(scopes_.back());
   }
+  // A scope made for a state that no longer waits (its command was
+  // dropped, the stack cleared) is released.
+  const std::string_view waiting = states.Waiting();
+  std::erase_if(scopes_, [&](const StateScope& scope) {
+    if (!scope.pending || scope.id == waiting) return false;
+    AssertMainThread();
+    registry_->ReleaseScope(scope.scope);
+    return true;
+  });
 }
 
 AssetScope AssetRuntime::ScopeOf(std::string_view id) const {
+  for (const StateScope& scope : scopes_) {
+    if (!scope.pending && scope.id == id) return scope.scope;
+  }
+  // M13: the scope of a state that waits at the content gate.
   for (const StateScope& scope : scopes_) {
     if (scope.id == id) return scope.scope;
   }
@@ -254,7 +410,9 @@ bool AssetRuntime::TopResident(const GameStateStack& states,
   if (entries.empty()) return true;
   const StackEntry& top = entries.back();
   for (StateScope& scope : scopes_) {
-    if (scope.state != top.state || scope.id != top.id) continue;
+    if (scope.pending || scope.state != top.state || scope.id != top.id) {
+      continue;
+    }
     if (registry_->ScopeResident(scope.scope)) {
       if (!scope.resident_logged) {
         scope.resident_logged = true;
@@ -284,6 +442,27 @@ bool AssetRuntime::TopResident(const GameStateStack& states,
 
 bool AssetRuntime::Hold(const GameStateStack& states) {
   SE_ASSERT_MAIN_THREAD();
+  if (const std::string_view waiting = states.Waiting(); !waiting.empty()) {
+    // M13: a state waits at the content gate; no tick runs before it is
+    // created (logged when the hold starts).
+    ++held_frames_;
+    if (!waiting_logged_) {
+      waiting_logged_ = true;
+      const AssetScope scope = [&] {
+        for (const StateScope& s : scopes_) {
+          if (s.pending && s.id == waiting) return s.scope;
+        }
+        return AssetScope{};
+      }();
+      const ScopeProgress progress = registry_->Progress(scope);
+      SE_LOG_INFO(
+          "sim held (no ticks planned): state '{}' waits at the content gate "
+          "for {} of its {} assets",
+          waiting, progress.loading, progress.assets);
+    }
+    return true;
+  }
+  waiting_logged_ = false;
   const bool held = !TopResident(states, "no ticks planned");
   if (held) ++held_frames_;
   return held;
@@ -291,7 +470,8 @@ bool AssetRuntime::Hold(const GameStateStack& states) {
 
 bool AssetRuntime::HoldTicks(const GameStateStack& states, Tick next_tick) {
   AssertMainThread();
-  const bool held = !TopResident(states, "a tick pushed a state");
+  const bool held = !states.Waiting().empty() ||
+                    !TopResident(states, "a tick pushed a state");
   if (held) {
     SE_LOG_DEBUG("tick {} and the rest of the frame held for assets",
                  next_tick);
@@ -306,7 +486,9 @@ void AssetRuntime::BeforeRender(const GameStateStack& states) {
 
 bool AssetRuntime::Drawable(const World* world) const {
   for (const StateScope& scope : scopes_) {
-    if (registry_->ScopeResident(scope.scope)) continue;
+    if (scope.state == nullptr || registry_->ScopeResident(scope.scope)) {
+      continue;
+    }
     const auto worlds = scope.state->Worlds();
     if (std::ranges::find(worlds, world) != worlds.end()) return false;
   }

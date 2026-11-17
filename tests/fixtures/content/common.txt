@@ -1,0 +1,3 @@
+# content_test: entities every play World shares (an include)
+entity wall 100 100 0 0
+entity drifter -40 0 0 0.75

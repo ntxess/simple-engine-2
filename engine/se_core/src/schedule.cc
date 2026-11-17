@@ -146,7 +146,10 @@ void Schedule::Step(World& world, const InputFrame& input,
   world.MutableClock().Advance();
   const TickContext context{input, world.Clock(), jobs};
   Breadcrumb& crumb = ThreadBreadcrumb();
-  crumb.SetTick(world.Clock().tick);
+  // The session's tick (the InputFrame's), which a replay from a dump runs
+  // to: a World of a state pushed later counts its own ticks from 0 (M13,
+  // ADR-124). Frames without a tick (tests) fall back to the World's.
+  crumb.SetTick(input.tick != 0 ? input.tick : world.Clock().tick);
 
   std::size_t next = 0;
   for (int p = 0; p < kPhaseCount; ++p) {

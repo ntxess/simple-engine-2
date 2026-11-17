@@ -42,6 +42,8 @@ enum class QuitReason : std::uint8_t {
   kSessionEnd,
   kTerminating,
   kFault,
+  // M13: the game's last state was popped.
+  kGameEnded,
 };
 
 [[nodiscard]] std::string_view QuitReasonName(QuitReason reason) noexcept;

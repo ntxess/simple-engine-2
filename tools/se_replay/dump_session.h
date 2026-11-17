@@ -16,6 +16,10 @@
 // Play session (the header's kSessionFlagPlayStart) starts from the
 // Play-start bytes of the dump, written to |start_scene| and loaded from
 // there, and applies the dump's SessionLog (the edits made during Play).
+// M13: a game's dump carries its session stream too (the same stream
+// type: the replay file without frames); its SessionLog is applied, and
+// start bytes that are a content bundle run the module's states from the
+// bundle's start state (rampage, or the content test module).
 //
 // The minidump is parsed from its header and stream directory only (the
 // MINIDUMP_HEADER signature "MDMP", little-endian); first-party streams are
@@ -53,8 +57,9 @@ struct DumpedSession {
   // Main's breadcrumb (ThreadRegistry slot 0) when that slot was live.
   bool main_live = false;
   BreadcrumbFields main;
-  // The Play-start stream's bytes (an editor Play session: a replay file
-  // without frames); empty when the dump has none.
+  // The Play-start stream's bytes (an editor Play session, or since M13 a
+  // game's session: a replay file without frames); empty when the dump
+  // has none.
   std::vector<std::byte> play_start;
 };
 
@@ -87,6 +92,9 @@ struct FromDumpResult {
   // The dump's published hash was compared at this tick (0: none was
   // published).
   Tick checked_tick = 0;
+  // M13: the top state after each tick, for a session replayed from a
+  // content bundle (empty otherwise).
+  std::vector<std::string> top_states;
   // Empty when the replay ran and matched the dump; else why not.
   std::string error;
 };
@@ -95,11 +103,14 @@ struct FromDumpResult {
 // |root|, whose hash must match, the seed and the frames from the dump) up
 // to main's breadcrumb tick, and checks the dump's last published hash. An
 // editor Play session's Play-start bytes are written to |start_scene|
-// (required for one) and its SessionLog is applied.
+// (required for one) and its SessionLog is applied. A game session whose
+// stream holds a content bundle (M13) runs from |start_state| (empty: the
+// bundle's, else the module's game_start_state) on the bundle; such a dump
+// may also come from the content test module.
 [[nodiscard]] FromDumpResult ReplayDumpedRampage(
     const DumpedSession& session, const std::string& root,
-    const std::string& start_scene = {}) SE_REQUIRES(g_main)
-    SE_EXCLUDES(g_sim_owner);
+    const std::string& start_scene = {}, const std::string& start_state = {})
+    SE_REQUIRES(g_main) SE_EXCLUDES(g_sim_owner);
 
 }  // namespace se::replay
 

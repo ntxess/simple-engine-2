@@ -9,10 +9,13 @@
 #                         the kernel and rampage goldens and scenarios, the
 #                         commands, a faulting tick (ADR-083), catch-up
 #                         bursts, and the sim thread's snapshots against the
-#                         inline driver's RenderLists (ADR-086)
+#                         inline driver's RenderLists (ADR-086); M13a: the
+#                         stack's content gate and content bundles
+#                         (content_gate_test.cc, ADR-123)
 
 se_add_module(se_sim_tests KIND EXECUTABLE
   SOURCES
+    content_gate_test.cc
     doorbell_test.cc
     fault_box_test.cc
     input_folder_test.cc
@@ -26,6 +29,7 @@ se_add_module(se_sim_tests KIND EXECUTABLE
     se_render_core
     se_sim
     se_test_support
+    se_content_test_support
     game_rampage
     rampage_test_support
     Catch2::Catch2WithMain
