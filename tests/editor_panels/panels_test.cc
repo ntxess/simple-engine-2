@@ -12,6 +12,7 @@
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <entt/entity/registry.hpp>
@@ -330,7 +331,7 @@ TEST_CASE("The profiler graphs each system against the legacy axis rule",
   REQUIRE(dumped);
 }
 
-TEST_CASE("The stress generator spreads a press over frames and ticks",
+TEST_CASE("The stress generator's press is one command group in its frame",
           "[editor][stress]") {
   const testing::MainThreadScope main_thread;
   const InlineOwnerScope owner(OnMainThread());
@@ -343,33 +344,45 @@ TEST_CASE("The stress generator spreads a press over frames and ticks",
   WidgetProbe probe;
   stress.SetProbe(&probe);
 
-  SECTION("Edit mode: one batch of create commands per frame, one step") {
+  SECTION("Edit mode: the whole press in its frame, one undo step") {
     RecordingCommands commands;
     const PanelContext context = EditContext(w.CGet(), commands);
     ui.Frame(stress, context);
     ui.Click(stress, context, Center(probe, "stress.generate"));
-    REQUIRE(commands.commands.size() == 64);
-    REQUIRE(commands.events.front() == "begin:Generate 130 enemies");
-    REQUIRE(stress.Pending() == 66);
-    ui.Frame(stress, context);
-    REQUIRE(commands.commands.size() == 128);
-    ui.Frame(stress, context);
-    REQUIRE(commands.commands.size() == 130);
-    REQUIRE(stress.Pending() == 0);
-    REQUIRE(commands.events.back() == "end");
-    REQUIRE(commands.commands[0]->Kind() == CommandKind::kCreateEntity);
-    REQUIRE(commands.commands[0]->Target() ==
-            StressGuid(w.CGet().Desc().seed, 0, 0));
+    REQUIRE(commands.commands.size() == 1);
+    REQUIRE(commands.commands[0]->Kind() == CommandKind::kGroup);
+    REQUIRE(commands.commands[0]->Label() == "Generate 130 enemies");
+    const auto& group = static_cast<const CommandGroup&>(*commands.commands[0]);
+    REQUIRE(group.size() == 130);
+    REQUIRE(group.At(0).Kind() == CommandKind::kCreateEntity);
+    REQUIRE(group.At(0).Target() == StressGuid(w.CGet().Desc().seed, 0, 0));
+    // Each spawn is an instance of the enemy prefab.
+    const auto& create = static_cast<const CreateEntityCommand&>(group.At(0));
+    bool linked = false;
+    for (const ComponentJson& c : create.Components()) {
+      linked = linked || (c.component == "PrefabInstance" &&
+                          c.json.find(kStressPrefab) != std::string::npos);
+    }
+    REQUIRE(linked);
+    // No coalesce scope: the tab hidden in the next frames leaves nothing
+    // open.
+    for (int frame = 0; frame < 3; ++frame) {
+      ui.Frame(std::span<editor::Panel* const>(), context);
+    }
+    for (const std::string& event : commands.events) {
+      REQUIRE_FALSE(event.starts_with("begin:"));
+    }
     REQUIRE(commands.ApplyPending(w.Get()));
     REQUIRE(w.CGet().EntityCount() == 130);
-    // Remove destroys every enemy, in one step.
+    // Remove destroys every enemy, in one step of its frame.
     ui.Click(stress, context, Center(probe, "stress.remove"));
-    REQUIRE(commands.commands.size() == 260);
+    REQUIRE(commands.commands.size() == 131);
+    REQUIRE(commands.events.back() == "end");
     REQUIRE(commands.ApplyPending(w.Get()));
     REQUIRE(w.CGet().EntityCount() == 0);
     // The next press takes new Guids.
     ui.Click(stress, context, Center(probe, "stress.generate"));
-    REQUIRE(commands.commands.back()->Kind() == CommandKind::kCreateEntity);
+    REQUIRE(commands.commands.back()->Kind() == CommandKind::kGroup);
     REQUIRE(stress.Presses() == 2);
   }
 
@@ -388,8 +401,37 @@ TEST_CASE("The stress generator spreads a press over frames and ticks",
     REQUIRE(play.queued[63].first == 50);
     REQUIRE(play.queued[64].first == 51);
     REQUIRE(play.queued[129].first == 52);
-    REQUIRE(stress.Pending() == 0);
   }
+}
+
+TEST_CASE("A 1000-enemy press applies in one frame", "[editor][stress][slow]") {
+  const testing::MainThreadScope main_thread;
+  const InlineOwnerScope owner(OnMainThread());
+  PanelWorld w;
+  w.Finish();
+  PanelHarness ui;
+  StressPanel stress;
+  stress.SetAmount(1000);
+  WidgetProbe probe;
+  stress.SetProbe(&probe);
+  RecordingCommands commands;
+  const PanelContext context = EditContext(w.CGet(), commands);
+  ui.Frame(stress, context);
+  ui.Click(stress, context, Center(probe, "stress.generate"));
+  REQUIRE(commands.commands.size() == 1);
+  const auto start = std::chrono::steady_clock::now();
+  REQUIRE(commands.ApplyPending(w.Get()));
+  const double ms = std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - start)
+                        .count();
+  REQUIRE(w.CGet().EntityCount() == 1000);
+  SE_LOG_INFO("stress generator: a 1000-enemy press applied in {:.2f} ms", ms);
+  WARN(std::format("a 1000-enemy press applied in {:.2f} ms", ms));
+#if !defined(__SANITIZE_ADDRESS__) && !defined(__SANITIZE_THREAD__)
+  // The spec's bound for an optimised build (msvc-dev; ADR-121). Sanitizer
+  // builds log the time only.
+  CHECK(ms <= 250.0);
+#endif
 }
 
 TEST_CASE("Scene settings adds a primary camera, then edits it",

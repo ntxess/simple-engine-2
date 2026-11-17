@@ -12,7 +12,8 @@
 // Runtime options are AppConfig's (se_runtime/app_config.h); every test
 // and manual run passes --audio null or none (the default plays on the
 // real device). --scene opens a scene file relative to the content root
-// (default assets/scenes/sandbox.scene.json); --editor-script (test
+// (default assets/scenes/sandbox.scene.json; a prefab file opens as a
+// prefab document, its kind by its "format"); --editor-script (test
 // builds) runs a script of editor actions at frame boundaries
 // (se_editor/editor_script.h); --viewports turns on ImGui's
 // multi-viewports. The editor paces Standard with frame latency 2, keeps
@@ -20,10 +21,12 @@
 
 #include <cstddef>
 #include <expected>
+#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include "game_rampage/module.h"
 #include "game_rampage/scene.h"
@@ -35,6 +38,7 @@
 #include "se_editor/editor_game.h"
 #include "se_editor/panel.h"
 #include "se_editor_panels/panels.h"
+#include "se_editor_panels/stat_name_command.h"
 #include "se_runtime/app.h"
 #include "se_runtime/app_config.h"
 #include "se_runtime/integration.h"
@@ -48,23 +52,51 @@ namespace {
 
 constexpr const char* kDefaultScene = "assets/scenes/sandbox.scene.json";
 
+se::editor::EntityJson ToEntityJson(se::rampage::EntityComponentsJson entity) {
+  se::editor::EntityJson out;
+  out.guid = entity.guid;
+  out.components.reserve(entity.components.size());
+  for (auto& [name, json] : entity.components) {
+    out.components.push_back(
+        se::editor::ComponentJson{std::move(name), std::move(json)});
+  }
+  return out;
+}
+
 se::editor::EditorGame RampageForTheEditor() {
   se::editor::EditorGame game;
   game.module = &se::rampage::RampageModule();
   game.load_scene =
-      [](se::World& world, std::string_view text,
-         const std::string& asset_root) -> std::expected<void, se::Error> {
+      [](se::World& world, std::string_view text, const std::string& asset_root,
+         const std::function<void(std::string_view, std::string_view)>&
+             on_prefab) -> std::expected<void, se::Error> {
     // The editor calls it on main while it owns the World (inline mode).
     se::AssertMainThread();
     const se::InlineOwnerScope owner(se::OnMainThread());
     se::rampage::SceneLoadOptions options;
     options.asset_root = asset_root;
+    options.on_prefab = on_prefab;
     auto loaded = se::rampage::LoadScene(world, text, options);
     if (!loaded) return std::unexpected(std::move(loaded.error()));
     return {};
   };
   game.save_scene = [](const se::World& world, std::string_view name) {
+    // Flattened (kFlatten): the Play-start bytes, faults, the content hash.
     return se::rampage::SaveScene(world, name);
+  };
+  // M11a's writer (kPrefabs), prefab documents, the baseline and the
+  // rebase are stubs until its next commits: they are filled then
+  // (save_scene_file, load_prefab, save_prefab, prefab_baseline,
+  // rebase_instances). Saves write the flattened scene meanwhile.
+  game.removed_with = [](std::string_view component) {
+    std::vector<std::string> out;
+    for (const std::string_view derived : se::rampage::RemovedWith(component)) {
+      out.emplace_back(derived);
+    }
+    return out;
+  };
+  game.removable = [](std::string_view component) {
+    return se::rampage::Removable(component);
   };
   game.set_play_game_scene = [](const std::string& scene_path,
                                 const std::string& asset_root) {
@@ -105,6 +137,10 @@ std::expected<se::GameSetup, se::Error> MakeEditor(
                           "--viewports)");
     }
   }
+  // The script's stat-name verbs: the Stats drawer's command group.
+  options.script_hooks.stat_name_edit = &se::editor::MakeStatNameEdit;
+  options.script_hooks.has_stat_name = &se::editor::HasStatName;
+  options.script_hooks.stress_press = &se::editor::MakeStressPress;
   auto editor = std::make_shared<se::editor::Editor>(RampageForTheEditor(),
                                                      std::move(options));
   // The panels, in their dock order. The Profiler's button asks the crash

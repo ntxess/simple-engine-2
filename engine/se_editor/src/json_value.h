@@ -62,6 +62,10 @@ struct Member {
 [[nodiscard]] std::expected<Value, Error> Parse(std::string_view text);
 [[nodiscard]] std::string Write(const Value& value);
 
+// The same JSON value: objects member by member in any order, arrays in
+// order, numbers by value (100 and 100.0 are equal).
+[[nodiscard]] bool Equal(const Value& a, const Value& b);
+
 }  // namespace se::editor::json
 
 #endif  // ENGINE_SE_EDITOR_SRC_JSON_VALUE_H_

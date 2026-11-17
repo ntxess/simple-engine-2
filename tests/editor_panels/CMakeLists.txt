@@ -39,6 +39,9 @@ se_add_module(se_editor_panel_tests KIND EXECUTABLE
   TEST)
 target_include_directories(se_editor_panel_tests PRIVATE
   "${CMAKE_SOURCE_DIR}/tests")
+# The prefab tests open the repository's sandbox and prefabs (read only).
+target_compile_definitions(se_editor_panel_tests PRIVATE
+  SE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 
 catch_discover_tests(se_editor_panel_tests
   DISCOVERY_MODE PRE_TEST

@@ -577,6 +577,12 @@ void AssetRegistry::Failed(Common& common, bool reload, Error error) {
 void AssetRegistry::OnCompletion(LaneCompletion&& completion) {
   if (completion.result &&
       std::holds_alternative<FileChange>(*completion.result)) {
+    if ((std::get<FileChange>(*completion.result).tag & kForeignWatchTag) !=
+        0) {
+      // A watch of the registry's user (the editor's documents).
+      if (foreign_) foreign_(std::move(completion));
+      return;
+    }
     OnFileChange(std::get<FileChange>(*completion.result));
     return;
   }

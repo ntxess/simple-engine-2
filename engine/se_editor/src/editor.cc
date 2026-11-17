@@ -85,28 +85,27 @@ std::string_view EditorModeName(EditorMode mode) noexcept {
 
 // --- The panels' interfaces ---
 
+// Edit-mode items record the active document and the panel being drawn:
+// they apply to that document (ADR-118).
 void Editor::Commands::Submit(std::unique_ptr<EditorCommand> command) {
-  if (command == nullptr) return;
-  Queued queued;
-  queued.command = std::move(command);
-  editor_->queued_.push_back(std::move(queued));
+  editor_->edits_.Submit(editor_->documents_.ActiveId(),
+                         editor_->drawing_panel_, std::move(command));
 }
 
 void Editor::Commands::BeginCoalesce(std::string_view label) {
-  Queued queued;
-  queued.begin_coalesce = true;
-  queued.label = std::string(label);
-  editor_->queued_.push_back(std::move(queued));
+  editor_->edits_.BeginCoalesce(editor_->documents_.ActiveId(),
+                                editor_->drawing_panel_, label);
 }
 
 void Editor::Commands::EndCoalesce() {
-  Queued queued;
-  queued.end_coalesce = true;
-  editor_->queued_.push_back(std::move(queued));
+  editor_->edits_.EndCoalesce(editor_->documents_.ActiveId(),
+                              editor_->drawing_panel_);
 }
 
 void Editor::Commands::Select(std::span<const Guid> guids) {
-  if (editor_->document_) editor_->document_->GetSelection().Set(guids);
+  if (EditDocument* document = editor_->Active()) {
+    document->GetSelection().Set(guids);
+  }
 }
 
 Tick Editor::PlayEditsImpl::NextTick() const noexcept {
@@ -124,13 +123,14 @@ void Editor::PlayEditsImpl::Submit(std::unique_ptr<EditorCommand> command,
   }
   Queued queued;
   queued.command = std::move(command);
-  queued.play = true;
   queued.apply_before = apply_before;
   editor_->queued_.push_back(std::move(queued));
 }
 
 void Editor::PlayEditsImpl::Select(std::span<const Guid> guids) {
-  if (editor_->document_) editor_->document_->GetSelection().Set(guids);
+  if (EditDocument* document = editor_->Active()) {
+    document->GetSelection().Set(guids);
+  }
 }
 
 void Editor::Viewports::ReportInput(bool focused, bool hovered) {
@@ -224,11 +224,11 @@ ImVec2 Editor::Textures::Size(TextureHandle texture) {
 Editor::Editor(EditorGame game, EditorOptions options)
     : game_(std::move(game)),
       options_(std::move(options)),
+      documents_(options_.autosave_quiet_ns),
       commands_(std::make_unique<Commands>(this)),
       play_edits_(std::make_unique<PlayEditsImpl>(this)),
       viewports_(std::make_unique<Viewports>(this)),
-      textures_(std::make_unique<Textures>(this)),
-      autosave_(options_.autosave_quiet_ns) {}
+      textures_(std::make_unique<Textures>(this)) {}
 
 Editor::~Editor() = default;
 
@@ -313,7 +313,6 @@ std::expected<void, Error> Editor::Boot(App& app) {
       !opened) {
     return opened;
   }
-  initial_hash_ = document_->Hash();
   // No session runs yet: a dump taken now says so (ADR-111).
   BeginIdleHeader();
   if (!options_.script.empty()) {
@@ -338,7 +337,7 @@ std::expected<void, Error> Editor::Boot(App& app) {
   SE_LOG_INFO(
       "editor: '{}' open ({} entities, hash {:016x}); ImGui {}, pacing {} "
       "latency {}",
-      document_->Desc().name, document_->Get().EntityCount(), initial_hash_,
+      Active()->Desc().name, Active()->Get().EntityCount(), Active()->Hash(),
       imgui_renderer_ ? "on the window" : "headless",
       PacingModeName(app.Pacer().Mode()), app.Pacer().FrameLatency());
   return {};
@@ -390,6 +389,9 @@ ExtensionSession Editor::BeginFrame(App& app, std::uint64_t now_ns) {
     reset = true;
   }
   viewports_->BeginFrame();
+  // Hot reload: the file events of the lane's last completions (outside
+  // Play; a Stop above lets the ones kept during Play run now).
+  RunFileEvents();
   RunPendingOpen(app);
   RunScript(app, now_ns);
   const PlayState before = play_ ? play_->State() : PlayState::kPlaying;
@@ -412,13 +414,20 @@ ExtensionSession Editor::BeginFrame(App& app, std::uint64_t now_ns) {
     session.states = document_states_.get();
     session.next_tick = 0;
     // Idle only when nothing waits on frames: no script, no quit flow, no
-    // autosave due soon, no modal open.
-    const bool autosave_waiting =
-        document_ && document_->Dirty() &&
-        autosave_.SubmittedRevision() != document_->Revision();
+    // autosave due soon, no modal open, no file read in flight.
+    bool autosave_waiting = false;
+    bool prompt = close_prompt_ != kNoDocument;
+    for (const auto& entry : documents_.All()) {
+      const EditDocument& document = *entry->document;
+      autosave_waiting =
+          autosave_waiting ||
+          (document.Dirty() &&
+           entry->autosave.SubmittedRevision() != document.Revision());
+      prompt = prompt || entry->reload_prompt;
+    }
     session.idle_allowed = script_done_ && quit_phase_ == QuitPhase::kNone &&
                            !autosave_waiting && recovery_offer_.empty() &&
-                           saves_.empty();
+                           saves_.empty() && reads_.empty() && !prompt;
   }
   session.reset_accumulator = reset;
   return session;
@@ -488,39 +497,25 @@ void Editor::ApplyQueued() {
   std::vector<Queued> queued = std::move(queued_);
   queued_.clear();
   for (Queued& item : queued) {
-    if (item.begin_coalesce || item.end_coalesce) {
-      if (!document_ || play_) continue;
-      if (item.begin_coalesce) {
-        document_->BeginCoalesce(item.label);
-      } else {
-        document_->EndCoalesce();
-      }
-      continue;
-    }
-    if (item.play) {
-      if (!play_) continue;
-      if (auto edited = play_->Edit(*item.command, item.apply_before);
-          !edited) {
-        SE_LOG_ERROR("play edit '{}': {}", item.command->Label(),
-                     edited.error().message);
-      } else {
-        SE_LOG_INFO("play edit '{}' queued for tick {}", item.command->Label(),
-                    std::max(item.apply_before, play_->NextTick()));
-      }
-      continue;
-    }
-    if (!document_ || play_) {
-      SE_LOG_WARN("editor: '{}' dropped: the document is not editable now",
-                  item.command->Label());
-      continue;
-    }
-    const InlineOwnerScope owner(OnMainThread());
-    const std::string label(item.command->Label());
-    if (auto applied = document_->Apply(std::move(item.command)); !applied) {
-      SE_LOG_ERROR("edit '{}': {}", label, applied.error().message);
-      last_edit_error_ = applied.error().message;
+    if (!play_) continue;
+    if (auto edited = play_->Edit(*item.command, item.apply_before); !edited) {
+      SE_LOG_ERROR("play edit '{}': {}", item.command->Label(),
+                   edited.error().message);
+    } else {
+      SE_LOG_INFO("play edit '{}' queued for tick {}", item.command->Label(),
+                  std::max(item.apply_before, play_->NextTick()));
     }
   }
+  if (play_) {
+    // The documents are frozen during Play.
+    edits_.DropAll("the document is not editable during Play");
+    return;
+  }
+  const InlineOwnerScope owner(OnMainThread());
+  const EditQueue::Applied applied = edits_.Apply(
+      documents_,
+      [this](std::string_view panel) { return PanelDrewLastFrame(panel); });
+  if (applied.failed > 0) last_edit_error_ = applied.error;
 }
 
 void Editor::BuildRender(App& app, const FrameReport& report,
@@ -656,7 +651,9 @@ void Editor::ShutdownWorlds(App& app) {
     document_states_->Clear();
   }
   document_states_.reset();
-  document_.reset();
+  stack_document_ = kNoDocument;
+  documents_.SetFrozen(false);
+  documents_.Clear();
   viewports_->DestroyAll();
   if (AssetRuntime* assets = app.Assets()) {
     assets->SetForeignListener({});

@@ -1,0 +1,33 @@
+# File > Close over a dirty document (M11b; the open prompt of ADR-113
+# became the close prompt): Cancel keeps the changes; Save saves them
+# through the lane and closes once the save completed; Don't Save closes
+# at once. The document is a copy of the sandbox (--scene-copy); the
+# second one is the repository sandbox, which is never saved.
+set 5a4db0c5-0000-4000-8000-000000000000 Transform {"pos":{"x":321,"y":250},"rot":0,"scale":{"x":1,"y":1},"teleport_tick":0}
+expect-dirty yes
+close
+wait-frames 1
+expect-close-prompt yes
+answer-close cancel
+expect-close-prompt no
+expect-documents 1
+expect-dirty yes
+# Save, then close.
+close
+expect-close-prompt yes
+answer-close save
+wait-saves
+wait-frames 2
+expect-close-prompt no
+expect-documents 0
+expect-recovery no
+# Don't Save: the change is dropped with the document.
+open assets/scenes/sandbox.scene.json
+expect-documents 1
+set 5a4db0c5-0000-4000-8000-000000000000 Transform {"pos":{"x":123,"y":250},"rot":0,"scale":{"x":1,"y":1},"teleport_tick":0}
+expect-dirty yes
+close discard
+wait-frames 1
+expect-close-prompt no
+expect-documents 0
+quit discard

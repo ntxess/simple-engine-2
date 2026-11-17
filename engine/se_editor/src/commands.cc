@@ -227,6 +227,8 @@ std::string_view CommandKindName(CommandKind kind) noexcept {
       return "delete-path-point";
     case CommandKind::kGroup:
       return "group";
+    case CommandKind::kGame:
+      return "game";
   }
   return "unknown";
 }

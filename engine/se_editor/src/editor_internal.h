@@ -19,6 +19,7 @@
 #include <string_view>
 #include <vector>
 
+#include "se_assets/asset_registry.h"
 #include "se_core/guid.h"
 #include "se_core/handle.h"
 #include "se_core/types.h"
@@ -30,6 +31,10 @@
 #include "se_render/renderer_2d.h"
 
 namespace se::editor {
+
+// The documents' hot-reload watch tag (a foreign tag: the scan's changes
+// reach the editor through the AssetRuntime's foreign listener).
+inline constexpr std::uint64_t kEditorWatchTag = kForeignWatchTag | 0xED17;
 
 class Editor::Commands final : public EditorCommands {
  public:

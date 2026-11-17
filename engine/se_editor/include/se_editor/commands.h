@@ -63,6 +63,9 @@ enum class CommandKind : std::uint8_t {
   kDeletePathPoint,
   // Several commands as one undo step (a coalesced drag, a multi-edit).
   kGroup,
+  // A command a game-aware module defines (M11b: se_editor_panels'
+  // StatNameCommand, which records a stat's name in the World's ctx).
+  kGame,
 };
 
 [[nodiscard]] std::string_view CommandKindName(CommandKind kind) noexcept;

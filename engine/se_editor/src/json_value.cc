@@ -355,6 +355,34 @@ std::expected<Value, Error> Parse(std::string_view text) {
   return Parser(text).Document();
 }
 
+bool Equal(const Value& a, const Value& b) {
+  if (a.kind != b.kind) return false;
+  switch (a.kind) {
+    case Kind::kNull:
+      return true;
+    case Kind::kBool:
+      return a.boolean == b.boolean;
+    case Kind::kNumber:
+      return a.AsDouble() == b.AsDouble();
+    case Kind::kString:
+      return a.text == b.text;
+    case Kind::kArray:
+      if (a.items.size() != b.items.size()) return false;
+      for (std::size_t i = 0; i < a.items.size(); ++i) {
+        if (!Equal(a.items[i], b.items[i])) return false;
+      }
+      return true;
+    case Kind::kObject:
+      if (a.members.size() != b.members.size()) return false;
+      for (const Member& member : a.members) {
+        const Value* other = b.Find(member.key);
+        if (other == nullptr || !Equal(member.value, *other)) return false;
+      }
+      return true;
+  }
+  return false;
+}
+
 std::string Write(const Value& value) {
   std::string out;
   WriteValue(value, out);

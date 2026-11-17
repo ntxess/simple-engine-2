@@ -14,6 +14,7 @@ se_add_module(se_editor_tests KIND EXECUTABLE
     commands_test.cc
     dialog_mailbox_test.cc
     document_test.cc
+    documents_test.cc
     idle_test.cc
     imgui_context_test.cc
     play_dump_test.cc
@@ -24,6 +25,7 @@ se_add_module(se_editor_tests KIND EXECUTABLE
     ../support/tracy_inert_listener.cc
   PRIVATE_DEPS
     se_editor
+    se_editor_panels
     se_imgui
     game_rampage
     rampage_test_support
@@ -102,10 +104,10 @@ if(NOT CMAKE_BUILD_TYPE STREQUAL "Release" AND TARGET simple_editor)
   _se_editor_script(dialog_quit dialog_quit
     --expect "1 answered during the quit")
   _se_editor_script(dialog_open dialog_open)
-  # File > Open over a dirty document waits for the unsaved-changes prompt:
+  # File > Close of a dirty document waits for the unsaved-changes prompt:
   # Cancel keeps the changes, Save saves them first, Don't Save discards.
-  _se_editor_script(open_dirty open_dirty --scene-copy "${_se_sandbox}"
-    --expect-scene-contains "321" --expect "waits for the prompt")
+  _se_editor_script(close_dirty close_dirty --scene-copy "${_se_sandbox}"
+    --expect-scene-contains "321" --expect "the close waits for the prompt")
   # An autosave that lands after a newer save leaves no recovery file.
   _se_editor_script(autosave_after_save autosave_after_save
     --scene-copy "${_se_sandbox}" --expect-scene-contains "222")
@@ -117,6 +119,11 @@ if(NOT CMAKE_BUILD_TYPE STREQUAL "Release" AND TARGET simple_editor)
   _se_editor_script(terminate_writes_recovery terminate
     --scene-copy "${_se_sandbox}" --expect-recovery-file
     --expect "recovery file")
+
+  # M11b: the stat name script (the prefab, document, hot-reload and stress
+  # scripts need M11a's writer and prefab documents: added with them).
+  _se_editor_script(stat_names stat_names --scene-copy "${_se_sandbox}"
+    --expect-scene-contains "Armor")
 
   # In a window shown without focus, the panels docked in it. The World is
   # drawn into the Viewport panel's ViewportTarget, so --readback reads that
