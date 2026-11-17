@@ -23,7 +23,7 @@ expect-hash document initial
 create-copy 00000000-0000-0000-0000-0000000000aa 5a4db0c5-0000-4000-8000-000000000003
 expect-entities document 18
 undo
-remove 5a4db0c5-0000-4000-8000-000000000000 Name
+remove 5a4db0c5-0000-4000-8000-000000000000 Collider
 undo
 add 5a4db0c5-0000-4000-8000-000000000000 Moved {}
 undo

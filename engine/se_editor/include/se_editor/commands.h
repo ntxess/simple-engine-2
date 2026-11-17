@@ -63,6 +63,9 @@ enum class CommandKind : std::uint8_t {
   kDeletePathPoint,
   // Several commands as one undo step (a coalesced drag, a multi-edit).
   kGroup,
+  // A command a game-aware module defines (M11b: se_editor_panels'
+  // StatNameCommand, which records a stat's name in the World's ctx).
+  kGame,
 };
 
 [[nodiscard]] std::string_view CommandKindName(CommandKind kind) noexcept;
@@ -219,7 +222,9 @@ class RemoveComponentCommand final : public EditorCommand {
 };
 
 // Creates an entity with |components| (IdComponent comes from the Guid;
-// a Spawned value, when given, replaces the one Create records).
+// a Spawned value, when given, replaces the one Create records). Without
+// one, the Spawned the first Apply recorded is given again on redo, so
+// undo then redo restores the entity's spawn order (and the hashes).
 class CreateEntityCommand final : public EditorCommand {
  public:
   CreateEntityCommand(Guid target, std::vector<ComponentJson> components);
@@ -245,6 +250,8 @@ class CreateEntityCommand final : public EditorCommand {
  private:
   Guid target_;
   std::vector<ComponentJson> components_;
+  // The Spawned the first Apply recorded (when |components_| has none).
+  std::string spawned_;
 };
 
 // Destroys an entity; it is stored serialized when it applies, for Revert.

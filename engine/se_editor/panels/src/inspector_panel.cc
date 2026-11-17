@@ -24,6 +24,7 @@
 #include "se_core/world.h"
 #include "se_editor/commands.h"
 #include "se_editor/panel.h"
+#include "se_editor/prefab_commands.h"
 #include "se_editor/selection.h"
 #include "se_editor/texture_ids.h"
 #include "se_editor_panels/component_drawers.h"
@@ -38,7 +39,9 @@
 namespace se::editor {
 namespace {
 
-constexpr std::string_view kHidden[] = {"IdComponent", "DestroyRequest"};
+// The prefab link is shown as a line of its own, not as a component.
+constexpr std::string_view kHidden[] = {"IdComponent", "DestroyRequest",
+                                        kPrefabInstanceComponent};
 
 bool Hidden(std::string_view name) {
   for (const std::string_view hidden : kHidden) {
@@ -74,7 +77,39 @@ std::optional<CanvasView> InspectorPanel::CanvasViewOf(const Guid& guid) const {
   return it->second.view;
 }
 
+const EntityJson* InspectorPanel::Baseline(const PanelContext& context,
+                                           Guid guid) {
+  if (context.game == nullptr || !context.game->prefab_baseline ||
+      !PrefabOf(*context.world, guid)) {
+    return nullptr;
+  }
+  // In Edit mode the revision says whether the document changed; in Play
+  // (revision 0) it is computed again each frame.
+  const bool fresh = baseline_valid_ && context.revision != 0 &&
+                     baseline_guid_ == guid &&
+                     baseline_world_ == context.world &&
+                     baseline_document_ == context.document &&
+                     baseline_revision_ == context.revision;
+  if (!fresh) {
+    auto baseline = context.game->prefab_baseline(
+        *context.world, guid, std::string(context.asset_root));
+    baseline_valid_ = true;
+    baseline_guid_ = guid;
+    baseline_world_ = context.world;
+    baseline_document_ = context.document;
+    baseline_revision_ = context.revision;
+    if (baseline) {
+      baseline_ = std::move(*baseline);
+    } else {
+      baseline_.reset();
+      EditSink::ReportError(baseline.error());
+    }
+  }
+  return baseline_ ? &*baseline_ : nullptr;
+}
+
 void InspectorPanel::Draw(const PanelContext& context) {
+  overridden_.clear();
   if (context.world == nullptr) {
     ImGui::TextDisabled("No document");
     return;
@@ -106,6 +141,48 @@ void InspectorPanel::DrawEntity(const PanelContext& context, EditSink& sink,
   } else if (context.playing) {
     ImGui::TextDisabled("Playing: edits apply at the next tick");
   }
+  // A prefab instance: its prefab, and what differs from a bare instance.
+  const std::optional<std::string> prefab = PrefabOf(world, guid);
+  const EntityJson* baseline = Baseline(context, guid);
+  if (prefab) {
+    ImGui::TextDisabled("Prefab: %s", prefab->c_str());
+    ProbeItem("inspector.prefab");
+  }
+  if (baseline != nullptr) {
+    overridden_ = OverriddenComponents(world, guid, *baseline);
+  }
+  const auto overridden = [this](std::string_view name) {
+    for (const std::string& o : overridden_) {
+      if (o == name) return true;
+    }
+    return false;
+  };
+  const auto revert = [&](std::string_view name) {
+    if (baseline == nullptr) return;
+    auto command = MakeRevertToPrefab(world, guid, name, *baseline);
+    if (!command) {
+      EditSink::ReportError(command.error());
+      return;
+    }
+    sink.Submit(std::move(*command));
+  };
+  // Components of the prefab this instance removed.
+  if (baseline != nullptr) {
+    for (const std::string& removed : overridden_) {
+      const ComponentInfo* info = world.Registry().FindByName(removed);
+      if (info == nullptr || HasComponent(world, entity, *info)) continue;
+      ImGui::PushID(removed.c_str());
+      ImGui::TextColored({1.0F, 0.75F, 0.3F, 1.0F}, "%s: removed [override]",
+                         removed.c_str());
+      ProbeItem("inspector.override." + removed);
+      ImGui::SameLine();
+      ImGui::BeginDisabled(!sink.CanEdit());
+      if (ImGui::SmallButton("Revert to prefab")) revert(removed);
+      ProbeItem("inspector.revert." + removed);
+      ImGui::EndDisabled();
+      ImGui::PopID();
+    }
+  }
 
   DrawTarget target;
   target.world = &world;
@@ -135,13 +212,37 @@ void InspectorPanel::DrawEntity(const PanelContext& context, EditSink& sink,
     ImGui::PushID(info.name.data(), info.name.data() + info.name.size());
     bool keep = true;
     const std::string header(info.name);
-    const bool open = ImGui::CollapsingHeader(header.c_str(),
-                                              sink.CanEdit() ? &keep : nullptr,
-                                              ImGuiTreeNodeFlags_DefaultOpen);
+    const bool marked = overridden(header);
+    // The label changes with the marker; the id stays the component's.
+    const std::string label =
+        std::format("{}{}###{}", header, marked ? "  [override]" : "", header);
+    // What the game keeps (the entity's identity, its prefab link, its
+    // place) has no close button.
+    const bool removable =
+        sink.CanEdit() &&
+        (context.game == nullptr || RemovableBy(*context.game, header));
+    const bool open =
+        ImGui::CollapsingHeader(label.c_str(), removable ? &keep : nullptr,
+                                ImGuiTreeNodeFlags_DefaultOpen);
     ProbeItem("inspector.header." + header);
     if (!keep) {
-      sink.Submit(std::make_unique<RemoveComponentCommand>(guid, header));
+      // The component and what derives from it: one undo step.
+      if (context.game != nullptr) {
+        sink.Submit(MakeRemoval(world, guid, header, *context.game));
+      } else {
+        sink.Submit(std::make_unique<RemoveComponentCommand>(guid, header));
+      }
     } else if (open) {
+      if (marked) {
+        ImGui::TextColored({1.0F, 0.75F, 0.3F, 1.0F},
+                           "Differs from the prefab");
+        ProbeItem("inspector.override." + header);
+        ImGui::SameLine();
+        ImGui::BeginDisabled(!sink.CanEdit());
+        if (ImGui::SmallButton("Revert to prefab")) revert(header);
+        ProbeItem("inspector.revert." + header);
+        ImGui::EndDisabled();
+      }
       DrawComponent(target, info);
     }
     ImGui::PopID();

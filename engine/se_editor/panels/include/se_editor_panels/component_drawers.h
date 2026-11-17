@@ -20,13 +20,16 @@
 // a set-component command built from an edited copy:
 //   - Stats (EntityStatus, :127-176): name and value per stat, "-" to drop
 //     one, a row to add one ("+" with a non-empty name); names from the
-//     World's StatNames, or ones typed in this editor session;
+//     World's StatNames. A typed name reaches the document with the edit:
+//     the drawer submits {StatNameCommand, SetComponentCommand} as one
+//     undo step (stat_name_command.h; M11b, ADR-119);
 //   - EffectSource (EffectsList, :8-125, and UpdateEntityPolling/Event,
 //     :366-404): kind, affected stat (typed as text through imgui_stdlib,
 //     where the legacy code wrote through a const_cast of the string's
 //     buffer, :39-41), value, duration and interval in milliseconds, "-"
-//     per effect and an add row; then polled, the cooldown ("I-Frame
-//     duration", ms) and ready-on-start;
+//     per effect and an add row (a typed stat name goes with the edit as
+//     for Stats); then polled, the cooldown ("I-Frame duration", ms) and
+//     ready-on-start;
 //   - Team (TeamTag, :353-364): a combo of the three teams.
 // A value drag or a text edit is one undo step (TrackCoalesce).
 
@@ -90,20 +93,13 @@ class StatsDrawer {
  private:
   std::string new_name_;
   float new_value_ = 0.0F;
-  // Stat names typed here (StatIdOf -> name), for ids the World's
-  // StatNames does not know yet.
-  std::map<rampage::StatId, std::string> typed_names_;
-
-  friend class EffectSourceDrawer;
 };
 
 class EffectSourceDrawer {
  public:
-  explicit EffectSourceDrawer(StatsDrawer* names) noexcept : names_(names) {}
   void Draw(const DrawTarget& target);
 
  private:
-  StatsDrawer* names_;
   int new_kind_ = 0;
   std::string new_stat_;
   float new_value_ = 0.0F;
@@ -113,10 +109,8 @@ class EffectSourceDrawer {
 
 void DrawTeam(const DrawTarget& target);
 
-// The name of stat |id|: the World's StatNames, |typed|, or "#<id>".
-[[nodiscard]] std::string StatName(
-    const World& world, rampage::StatId id,
-    const std::map<rampage::StatId, std::string>* typed = nullptr);
+// The name of stat |id|: the World's StatNames, or "#<id>".
+[[nodiscard]] std::string StatName(const World& world, rampage::StatId id);
 
 }  // namespace se::editor
 

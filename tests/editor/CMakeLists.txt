@@ -14,16 +14,19 @@ se_add_module(se_editor_tests KIND EXECUTABLE
     commands_test.cc
     dialog_mailbox_test.cc
     document_test.cc
+    documents_test.cc
     idle_test.cc
     imgui_context_test.cc
     play_dump_test.cc
     play_session_test.cc
+    prefab_document_test.cc
     recovery_test.cc
     script_test.cc
     ../support/no_dialogs_listener.cc
     ../support/tracy_inert_listener.cc
   PRIVATE_DEPS
     se_editor
+    se_editor_panels
     se_imgui
     game_rampage
     rampage_test_support
@@ -102,10 +105,10 @@ if(NOT CMAKE_BUILD_TYPE STREQUAL "Release" AND TARGET simple_editor)
   _se_editor_script(dialog_quit dialog_quit
     --expect "1 answered during the quit")
   _se_editor_script(dialog_open dialog_open)
-  # File > Open over a dirty document waits for the unsaved-changes prompt:
+  # File > Close of a dirty document waits for the unsaved-changes prompt:
   # Cancel keeps the changes, Save saves them first, Don't Save discards.
-  _se_editor_script(open_dirty open_dirty --scene-copy "${_se_sandbox}"
-    --expect-scene-contains "321" --expect "waits for the prompt")
+  _se_editor_script(close_dirty close_dirty --scene-copy "${_se_sandbox}"
+    --expect-scene-contains "321" --expect "the close waits for the prompt")
   # An autosave that lands after a newer save leaves no recovery file.
   _se_editor_script(autosave_after_save autosave_after_save
     --scene-copy "${_se_sandbox}" --expect-scene-contains "222")
@@ -117,6 +120,31 @@ if(NOT CMAKE_BUILD_TYPE STREQUAL "Release" AND TARGET simple_editor)
   _se_editor_script(terminate_writes_recovery terminate
     --scene-copy "${_se_sandbox}" --expect-recovery-file
     --expect "recovery file")
+
+  # M11b: several documents, prefabs, hot reload, stat names, the stress
+  # generator's prefab instances. --content-copy runs the editor on a copy
+  # of assets/ and config/, so saves and write-file never touch the
+  # repository.
+  set(_se_content "${CMAKE_SOURCE_DIR}")
+  _se_editor_script(prefabs prefabs --content-copy "${_se_content}"
+    --expect-file-contains assets/prefabs/enemy.prefab.json "250"
+    --expect-file-contains assets/scenes/sandbox.scene.json
+      "prefabs/enemy.prefab.json"
+    --expect-file-contains assets/scenes/sandbox.scene.json "null"
+    --expect-file-lacks assets/scenes/sandbox.scene.json "\"components\""
+    --expect "follows it in one undo step")
+  _se_editor_script(documents documents --content-copy "${_se_content}"
+    --expect "the close waits for the prompt")
+  _se_editor_script(hot_reload hot_reload --content-copy "${_se_content}"
+    --expect "reloaded as document" --expect "asking (Reload, Keep mine)"
+    --expect "handled at Stop")
+  _se_editor_script(stat_names stat_names --scene-copy "${_se_sandbox}"
+    --expect-scene-contains "Armor")
+  _se_editor_script(stress_prefabs stress_prefabs
+    --content-copy "${_se_content}"
+    --expect-file-count assets/scenes/sandbox.scene.json
+      "prefabs/enemy.prefab.json" 36
+    --expect-file-lacks assets/scenes/sandbox.scene.json "\"components\"")
 
   # In a window shown without focus, the panels docked in it. The World is
   # drawn into the Viewport panel's ViewportTarget, so --readback reads that
@@ -132,6 +160,10 @@ if(NOT CMAKE_BUILD_TYPE STREQUAL "Release" AND TARGET simple_editor)
   _se_editor_desktop(play_game_input play_game_input
     --replay $<TARGET_FILE:se_replay> --expect-edges 4
     --expect "play game: the view has the input")
+  # The prefab script in a window: the Viewport's readback changes after
+  # the enemy prefab's sprite region change is saved (M11b).
+  _se_editor_desktop(prefabs prefabs_window --content-copy "${_se_content}"
+    --readback-frames 60 450 --expect "follows it in one undo step")
   _se_editor_desktop(tick_fault tick_fault --expect-fault-files)
   _se_editor_desktop(render_fault render_fault --expect-fault-files)
   _se_editor_desktop(quit_save quit_save --scene-copy "${_se_sandbox}"

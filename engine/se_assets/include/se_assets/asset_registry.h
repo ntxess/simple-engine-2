@@ -61,6 +61,12 @@
 
 namespace se {
 
+// Hot-reload watch tags with this bit set are not the registry's: the
+// scan's FileChange for them goes to the foreign handler (M11b: the
+// editor's documents watch their files, ADR-120). The registry's own tags
+// hold a store kind below 8 in their top four bits.
+inline constexpr std::uint64_t kForeignWatchTag = std::uint64_t{1} << 63;
+
 // Store tags.
 struct TextureAsset {};
 struct AtlasAsset {};
@@ -234,6 +240,7 @@ class AssetRegistry {
   void SetSwapListener(SwapListener listener) {
     swap_listener_ = std::move(listener);
   }
+  // Also takes the FileChanges of foreign watch tags (kForeignWatchTag).
   void SetForeignHandler(std::function<void(LaneCompletion&&)> handler) {
     foreign_ = std::move(handler);
   }

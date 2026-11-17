@@ -29,6 +29,7 @@
 #ifndef SE_EDITOR_PANEL_H_
 #define SE_EDITOR_PANEL_H_
 
+#include <cstdint>
 #include <memory>
 #include <span>
 #include <string_view>
@@ -37,6 +38,7 @@
 #include "se_core/types.h"
 #include "se_core/world.h"
 #include "se_editor/commands.h"
+#include "se_editor/editor_game.h"
 #include "se_editor/editor_stats.h"
 #include "se_editor/log_view.h"
 #include "se_editor/selection.h"
@@ -134,6 +136,17 @@ struct PanelContext {
   EditorViewports* viewports = nullptr;  // null without a renderer
   bool play_game = false;                // 'Play game': the view's input
                                          // is the game's (ADR-113)
+
+  // M11b (ADR-118): the game's scene hooks (prefab baselines, what a
+  // removal takes with it, what may not be removed), the active document's
+  // asset root, kind and id, and its revision (bumped by every change; 0
+  // in Play): what a panel computes from the document can be kept until
+  // the revision or the document changes.
+  const EditorGame* game = nullptr;
+  std::string_view asset_root;
+  bool prefab_document = false;
+  std::uint64_t document = 0;
+  std::uint64_t revision = 0;
 };
 
 class Panel {

@@ -4493,3 +4493,249 @@ prefab component saves as null and stays removed` (also across two
 rebases), `rampage.scene.A prefab baseline is a bare instance`,
 `rampage.scene.Every component FinishLoad adds is removed with its
 source`, `rampage.scene.A stat name can be forgotten`.
+
+## ADR-117 Several documents: the DocumentSet, the close prompt, the content hash, files with prefab references (2026-11-17)
+
+**Context.** Decision 1 of 2026-11-17: the editor holds several documents,
+so a scene and the prefabs it uses can be open together. M10a's Editor held
+one EditDocument and kept its autosave timer, recovery state and "initial"
+hash itself; its Save wrote the flattened scene, losing the prefabs.
+
+**Decision.**
+- `se_editor/documents.h`: `DocumentSet` holds every open document as a
+  `DocumentEntry`: the EditDocument, an id that is never reused (a counter
+  from 1; a reload or a recovery replaces a document under a new id at the
+  same place, so commands made for the old one find nothing), the hashes
+  it opened with, its own `AutosaveTimer`, last change, last completed save
+  revision and save error, and its reload prompt. One document is active;
+  `SetFrozen(true)` (while a Play session exists) refuses every open, close
+  and switch. `DocumentDesc` gains `kind` (kScene, kPrefab) and a prefab
+  document's `ref` (relative to the asset root); the editor takes the kind
+  from the file's "format" (`se-prefab-v1`), so `--scene FILE` and File >
+  Open take either.
+- File > Open adds a document or activates the one open on that path. File
+  > Close closes the active one; M10a's open prompt (ADR-113, R4) became the
+  close prompt: Save (closes once its Durable save completed), Don't Save,
+  Cancel. The Document panel shows a strip of document tabs (disabled while
+  frozen). File > Save All, and the quit prompt lists every dirty document:
+  Save All submits each as a Durable lane job; a failure keeps that document
+  dirty with its error and cancels the quit while the others are saved.
+  Play plays the active scene and is disabled on a prefab document.
+- `EditDocument::ContentHash()` is the hash of the flattened text
+  (`EditorGame::save_scene`): the World hash covers kHashed components only,
+  so SpriteRenderer, Camera2D, IdComponent and the ctx name tables are
+  invisible to it. Stop asserts that both hashes are unchanged. The
+  flattened text drops PrefabInstance (ADR-114), so a change of an
+  entity's prefab link alone is in neither hash; the editor changes a link
+  only by creating or destroying the entity, which both hashes see.
+- Files: `EditDocument::SerializeFile()` writes `save_scene_file`
+  (kPrefabs) for a scene and `save_prefab` for a prefab; Save, Save As,
+  autosave and recovery use it. `Serialize()` stays flattened and is what
+  the Play-start bytes, fault files and dump streams hold: a replay or a
+  dump never depends on prefab files that may change after it was written.
+  se-recovery-v1 gains "kind" and "ref"; a file without them is a scene, so
+  M10 files read unchanged (the format string stays).
+- `EditorGame` gains the spec's members (EntityJson, `load_scene`'s
+  `on_prefab` callback, `save_scene_file`, `load_prefab`, `save_prefab`,
+  `prefab_baseline`, `rebase_instances`, `removed_with`, `removable`);
+  simple_editor fills them from M11a's functions.
+
+**Why.** The spec's M11b "Documents". A new id for a replaced document is
+what "an id that is never reused" needs once a reload can swap a World
+under queued commands. Comparing a prefab change's result with the file as
+JSON, not as bytes (ADR-120), lets a hand-written file stay clean.
+
+**Consequences.** The editor may have no document at all (after closing
+the last one): the panels draw "No document" and Play is disabled. The
+script verbs `answer-open` and `expect-open-prompt` are now `answer-close`
+and `expect-close-prompt`; `editor.script.open_dirty` became
+`editor.script.close_dirty`.
+
+**Checked by.** `editor.The document set: ids are never reused, one is
+active`, `editor.Recovery files keep the document's kind; v1 files are
+scenes`, `editor.Recovery files with prefab references round-trip`,
+`editor.Play-start bytes stay flattened`, `editor.A prefab document saves
+its file and edits its root`, `editor.script.documents`,
+`editor.script.close_dirty`.
+
+## ADR-118 Commands are bound to their document; coalesce scopes end with their panel's frame (2026-11-17)
+
+**Context.** The M10/M12/M14 review carry-overs: a document change
+mid-press sent the stress generator's remaining batches to the new
+document, and a coalesce scope opened by a panel stayed open while its
+dock tab was hidden (its Draw does not run) (ADR-112, Consequences).
+
+**Decision.**
+- `se_editor/edit_queue.h`: `EditQueue` holds the frame's Edit-mode items.
+  The editor's EditorCommands records with each Submit, BeginCoalesce and
+  EndCoalesce the active document's id and the panel being drawn
+  (`Editor::drawing_panel_`). The frame's apply step (after ImGui::Render)
+  applies each item to the document it was made for; an item whose
+  document was closed is dropped and logged. A change of the active
+  document never redirects an edit. Play edits keep their own queue
+  (PlayEdits, the SessionLog).
+- A coalesce scope belongs to its document and its panel. The apply step
+  ends it when that panel did not draw in the frame; the editor ends it
+  when its document is closed, deactivated, replaced or saved, when a
+  prefab change rebases it, at an undo or redo, and at Play. Ending one is
+  logged ("coalesce scope 'X' of 'Panel' of document N ended: why"). A
+  scope with no panel (the script's `coalesce-begin`, one action a frame)
+  is ended by the document and Play rules only.
+- `PanelContext` gains (additively) `game` (the EditorGame), `asset_root`,
+  `prefab_document`, `document` (the active document's id) and `revision`
+  (the active document's revision, 0 in Play): what a panel computes from
+  the document (a baseline, a marker) can be kept until the revision or
+  the document changes.
+
+- `CreateEntityCommand` keeps the Spawned record its first Apply got
+  (when its components give none) and gives it again on redo: before, a
+  redo created the entity with the next spawn serial, so undo then redo of
+  a create (the stress press, the Hierarchy's Create) changed the World
+  hash and the saved entity order, against commands.h's own contract.
+
+**Why.** Binding at submission is the only point where "the document the
+command was made for" is known; the panel's draw record already exists
+(`PanelDrewLastFrame`), so the scope rule costs one lookup a frame and
+closes the hidden-tab case for every panel, the gizmo's drag included.
+
+**Checked by.** `editor.Commands apply to the document they were made
+for`, `editor.A coalesce scope ends when its panel stops drawing` (a hidden
+tab, a deactivated or closed document, Play, the script's scope).
+
+## ADR-119 Prefab-aware commands and panels: removal with what derives, Revert to prefab, override markers, stat names (2026-11-17)
+
+**Decision.**
+- `se_editor/prefab_commands.h` (game-agnostic, over EditorGame and the
+  registry's JSON hooks): `MakeRemoval` is a CommandGroup "Remove X" of
+  RemoveComponentCommands for X and every component `removed_with(X)`
+  names that the entity holds (undo restores all of them); a component
+  `removable` refuses is an error naming the reason. The Inspector's close
+  button submits it and is absent for such components; the script's
+  `remove` uses it too. On a prefab instance the saved file then holds the
+  removal as null in the overrides (M11a's writer). The ledger row
+  "Component removal in the inspector" is ported.
+- "Revert to prefab": `MakeRevertToPrefab` sets the component to the
+  baseline's value (`prefab_baseline`; an add when the instance removed
+  it) or removes it when the prefab lacks it. Override markers:
+  `OverriddenComponents` lists the editor-visible, serialized components
+  (IdComponent, Name, Spawned, PrefabInstance and DestroyRequest aside)
+  whose JSON differs from the baseline or that only one of the two holds.
+  Transform counts: an instance placed by R12 at its own path's first point
+  shows Transform as differing, which is what a revert would change.
+- The Inspector shows an instance's prefab on a line of its own (not as a
+  component), marks each differing component ("[override]", "Differs from
+  the prefab", a Revert button) and lists removed prefab components with
+  their own Revert. Its baseline is computed at most once a frame for the
+  selected entity, and kept while the document's revision holds.
+- The Hierarchy gains a Prefab column (the reference's file name, "-" for
+  none; no column in a prefab document) whose cell ends in " *" for an
+  instance with overrides. The marker is computed only for the rows on
+  screen, in Edit mode, cached per document revision. In Play there are
+  no markers (a baseline per visible row each frame would cost
+  milliseconds), and the play World, loaded from the flattened Play-start
+  bytes (kFlatten drops PrefabInstance, ADR-114), has no prefab links: the
+  column shows "-".
+- Stat names: `se_editor_panels/stat_name_command.h`. `StatNameCommand`
+  (`CommandKind::kGame`, a new enumerator for commands a game-aware module
+  defines) records a name in the World's StatNames under the command gate
+  (remembering whether it was new; a name whose id another name has is an
+  error), its Revert removes a name it added, its ToSession has no entries.
+  The Stats and effect drawers submit a typed stat as one CommandGroup
+  {StatNameCommand, SetComponentCommand}; `StatsDrawer::typed_names_` is
+  gone and `StatName()` reads the World's StatNames only. In Play the play
+  World shows such a stat as "#id" (stat ids are name hashes; the
+  Play-start bytes carry the scene's own names).
+
+**Checked by.** `editor.Removing a component removes what derives from
+it`, `editor.A stat typed in the Stats drawer is saved by name`,
+`editor_panels.The Hierarchy shows each entity's prefab and marks
+overrides`, `editor_panels.A prefab document's root has no prefab column`,
+`editor_panels.The Inspector marks overrides and reverts them to the
+prefab`, `editor_panels.The Inspector's removal takes what derives from a
+component`, `editor_panels.The Stats drawer edits a stat by name, adds and
+drops stats` and `editor_panels.The effect drawer's stat is typed as text
+and set on Enter` (the group), `editor.script.stat_names`,
+`editor.script.prefabs`.
+
+## ADR-120 Hot reload into documents: a foreign watch tag, reads by content, a prefab change as one undo step (2026-11-17)
+
+**Context.** Decision 2 of 2026-11-17: a prefab change applied to an open
+document is an undo step, so the content hash is always explained by the
+stack; it marks the document dirty only when the document's own file text
+would change.
+
+**Decision.**
+- se_assets: `kForeignWatchTag` (bit 63 of a watch tag). The
+  AssetRegistry hands a FileChange whose tag has it to its foreign handler
+  (the AssetRuntime's, then the editor's foreign listener) instead of its
+  own reload; the registry's tags keep a store kind below 8 in their top
+  four bits. This is the only change outside the editor's modules.
+- Each open document watches its file and the prefab files its load
+  reported (`MakeWatchJob` with the editor's tag `kEditorWatchTag`); the
+  editor counts watchers per path, so a prefab used by two documents is
+  watched once and unwatched with the last. Save As moves the watch.
+- A change is read on the lane (an Urgent read job) and compared by
+  content: a document's own file whose text equals what it last loaded or
+  saved is ignored (our own save, a touch); a clean document reloads (a new
+  id, its undo stack starts again, logged); a dirty one asks (Reload, Keep
+  mine; the script's `answer-reload`). Keep mine records the new text as
+  the file's, leaving the document dirty so the next save wins.
+- A prefab whose text differs from what a scene document recorded:
+  `RebaseDocument` calls `rebase_instances` (old text: the recorded one)
+  and applies the set, add and remove commands that turn each instance
+  into the result, as one undo step "Prefab changed: <ref>"
+  (`EditDocument::ApplyPrefabChange`), then records the new text (not part
+  of undo). Reserved components are left alone, and a component the result
+  lacks is removed only when it is serialized (a previous pose or a path
+  cache the loader derives stays). The document stays clean when it was
+  clean and its kPrefabs text equals its file's as JSON (member order and
+  layout aside: a hand-written file is not the writer's text byte for
+  byte). Saving a prefab document rebases the other open documents at once
+  from the save's completion; the scan's later report of the same content
+  is a no-op.
+- During Play the changes (and reads that complete) are kept and handled at
+  Stop, in order.
+
+**Consequences.** An instance added to a document that never loaded its
+prefab (a stress press in a scene without enemies) has no recorded text,
+so a later change of that prefab is not rebased into it; it is rebased
+after the document is reopened. The hot-reload scan's settling rule
+(ADR-094) makes a change visible 0.5-1.5 s after it is written.
+
+**Checked by.** `editor.A saved prefab updates its instances in an open
+scene`, `editor.A prefab changed on disk is one undo step per document`,
+`editor.A changed document file reloads when clean and asks when dirty`,
+`editor.Undo then redo is the identity on the document hash and content
+hash` (the rebase among every kind), `editor.script.hot_reload`
+(`write-file` on a prefab and on the document, during Play too),
+`editor.desktop.prefabs`.
+
+## ADR-121 The stress generator's Edit-mode press is one command group of prefab instances (2026-11-17; amends ADR-102)
+
+**Decision.** In Edit mode a press is one CommandGroup "Generate N
+enemies" of create-entity commands submitted in the frame of the press:
+one undo step, and no coalesce scope spans frames (ADR-102's per-frame
+batches inside one scope are gone, and with them the hidden-tab and
+document-change cases). Play keeps its spread over ticks through the
+SessionLog. Each spawn carries `PrefabInstance{"prefabs/enemy.prefab.json"}`
+beside the full components (as M10b built them), so a saved scene writes it
+as the prefab plus its Path and, where R12 does not place it, Transform.
+`MakeStressPress` is the same press for the script (`stress-press N`).
+A spawn made by a command has no PrevTransform until its first tick (a
+load's FinalizeSpawns gives one), so a document with spawns has a
+different World hash after a save and a reopen; its content hash, the
+flattened text's, is the same.
+
+**Why.** The editor applies a frame's commands after ImGui::Render, so a
+press of n creates costs one frame of n creates; measured below.
+
+**Measured** (2026-11-17, msvc-dev, CPU load 11% from other processes):
+`editor_panels.A 1000-enemy press applies in one frame` applied the
+press's 1000 creates in 2.20 to 4.09 ms over five runs (median 2.47 ms),
+far below the 250 ms bound and well inside one frame at 60 Hz.
+
+**Checked by.** `editor_panels.The stress generator's press is one command
+group in its frame` (the tab hidden in the next frames leaves nothing
+open), `editor_panels.A 1000-enemy press applies in one frame` (label slow;
+the time is logged, msvc-dev fails above 250 ms), `editor.A stress press
+saves as prefab instances`, `editor.script.stress_prefabs`.

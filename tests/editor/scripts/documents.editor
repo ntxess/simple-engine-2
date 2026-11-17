@@ -1,0 +1,60 @@
+# Several documents (M11b, headless): three open (a scene and two
+# prefabs), switching, the documents frozen during Play, Play disabled on a
+# prefab, closing through the prompt. Runs on a copy of the content
+# (--content-copy).
+expect-documents 1
+open assets/prefabs/enemy.prefab.json
+open assets/prefabs/player.prefab.json
+expect-documents 3
+expect-active player
+activate sandbox
+expect-active sandbox
+# Opening a file already open activates it.
+open assets/prefabs/enemy.prefab.json
+expect-documents 3
+expect-active enemy
+activate 0
+expect-active sandbox
+# Each document has its own undo stack.
+set 5a4db0c5-0000-4000-8000-000000000000 Transform {"pos":{"x":321,"y":250},"rot":0,"scale":{"x":1,"y":1},"teleport_tick":0}
+expect-dirty yes
+activate player
+expect-dirty no
+expect-undo-label
+activate sandbox
+expect-undo-label Set Transform
+undo
+expect-hash document initial
+expect-content-hash document initial
+redo
+# Play plays the active scene; the documents are frozen meanwhile.
+play
+wait-ticks 10
+activate enemy refused
+expect-active sandbox
+stop
+wait-frames 2
+expect-hash document play-start
+expect-content-hash document play-start
+activate enemy
+expect-active enemy
+# The prefab document edits its root like any entity.
+set root Collider {"half_extents":{"x":30,"y":30}}
+wait-frames 1
+expect-dirty yes
+# Close: the prompt (Cancel keeps it, Don't Save closes it).
+close
+wait-frames 1
+expect-close-prompt yes
+answer-close cancel
+expect-documents 3
+close discard
+wait-frames 1
+expect-documents 2
+expect-active player
+close
+wait-frames 1
+expect-documents 1
+expect-active sandbox
+expect-dirty yes
+quit discard

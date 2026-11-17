@@ -113,8 +113,9 @@ std::expected<std::unique_ptr<PlaySession>, Error> PlaySession::Start(
     auto world = std::make_unique<World>(instance.Registry(), std::move(desc));
     {
       const MutationGate gate_open = world->OpenGate(GateReason::kLoad);
+      // The Play-start bytes are flattened: no prefab is read.
       if (auto loaded = game.load_scene(*world, TextOf(s.start_.bytes),
-                                        s.start_.asset_root);
+                                        s.start_.asset_root, {});
           !loaded) {
         return std::unexpected(std::move(loaded.error()));
       }

@@ -13,8 +13,21 @@ usage:
                 [--expect-scene-unchanged] [--expect-recovery-file]
                 [--expect-fault-files] [--readback FRAME] [--timeout S]
                 [--expect-edges N] [--expect-script-failure]
+                [--content-copy ROOT] [--expect-file-contains REL TEXT]...
+                [--expect-file-lacks REL TEXT]...
+                [--expect-file-count REL TEXT N]...
+                [--readback-frames A B]
 
   --scene-copy SRC       the editor opens a copy of SRC (saves go there)
+  --content-copy ROOT    the editor runs on a copy of ROOT's assets/ and
+                         config/ (--content-root): the scripts may save and
+                         write-file its scenes and prefabs (M11b)
+  --expect-file-contains REL TEXT, --expect-file-lacks REL TEXT
+                         the content copy's file REL has (lacks) TEXT
+  --expect-file-count REL TEXT N
+                         the content copy's file REL has TEXT N times or more
+  --readback-frames A B  read the Viewport back at frames A and B (windowed)
+                         and check the two images differ
   --then-script FILE     a second run on the same pref directory
   --replay SE_REPLAY     se_replay replays the last Play session's replay
                          (<pref>/sessions/last-play.sereplay) from its start
@@ -95,6 +108,8 @@ def png_colours(path):
 def editor_command(args, pref, script, scene, workdir):
     cmd = [args.editor, "--pref-dir", str(pref), "--no-crash-capture",
            "--audio", "null"]
+    if args.content_copy:
+        cmd += ["--content-root", str(workdir / "content")]
     if args.headless:
         cmd += ["--headless", "--fixed-frame-dt", "8.3333"]
     else:
@@ -102,6 +117,10 @@ def editor_command(args, pref, script, scene, workdir):
         if args.readback:
             cmd += ["--readback-tick",
                     f"{args.readback}:{workdir / 'readback.png'}"]
+        if args.readback_frames:
+            for i, frame in enumerate(args.readback_frames):
+                cmd += ["--readback",
+                        f"{frame}:{workdir / f'readback-{i}.png'}"]
     cmd += ["--", "--editor-script", str(pathlib.Path(script).resolve())]
     if scene is not None:
         cmd += ["--scene", str(scene)]
@@ -140,6 +159,14 @@ def main():
     parser.add_argument("--timeout", type=float, default=90.0)
     parser.add_argument("--expect-edges", type=int)
     parser.add_argument("--expect-script-failure", action="store_true")
+    parser.add_argument("--content-copy")
+    parser.add_argument("--expect-file-contains", nargs=2, action="append",
+                        default=[])
+    parser.add_argument("--expect-file-lacks", nargs=2, action="append",
+                        default=[])
+    parser.add_argument("--expect-file-count", nargs=3, action="append",
+                        default=[])
+    parser.add_argument("--readback-frames", nargs=2, type=int)
     args = parser.parse_args()
 
     env = dict(os.environ)
@@ -155,6 +182,13 @@ def main():
         scene = workdir / "document.scene.json"
         shutil.copyfile(args.scene_copy, scene)
         original = scene.read_bytes()
+    content = workdir / "content"
+    if args.content_copy:
+        # The editor's content root: a copy, so saves and write-file never
+        # touch the repository's files.
+        for part in ("assets", "config"):
+            shutil.copytree(pathlib.Path(args.content_copy) / part,
+                            content / part)
     failures = []
     outputs = []
     try:
@@ -179,6 +213,25 @@ def main():
                                 f"'{args.expect_scene_contains}'")
         if args.expect_scene_unchanged and scene.read_bytes() != original:
             failures.append("the scene file changed")
+        for rel, text in args.expect_file_contains:
+            body = (content / rel).read_text(encoding="utf-8")
+            if text not in body:
+                failures.append(f"{rel} lacks '{text}'")
+        for rel, text in args.expect_file_lacks:
+            body = (content / rel).read_text(encoding="utf-8")
+            if text in body:
+                failures.append(f"{rel} has '{text}'")
+        for rel, text, count in args.expect_file_count:
+            body = (content / rel).read_text(encoding="utf-8")
+            if body.count(text) < int(count):
+                failures.append(f"{rel} has '{text}' {body.count(text)} "
+                                f"times, expected {count} or more")
+        if args.readback_frames:
+            images = [workdir / f"readback-{i}.png" for i in range(2)]
+            if not all(image.exists() for image in images):
+                failures.append("the two readback images were not written")
+            elif images[0].read_bytes() == images[1].read_bytes():
+                failures.append("the readbacks before and after are equal")
         if args.expect_recovery_file:
             files = list((pref / "recovery").glob("*.serecovery"))
             if not files:

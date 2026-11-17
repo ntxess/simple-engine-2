@@ -61,6 +61,8 @@ std::string EncodeRecovery(const RecoveryFile& file) {
   root.Set("document", Text(file.document));
   root.Set("name", Text(file.name));
   root.Set("revision", json::Value::Number(static_cast<double>(file.revision)));
+  root.Set("kind", Text(DocumentKindName(file.kind)));
+  if (!file.ref.empty()) root.Set("ref", Text(file.ref));
   root.Set("scene", Text(file.scene));
   return json::Write(root);
 }
@@ -90,6 +92,17 @@ std::expected<RecoveryFile, Error> DecodeRecovery(std::string_view text,
   file.name = name->text;
   file.revision = static_cast<std::uint64_t>(revision->AsDouble().value_or(0));
   file.scene = scene->text;
+  // M11b's fields; a file without them is a scene.
+  if (const json::Value* kind = root->Find("kind")) {
+    if (kind->text == DocumentKindName(DocumentKind::kPrefab)) {
+      file.kind = DocumentKind::kPrefab;
+    } else if (kind->text != DocumentKindName(DocumentKind::kScene)) {
+      return std::unexpected(Error{ErrorCode::kParse,
+                                   "unknown document kind '" + kind->text + "'",
+                                   file.path, 0, 0});
+    }
+  }
+  if (const json::Value* ref = root->Find("ref")) file.ref = ref->text;
   return file;
 }
 

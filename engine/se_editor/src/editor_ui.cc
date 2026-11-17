@@ -31,7 +31,8 @@ constexpr const char* kDockName = "EditorDockSpace";
 constexpr const char* kQuitPopup = "Unsaved changes";
 constexpr const char* kSavingPopup = "Saving";
 constexpr const char* kRecoveryPopup = "Recover unsaved changes";
-constexpr const char* kOpenPopup = "Unsaved changes##open";
+constexpr const char* kClosePopup = "Unsaved changes##close";
+constexpr const char* kReloadPopup = "File changed on disk";
 
 // Where the seeded layout docks a panel, by its window title (the names
 // of se_editor_panels; unknown ones go right). The built-in Play and
@@ -110,9 +111,11 @@ void Editor::DrawDockSpace() {
 }
 
 void Editor::UndoRedo(bool undo) {
-  if (!document_ || play_) return;
+  EditDocument* document = Active();
+  if (document == nullptr || play_) return;
+  edits_.EndScopeOf(documents_, documents_.ActiveId(), "an undo or redo");
   const InlineOwnerScope owner(OnMainThread());
-  if (auto done = undo ? document_->Undo() : document_->Redo(); !done) {
+  if (auto done = undo ? document->Undo() : document->Redo(); !done) {
     last_edit_error_ = done.error().message;
   }
 }
@@ -123,9 +126,13 @@ void Editor::HandleShortcuts(App& app) {
   constexpr ImGuiInputFlags kGlobal = ImGuiInputFlags_RouteGlobal;
   constexpr ImGuiInputFlags kRepeat = kGlobal | ImGuiInputFlags_Repeat;
   const EditorMode mode = Mode();
-  const bool editing = mode == EditorMode::kEdit && document_ != nullptr;
+  const bool editing = mode == EditorMode::kEdit && Active() != nullptr;
+  const bool scene =
+      Active() != nullptr && Active()->Desc().kind == DocumentKind::kScene;
   if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_S, kGlobal) && editing) {
-    if (auto saved = SaveDocument(app, {}, /*durable=*/true); !saved) {
+    if (auto saved = SaveDocument(app, documents_.ActiveId(), {},
+                                  /*durable=*/true);
+        !saved) {
       save_error_ = saved.error().message;
     }
   }
@@ -136,7 +143,7 @@ void Editor::HandleShortcuts(App& app) {
     UndoRedo(/*undo=*/false);
   }
   if (ImGui::Shortcut(ImGuiKey_F5, kGlobal) &&
-      (mode == EditorMode::kEdit || mode == EditorMode::kPaused)) {
+      ((mode == EditorMode::kEdit && scene) || mode == EditorMode::kPaused)) {
     request_ = Request::kPlay;
   }
   if (ImGui::Shortcut(ImGuiMod_Shift | ImGuiKey_F5, kGlobal) &&
@@ -152,27 +159,41 @@ void Editor::DrawMenus(App& app) {
   if (!ImGui::BeginMainMenuBar()) return;
   HandleShortcuts(app);
   const bool editing = !play_;
+  const bool has_document = Active() != nullptr;
+  const bool scene =
+      has_document && Active()->Desc().kind == DocumentKind::kScene;
   SDL_Window* window =
       app.GetWindow() != nullptr ? app.GetWindow()->Native() : nullptr;
   if (ImGui::BeginMenu("File")) {
     if (ImGui::MenuItem("Open...", nullptr, false, editing)) {
       dialogs_->ShowOpen(window, app.Paths().content_root);
     }
-    if (ImGui::MenuItem("Save", "Ctrl+S", false, editing && document_)) {
-      if (auto saved = SaveDocument(app, {}, /*durable=*/true); !saved) {
+    if (ImGui::MenuItem("Close", nullptr, false, editing && has_document)) {
+      RequestClose(app, documents_.ActiveId());
+    }
+    ImGui::Separator();
+    if (ImGui::MenuItem("Save", "Ctrl+S", false, editing && has_document)) {
+      if (auto saved = SaveDocument(app, documents_.ActiveId(), {},
+                                    /*durable=*/true);
+          !saved) {
         save_error_ = saved.error().message;
       }
     }
-    if (ImGui::MenuItem("Save As...", nullptr, false, editing && document_)) {
+    if (ImGui::MenuItem("Save As...", nullptr, false,
+                        editing && has_document)) {
       dialogs_->ShowSave(window, app.Paths().content_root);
+    }
+    if (ImGui::MenuItem("Save All", nullptr, false,
+                        editing && !documents_.Dirty().empty())) {
+      SaveAll(app);
     }
     ImGui::Separator();
     if (ImGui::MenuItem("Quit")) app.RequestQuit();
     ImGui::EndMenu();
   }
   if (ImGui::BeginMenu("Edit")) {
-    const bool can_undo = editing && document_ && document_->UndoCount() > 0;
-    const bool can_redo = editing && document_ && document_->RedoCount() > 0;
+    const bool can_undo = editing && has_document && Active()->UndoCount() > 0;
+    const bool can_redo = editing && has_document && Active()->RedoCount() > 0;
     if (ImGui::MenuItem("Undo", "Ctrl+Z", false, can_undo)) {
       UndoRedo(/*undo=*/true);
     }
@@ -183,13 +204,14 @@ void Editor::DrawMenus(App& app) {
   }
   if (ImGui::BeginMenu("Play")) {
     const EditorMode mode = Mode();
-    if (ImGui::MenuItem(
-            "Play", "F5", false,
-            mode == EditorMode::kEdit || mode == EditorMode::kPaused)) {
+    // Play plays the active scene; it is disabled on a prefab document.
+    if (ImGui::MenuItem("Play", "F5", false,
+                        (mode == EditorMode::kEdit && scene) ||
+                            mode == EditorMode::kPaused)) {
       request_ = Request::kPlay;
     }
     if (ImGui::MenuItem("Play game", nullptr, false,
-                        mode == EditorMode::kEdit)) {
+                        mode == EditorMode::kEdit && scene)) {
       request_ = Request::kPlayGame;
     }
     if (ImGui::MenuItem("Pause", nullptr, false,
@@ -237,9 +259,14 @@ void Editor::DrawBuiltInPanels(const PanelContext& context) {
       }
     }
     if (mode == EditorMode::kEdit) {
+      const bool scene =
+          Active() != nullptr && Active()->Desc().kind == DocumentKind::kScene;
+      ImGui::BeginDisabled(!scene);
       if (ImGui::Button("Play")) request_ = Request::kPlay;
       ImGui::SameLine();
       if (ImGui::Button("Play game")) request_ = Request::kPlayGame;
+      ImGui::EndDisabled();
+      if (!scene) ImGui::TextDisabled("Play plays a scene document");
     } else {
       if (mode == EditorMode::kPlaying && ImGui::Button("Pause")) {
         request_ = Request::kPause;
@@ -268,15 +295,46 @@ void Editor::DrawBuiltInPanels(const PanelContext& context) {
   }
   ImGui::End();
   if (ImGui::Begin("Document")) {
-    if (document_) {
-      const EditDocument& doc = *document_;
-      Text(std::format("{}{}", doc.Desc().name, doc.Dirty() ? " *" : ""));
+    // The document tabs: a click activates one (not while Play runs).
+    ImGui::BeginDisabled(documents_.Frozen());
+    DocumentId activate = kNoDocument;
+    for (std::size_t i = 0; i < documents_.size(); ++i) {
+      const DocumentEntry& entry = *documents_.All()[i];
+      const EditDocument& doc = *entry.document;
+      const std::string label = std::format(
+          "{}{}{}##doc{}", doc.Desc().name,
+          doc.Desc().kind == DocumentKind::kPrefab ? " (prefab)" : "",
+          doc.Dirty() ? " *" : "", entry.id);
+      if (i > 0) ImGui::SameLine();
+      const ImVec2 size = ImGui::CalcTextSize(label.c_str(), nullptr, true);
+      if (ImGui::Selectable(label.c_str(), entry.id == documents_.ActiveId(),
+                            ImGuiSelectableFlags_None, size)) {
+        activate = entry.id;
+      }
+    }
+    ImGui::EndDisabled();
+    if (activate != kNoDocument) ActivateDocument(activate);
+    ImGui::Separator();
+    if (const EditDocument* active = Active()) {
+      const EditDocument& doc = *active;
+      Text(std::format("{} {}{}", DocumentKindName(doc.Desc().kind),
+                       doc.Desc().name, doc.Dirty() ? " *" : ""));
       Text(doc.Desc().path);
-      Text(std::format("{} entities | revision {} | hash {:016x}",
-                       doc.Get().EntityCount(), doc.Revision(), doc.Hash()));
-      Text(std::format("selection: {}", doc.GetSelection().Count()));
+      Text(
+          std::format("{} entities | revision {} | hash {:016x} | content "
+                      "{:016x}",
+                      doc.Get().EntityCount(), doc.Revision(), doc.Hash(),
+                      doc.ContentHash()));
+      Text(std::format("selection: {} | prefabs: {}",
+                       doc.GetSelection().Count(), doc.PrefabTexts().size()));
       Text(std::format("undo: {} ({}) | redo: {} ({})", doc.UndoCount(),
                        doc.UndoLabel(), doc.RedoCount(), doc.RedoLabel()));
+      if (const DocumentEntry* entry = documents_.Active();
+          entry != nullptr && !entry->save_error.empty()) {
+        Text("save failed: " + entry->save_error);
+      }
+    } else {
+      ImGui::TextDisabled("No document: File > Open");
     }
     if (!last_edit_error_.empty()) Text("last error: " + last_edit_error_);
     if (!save_error_.empty()) Text("save failed: " + save_error_);
@@ -289,9 +347,15 @@ void Editor::DrawModals(App& app) {
     ImGui::OpenPopup(kQuitPopup);
     if (ImGui::BeginPopupModal(kQuitPopup, nullptr,
                                ImGuiWindowFlags_AlwaysAutoResize)) {
-      Text(std::format("Save changes to '{}' before quitting?",
-                       document_ ? document_->Desc().name : std::string()));
-      if (ImGui::Button("Save")) ResolveQuitPrompt(app, "save");
+      // Every dirty document.
+      Text("Save changes before quitting?");
+      for (const DocumentEntry* entry : documents_.Dirty()) {
+        Text(std::format("  {}{}", entry->document->Desc().name,
+                         entry->save_error.empty()
+                             ? std::string()
+                             : " (" + entry->save_error + ")"));
+      }
+      if (ImGui::Button("Save All")) ResolveQuitPrompt(app, "save");
       ImGui::SameLine();
       if (ImGui::Button("Don't Save")) ResolveQuitPrompt(app, "discard");
       ImGui::SameLine();
@@ -312,18 +376,35 @@ void Editor::DrawModals(App& app) {
       ImGui::EndPopup();
     }
   }
-  if (!open_prompt_.empty()) {
-    ImGui::OpenPopup(kOpenPopup);
-    if (ImGui::BeginPopupModal(kOpenPopup, nullptr,
+  if (const DocumentEntry* closing = documents_.Find(close_prompt_)) {
+    ImGui::OpenPopup(kClosePopup);
+    if (ImGui::BeginPopupModal(kClosePopup, nullptr,
                                ImGuiWindowFlags_AlwaysAutoResize)) {
-      Text(std::format("Save changes to '{}' before opening {}?",
-                       document_ ? document_->Desc().name : std::string(),
-                       open_prompt_));
-      if (ImGui::Button("Save")) ResolveOpenPrompt(app, "save");
+      Text(std::format("Save changes to '{}' before closing it?",
+                       closing->document->Desc().name));
+      if (ImGui::Button("Save")) ResolveClosePrompt(app, "save");
       ImGui::SameLine();
-      if (ImGui::Button("Don't Save")) ResolveOpenPrompt(app, "discard");
+      if (ImGui::Button("Don't Save")) ResolveClosePrompt(app, "discard");
       ImGui::SameLine();
-      if (ImGui::Button("Cancel")) ResolveOpenPrompt(app, "cancel");
+      if (ImGui::Button("Cancel")) ResolveClosePrompt(app, "cancel");
+      ImGui::EndPopup();
+    }
+  }
+  const DocumentEntry* asking = nullptr;
+  for (const auto& entry : documents_.All()) {
+    if (entry->reload_prompt && asking == nullptr) asking = entry.get();
+  }
+  if (asking != nullptr) {
+    ImGui::OpenPopup(kReloadPopup);
+    if (ImGui::BeginPopupModal(kReloadPopup, nullptr,
+                               ImGuiWindowFlags_AlwaysAutoResize)) {
+      Text(std::format(
+          "{} was changed by another program, and '{}' has "
+          "unsaved changes.",
+          asking->document->Desc().path, asking->document->Desc().name));
+      if (ImGui::Button("Reload")) ResolveReloadPrompt(app, "reload");
+      ImGui::SameLine();
+      if (ImGui::Button("Keep mine")) ResolveReloadPrompt(app, "keep");
       ImGui::EndPopup();
     }
   }
@@ -349,17 +430,18 @@ void Editor::DrawUi(App& app, const FrameReport& report) {
   DrawDockSpace();
   PanelContext context;
   const bool faulted = play_ && play_->Faulted();
+  EditDocument* document = Active();
   if (play_) {
     context.world = play_->TopWorld();
-  } else if (document_) {
-    context.world = &document_->Get();
+  } else if (document != nullptr) {
+    context.world = &document->Get();
   }
   context.playing = play_ != nullptr && !faulted;
   context.faulted = faulted;
   context.paused = play_ && (play_->State() == PlayState::kPaused ||
                              play_->State() == PlayState::kStepping);
-  context.selection = document_ ? &document_->GetSelection() : nullptr;
-  context.commands = play_ || !document_ ? nullptr : commands_.get();
+  context.selection = document != nullptr ? &document->GetSelection() : nullptr;
+  context.commands = play_ || document == nullptr ? nullptr : commands_.get();
   // Play.Faulted keeps the PlayEdits for its Select only: the frozen World
   // stays inspectable, and Submit drops everything (ADR-111).
   context.play_edits = play_ ? play_edits_.get() : nullptr;
@@ -370,6 +452,14 @@ void Editor::DrawUi(App& app, const FrameReport& report) {
   context.viewports = app.Renderer() != nullptr ? viewports_.get() : nullptr;
   context.play_game =
       play_ != nullptr && play_->Kind() == PlayKind::kPlayGame && !faulted;
+  // M11b (ADR-118): the scene hooks and the document panels cache against.
+  context.game = &game_;
+  if (document != nullptr) {
+    context.asset_root = document->Desc().asset_root;
+    context.prefab_document = document->Desc().kind == DocumentKind::kPrefab;
+    context.document = documents_.ActiveId();
+    context.revision = play_ ? 0 : document->Revision();
+  }
   viewports_->StartReports();
   DrawBuiltInPanels(context);
   ++ui_frame_;

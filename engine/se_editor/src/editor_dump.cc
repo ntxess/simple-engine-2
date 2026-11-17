@@ -42,7 +42,8 @@ void Editor::BeginIdleHeader() {
   const ReplayHeader build = MakeReplayHeader({}, 0, kDefaultTickRate);
   SessionHeaderInfo info;
   info.module = game_.module != nullptr ? game_.module->name : "";
-  info.scene = document_ ? std::string_view(document_->Desc().name) : "";
+  info.scene =
+      Active() != nullptr ? std::string_view(Active()->Desc().name) : "";
   info.build = build.build;
   info.platform = build.platform;
   info.compiler = build.compiler;
@@ -61,7 +62,8 @@ void Editor::AttachPlayDump() {
   const ReplayHeader header = play_->Header();
   SessionHeaderInfo info;
   info.module = game_.module != nullptr ? game_.module->name : "";
-  info.scene = document_ ? std::string_view(document_->Desc().name) : "";
+  info.scene =
+      Active() != nullptr ? std::string_view(Active()->Desc().name) : "";
   info.scene_hash = header.scene_hash;
   info.seed = header.seed;
   info.tick_rate = header.tick_rate;
