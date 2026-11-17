@@ -4926,3 +4926,186 @@ read.
 drain can wait for it; the drain's ticks were never part of what a replay
 promises. Decision 5 is the game's side of ADR-089: a game has nothing a
 user could save again, so a failed write must not keep it running.
+
+## ADR-125 rampage's game flow: four sprite states, a FlowSystem that acts only where a state put a role (2026-11-17)
+
+**Context.** M13b gives rampage a player's session: the Title (the legacy
+MainMenu), Gameplay, Pause and GameOver. The module's start state
+"sandbox" is what the editor's Play (ADR-097), se_replay and every rampage
+golden run, and none of that may change. Until M19 there is no text or UI,
+and decision 3 of the M11/M13/M17b specs settles that Pause returns to the
+Title with Jump and resumes with Exit. Decision 4: rampage persists no game
+save.
+
+**Decision.**
+- **Each flow state is one World from a sprite scene.** games/rampage/src/
+  flow_states.cc: "title" (assets/scenes/title.scene.json, the "bg"
+  wallpaper scaled over the 1920x1080 arena, nothing else), "gameplay"
+  (the configured scene, by default the sandbox's), "pause"
+  (assets/scenes/pause.scene.json: the wallpaper tinted to a dark veil at
+  alpha 160) and "game_over" (assets/scenes/game_over.scene.json: the
+  wallpaper tinted red). Pause is pushed over Gameplay, so the stack's
+  push semantics pause Gameplay's World while Pause's steps, and both draw
+  (RenderSources, Gameplay at alpha 1). GameOver replaces Gameplay; its
+  Enter replaces it with a fresh Gameplay, the scene loaded again with the
+  same seed.
+- **The rules are FlowSystem's, gated by a FlowContext.** FlowSystem is the
+  last system of GameRules (after DeathRule) and acts only in a World
+  whose ctx holds a `FlowContext` with a role; the four states put one
+  there, the sandbox state does not. The ctx is not hashed (the World hash
+  covers entities), so the flow's Worlds hash as their scenes do, and
+  every existing golden and reference comparison runs exactly as before.
+  `FlowRules(role, input, player_alive)` is the pure decision; the system
+  queues it with RequestGameState, so it applies at the next tick
+  boundary.
+- **One transition per tick, the first matching rule wins.** A key counts
+  in the tick whose InputFrame has its press (a held key does not repeat).
+  Title: Enter, then Exit (a pop that empties the stack: M13a ends the
+  game). Gameplay: the death (no PlayerControl entity without a
+  DestroyRequest) before Exit, so a pause pressed in the dying tick does
+  not freeze a lost game. Pause: Exit (pop), then Jump (pop, then replace
+  with "title": two commands of one transition, FIFO at one boundary, so
+  Gameplay never ticks again). GameOver: Enter (retry), then Exit (the
+  Title). The ids and scenes are in game_rampage/flow.h; the declared rule
+  is R14 in docs/rules/gameplay-rules.md, which closes the ledger's Escape
+  row as re-specified.
+- **No save.** No state writes or reads a game save (decision 4); the
+  runtime's durability tests use the `--record` replay.
+
+**Why.** Gating on a ctx role keeps the flow's rules out of every World
+that existed before M13 without a second schedule or a per-module switch,
+and lets the editor's Play and se_replay keep running the sandbox
+unchanged. Making the rules a pure function of the role, the tick's input
+and one World query keeps them testable without a stack and keeps the
+replay of a session a function of its InputFrames.
+
+**Consequences.** The window title shows the top state's id first
+(`App::UpdateTitle`: "rampage | gameplay | tick N | Running"). A Gameplay
+scene without a PlayerControl entity ends at its first tick (GameOver):
+the flow needs a player. Until M19's menus there is no on-screen text: the
+keys are in the README and in the gates.md row for a person at the
+keyboard.
+
+**Checked by.** `rampage.flow.*` (each rule from synthetic InputFrames; one
+transition per tick; GameOver on the player's death and on a destroy
+request alone; Pause's two-command return; the sandbox state's World has
+no FlowContext), `determinism_rampage_flow` (ADR-127), and through the
+executable `rampage.headless_flow` (the log's state sequence; se_replay
+reproduces the recorded hashes from the replay's content bundle),
+`rampage.desktop.flow` (an unfocused window read back in each state: the
+Title, Pause and GameOver images differ from the Gameplay's and from each
+other) and `rampage.frames_300_title`.
+
+## ADR-126 The flow's content: scenes and prefabs through StateEnv::content, rampage's state assets (2026-11-17)
+
+**Context.** M13a's content contract (docs/milestone-specs.md, "The
+content contract") gives a state its files through `StateEnv::content`
+(the AssetRuntime's lane-loaded texts in the runtime, a
+CachedContentSource or a content bundle in tools and tests) and asks the
+game what a loaded text needs besides itself
+(`GameSetup::text_dependencies`) and what to do when the focus is lost
+(`GameSetup::on_focus_lost`).
+
+**Decision.**
+- **Content paths are relative to the content root; prefab references to
+  `assets/`.** A scene names its prefabs relative to the asset directory
+  ("prefabs/enemy.prefab.json"), as before; the flow states resolve them
+  through the same ContentSource as `assets/<ref>` (flow.h's
+  `kContentAssetDir`), so a state built from the runtime's texts never
+  reads a file. `SceneDependencies(path, text, asset_dir)`
+  (game_rampage/content.h) lists a scene's prefab references as those
+  paths, each once, and nothing for a prefab or a malformed text (the
+  scene's load reports the error).
+- **The sandbox reads through the content source when it has one.**
+  `SceneRequest::content_path` (the scene relative to the content root)
+  and a non-null `StateEnv::content` make the sandbox load the scene and
+  its prefabs through the source; otherwise it reads `path` as before
+  (the editor's Play, se_replay and the tests that set no content).
+- **A null content source reads files.** The flow states fall back to
+  reading from `FlowConfig::content_root` when `StateEnv::content` is
+  null, so a host without M13a's texts (the editor until the integration
+  wires 'Play game') still runs them.
+- **The executable.** games/rampage/app/main.cc starts at
+  `--start-state` (default "title"; "gameplay" or "sandbox" for tests),
+  with `--scene` the Gameplay's and the sandbox's scene. The flow states'
+  StateAssets: the state's scene as a text (the lane adds its prefabs
+  through `text_dependencies`) and every texture and sound of the tables.
+  The Title, Pause and GameOver draw only the wallpaper, but naming "bg"
+  alone is an error in a headless App (it reads no texture table, and a
+  texture named outside the table is a state error), and the table's three
+  textures are small; the Gameplay's scene is configurable anyway.
+- **GameSetup::text_dependencies reaches the AssetRuntime.** M13a's App
+  (commit cc195a039) did not copy it into AssetRuntimeConfig, so a scene's
+  prefabs were never requested and the Gameplay state failed to build its
+  World; `App::StartAssets` now sets it (one line).
+  With it the content test module's start state also waits for its
+  text's include, and `crash.runtime_dump_with_session_log` (M13a's
+  tests/crash/session_log_dump_test.py), whose focus loss at iterate 60
+  only raced the lane before, now always arrived before "play" existed:
+  the test pushes it at iterate 3000 and dumps after tick 6000 (the
+  InputFrame ring holds 7200), its only change.
+  `on_focus_lost` pushes "pause" when "gameplay" is on top and asks for
+  nothing otherwise.
+- **The executable's sandbox reads its scene file as before.** Its
+  StateAssets stay M9's (every texture and sound, no text) and its
+  SceneRequest has no content_path, so the runtime's sandbox state is
+  exactly the one before M13. A sandbox that loaded its scene and prefabs
+  as texts would make M13a's App start every sandbox replay and dump from
+  a content bundle (ADR-123: the start bytes are the bundle whenever a
+  loaded text differs from the scene file, and the prefabs do), which
+  se_replay's bundle run cannot start the sandbox from (it sets no
+  SceneRequest), and which would change the meaning of the M4/M12 crash
+  tests and `input.pushed_keys_replay_*`. The content path stays
+  available (tests, the integration's editor).
+
+**Why.** Keeping prefab references relative to the asset directory leaves
+every scene and prefab file unchanged; one rule for the asset directory is
+all the source needs to serve them. A fallback that reads files keeps the
+states usable by every host the integration has not yet moved onto the
+lane.
+
+**Consequences.** The tests that check the sandbox's ticks, hashes or
+images through the executable pass `-- --start-state sandbox` (the M4 and
+M12 crash tests, `rampage.frames_300`, `input.pushed_keys_replay_*`,
+`render.fault.*`).
+
+**Checked by.** `rampage.flow.The scenes load the same through content as
+from files`, `rampage.flow.The sandbox reads through StateEnv::content`,
+`rampage.flow.Scene dependencies are its prefabs under the asset dir`.
+
+## ADR-127 The flow's recorded session and its golden (2026-11-17)
+
+**Context.** M13b's determinism test replays a session through every state
+under 30, 60, 144 and 160 Hz synthetic clocks and FMA3 on and off, from a
+recorded input file written by a checked-in generator through
+StampedInput.
+
+**Decision.**
+- **StampedInput plays a given script.** A second constructor takes a list
+  of edges (tick, action, down) and stamps each at the middle of its
+  tick's window, `epoch + (t - 1/2) * dt`; the seeded script is unchanged.
+- **The generator and the fixture.** tests/rampage/flow_input_gen.cc
+  writes tests/fixtures/flow/flow.seinput from the script in
+  tests/rampage/support/flow_session.cc (360 ticks at 120 Hz): Enter at
+  tick 20, Right held 30-60, Escape at 50 and 80, the death on
+  tests/fixtures/flow/doomed.scene.json (the player at HP 10, a hunter with
+  an instant -10 effect on a path through it), Enter at 240 (a retry),
+  Escape at 280 and Jump at 310. `rampage.flow_input_fixture` runs the
+  generator and compares its output with the checked-in file (newlines
+  aside), and a Catch2 case compares the parsed frames.
+- **The golden.** `determinism_rampage_flow` (tests/golden/<platform>/)
+  holds the 360 per-tick stack hashes (GameStateStack::Hash, tagged with
+  the state ids) of the session started at "title" with the doomed scene
+  as the Gameplay scene, one tick per frame; the same hashes and the same
+  state per tick are required at every clock and with FMA3 on and off, and
+  a recording at 144 Hz replays at 30 Hz to them.
+
+**Why.** A scripted list keeps the session's transitions on known ticks, so
+the test names them (Gameplay at 21, Pause at 51 and 281, the Title at
+311) and fails on a transition that moves, while StampedInput keeps the
+edges placed the way the runtime's InputService places them.
+
+**Checked by.** `rampage.determinism_rampage_flow: every state, independent
+of the clock`, `rampage.A recorded flow session replays at another rate`,
+`rampage.The flow's recorded session is its generator's output`,
+`rampage.flow_input_fixture`.

@@ -7,18 +7,22 @@
 #include <memory>
 #include <span>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include "game_rampage/components.h"
+#include "game_rampage/flow.h"
 #include "game_rampage/legacy_scenario.h"
 #include "game_rampage/scene.h"
 #include "game_rampage/systems.h"
 #include "se_core/component_registry.h"
 #include "se_core/error.h"
 #include "se_core/log.h"
+#include "se_core/schedule.h"
 #include "se_core/world.h"
 #include "se_render_core/render_components.h"
 #include "se_sim/audio_events.h"
+#include "se_sim/content_source.h"
 #include "se_sim/game_module.h"
 #include "se_sim/game_state.h"
 
@@ -45,7 +49,8 @@ class SandboxState final : public GameState {
     desc.tick_rate = env_.tick_rate;
     world_ = std::make_unique<World>(*env_.registry, std::move(desc));
     const MutationGate gate = world_->OpenGate(GateReason::kLoad);
-    if (auto loaded = LoadRequestedScene(*world_, PendingScene()); !loaded) {
+    if (auto loaded = LoadRequestedScene(*world_, PendingScene(), env_.content);
+        !loaded) {
       SE_LOG_ERROR("sandbox: {}", loaded.error().message);
     }
     // The rules' sounds (M8); never part of the World's state.
@@ -84,6 +89,13 @@ std::unique_ptr<GameState> MakeSandbox(const StateEnv& env) {
 
 void RegisterStates(GameStateFactory& factory) {
   factory.Register(kSandboxState, &MakeSandbox);
+  RegisterFlowStates(factory);
+}
+
+// The M3 systems, then FlowSystem last in GameRules (M13).
+void RegisterSystems(Schedule& schedule) {
+  RegisterRampageSystems(schedule);
+  schedule.Add<FlowSystem>(Phase::kGameRules);
 }
 
 // The legacy key bindings (config/config.json control-settings, whose
@@ -113,10 +125,11 @@ const GameModule& RampageModule() {
   static const GameModule kModule = {
       .name = "rampage",
       .register_components = &RegisterComponents,
-      .register_systems = &RegisterRampageSystems,
+      .register_systems = &RegisterSystems,
       .register_states = &RegisterStates,
       .start_state = kSandboxState,
       .actions = {.bindings = kBindings},
+      .game_start_state = kTitleState,
   };
   return kModule;
 }
@@ -142,6 +155,34 @@ std::expected<void, Error> LoadRequestedScene(World& world,
   options.rules = request.rules;
   auto loaded = LoadSceneFile(world, request.path, options);
   if (!loaded) return std::unexpected(loaded.error());
+  return {};
+}
+
+std::expected<void, Error> LoadRequestedScene(World& world,
+                                              const SceneRequest& request,
+                                              const ContentSource* content) {
+  if (content == nullptr || request.content_path.empty() ||
+      request.format != SceneRequest::Format::kScene) {
+    return LoadRequestedScene(world, request);
+  }
+  auto text = content->Text(request.content_path);
+  if (!text) return std::unexpected(text.error());
+  SceneLoadOptions options;
+  options.asset_root = request.asset_root;
+  options.rules = request.rules;
+  options.resolver = [content](std::string_view ref) {
+    std::string path(kContentAssetDir);
+    path += '/';
+    path += ref;
+    return ReadContent(content, {}, path);
+  };
+  auto loaded = LoadScene(world, *text, options);
+  if (!loaded) {
+    Error error = loaded.error();
+    error.message = request.content_path + ": " + error.message;
+    error.path = request.content_path;
+    return std::unexpected(std::move(error));
+  }
   return {};
 }
 

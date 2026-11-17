@@ -729,6 +729,8 @@ std::expected<void, Error> App::StartAssets() {
     assets.trace_capacity = 1U << 18;
   }
   assets.state_assets = setup_.state_assets;
+  // M13: the files a loaded text needs too (a scene's prefabs).
+  assets.text_dependencies = setup_.text_dependencies;
   // The sound table: its files are every state's default sounds, decoded
   // on the lane (ADR-087). Without it the game runs silent, as in M8; with
   // --audio none no sound is requested, decoded or waited for.
@@ -1808,8 +1810,13 @@ void App::RunExitTests(Tick next_tick) {
 void App::UpdateTitle(std::uint64_t now_ns) {
   if (window_ == nullptr || now_ns - last_title_ns_ < kTitleIntervalNs) return;
   last_title_ns_ = now_ns;
-  std::string title = std::format("{} | tick {} | {}", setup_.title, LastTick(),
-                                  LifecycleStateName(lifecycle_.State()));
+  // M13: the top state's id first ("-" for an empty stack).
+  const std::string_view top =
+      game_ != nullptr ? ActiveStates().TopId() : std::string_view();
+  std::string title =
+      std::format("{} | {} | tick {} | {}", setup_.title,
+                  top.empty() ? std::string_view("-") : top, LastTick(),
+                  LifecycleStateName(lifecycle_.State()));
   // Test builds show the pacer's mode, rate, interval, latency and misses.
   if (kRuntimeTestHooks) title += " | " + pacer_.Summary();
   window_->SetTitle(title);

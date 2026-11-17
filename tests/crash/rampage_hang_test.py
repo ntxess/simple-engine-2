@@ -250,8 +250,10 @@ def main():
     else:
         if args.rampage is None:
             parser.error(f"{args.scenario} needs --rampage")
+        # The sandbox's ticks and hashes (M13b: rampage starts at the Title).
         run = Run(args.rampage, [*expected["args"], "--no-activate",
-                                 "--pref-dir", str(pref)])
+                                 "--pref-dir", str(pref), "--",
+                                 "--start-state", "sandbox"])
     hang = run.wait_for("hang test: main loops", 30)
     dumped = run.wait_for("dump written (hang 1", 30) if hang else None
     if expected["ends"]:

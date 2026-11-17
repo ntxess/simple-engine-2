@@ -78,6 +78,8 @@ def main():
                 "--push-key", f"{PUSH_FRAME}:10:s",
                 "--push-key", f"{RELEASE_FRAME}:2:d:up",
                 "--push-key", f"{RELEASE_FRAME}:10:s:up"]
+    # The sandbox, which se_replay runs (M13b: rampage starts at the Title).
+    command += ["--", "--start-state", "sandbox"]
     status, output = run(command, args.timeout)
     failures = []
     if status != 0:

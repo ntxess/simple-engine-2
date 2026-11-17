@@ -4,13 +4,13 @@ session_log.
 
 Runs content_probe (the content test module as a game: its states load
 their texts through the lane and the content gate) headless with
---push-event 60:focus-lost, which the game turns into a logged GameState
-command (push "pause" over "play"), and --dump-test after-ticks:240: the
-watchdog writes a dump after tick 240 and the probe quits. The dump, read
+--push-event 3000:focus-lost, which the game turns into a logged GameState
+command (push "pause" over "play"), and --dump-test after-ticks:6000: the
+watchdog writes a dump after tick 6000 and the probe quits. The dump, read
 by tools/minidump/read_dump.py, holds the session stream (0x53450006: the
 session's replay file without frames, here a content bundle and the
 SessionLog with the focus loss's entry); se_replay --from-dump replays the
-session from it, the pause included, to tick 240 and matches the dump's
+session from it, the pause included, to tick 6000 and matches the dump's
 published hash.
 
 usage:
@@ -29,8 +29,14 @@ import sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import rampage_dump_test as base  # noqa: E402  (this directory)
 
-TICK = 240
-FOCUS_FRAME = 60
+# Headless iterates take microseconds, and the start state waits at the
+# content gate for its text and then for the text's include (M13b wired
+# GameSetup::text_dependencies into the AssetRuntime, ADR-126), which can
+# take hundreds of iterates: the focus loss comes late enough that "play"
+# is on the stack and ticking, and the dump after it (the InputFrame ring
+# holds 7200 frames).
+TICK = 6000
+FOCUS_FRAME = 3000
 STREAM_SESSION = 0x53450006
 RUN_TIMEOUT_S = 90
 

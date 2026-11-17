@@ -7,7 +7,10 @@ se_add_module(game_rampage KIND STATIC
   SOURCES
     src/broadphase.cc
     src/collision.cc
+    src/content.cc
     src/effects.cc
+    src/flow.cc
+    src/flow_states.cc
     src/fork_sites.cc
     src/json.cc
     src/legacy_scenario.cc
