@@ -5,9 +5,11 @@
 // never cancelled and quit waits for them. LaneQuitProvider reports
 // kPending while the lane has Durable jobs running or queued, and kCancel
 // when a Durable job failed during this quit (a failed save keeps its
-// document dirty, and the quit is called off). A quit's failure count
-// starts at its first poll and is forgotten when the quit ends, however it
-// ends (ready, or called off by any provider), so a failure between two
+// document dirty, and the quit is called off). M13 (decision 5): with
+// SetCancelOnFailure(false), the game build's setting, the failure is
+// logged and the quit goes on once no Durable job is left. A quit's failure
+// count starts at its first poll and is forgotten when the quit ends, however
+// it ends (ready, or called off by any provider), so a failure between two
 // quits never cancels the second. It logs when a quit starts to wait for
 // Durable jobs and when they are done (ADR-089). Main thread.
 
@@ -28,6 +30,8 @@ class LaneQuitProvider final : public QuitProvider {
 
   QuitPoll PollQuit(QuitReason reason) override;
   void QuitCancelled() override;
+  // True (the default, the editor's): a Durable failure cancels the quit.
+  void SetCancelOnFailure(bool cancel) noexcept { cancel_on_failure_ = cancel; }
   [[nodiscard]] std::string_view Name() const override {
     return "background lane (Durable jobs)";
   }
@@ -38,6 +42,9 @@ class LaneQuitProvider final : public QuitProvider {
   bool polling_ = false;
   bool waiting_logged_ = false;
   std::uint64_t failures_at_start_ = 0;
+  bool cancel_on_failure_ = true;
+  // Failures already logged by a quit that goes on.
+  std::uint64_t failures_logged_ = 0;
 };
 
 }  // namespace se

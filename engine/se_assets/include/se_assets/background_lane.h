@@ -118,7 +118,8 @@ struct StepResult {
 
 using LanePayload =
     std::variant<std::monostate, std::vector<std::byte>, AtlasPage, PcmPayload,
-                 PrefabPayload, SceneChunkPayload, SaveOutcome, FileChange>;
+                 PrefabPayload, SceneChunkPayload, SaveOutcome, FileChange,
+                 TextPayload>;
 
 struct LaneState;
 

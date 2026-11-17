@@ -113,6 +113,30 @@ add_test(NAME rampage.flow_input_fixture
 set_tests_properties(rampage.flow_input_fixture PROPERTIES
   LABELS "rampage;tools")
 
+# M13b: the game flow through the executable (flow_app_test.py): the keys
+# pushed with the --push-key test hook (SDL events, never OS input; not in
+# Release) on the doomed scene: Title, Gameplay, Pause, Gameplay, the
+# player's death, GameOver, Title. rampage.headless_flow records the session
+# and se_replay reproduces its hashes from the replay's content bundle;
+# rampage.desktop.flow reads the composite back in each state in an
+# unfocused window (label desktop).
+if(TARGET rampage AND NOT CMAKE_BUILD_TYPE STREQUAL "Release")
+  set(_se_flow_app "${CMAKE_CURRENT_SOURCE_DIR}/flow_app_test.py")
+  add_test(NAME rampage.headless_flow
+    COMMAND Python3::Interpreter "${_se_flow_app}"
+            --rampage $<TARGET_FILE:rampage>
+            --se-replay $<TARGET_FILE:se_replay>
+            --mode headless --out "${_se_rampage_out}/headless_flow")
+  set_tests_properties(rampage.headless_flow PROPERTIES
+    LABELS "unit;rampage" TIMEOUT 120)
+  add_test(NAME rampage.desktop.flow
+    COMMAND Python3::Interpreter "${_se_flow_app}"
+            --rampage $<TARGET_FILE:rampage>
+            --mode desktop --out "${_se_rampage_out}/desktop_flow")
+  set_tests_properties(rampage.desktop.flow PROPERTIES
+    LABELS "desktop;gpu;rampage" TIMEOUT 120)
+endif()
+
 set(_se_ref "${CMAKE_SOURCE_DIR}/tests/fixtures/reference")
 set(_se_refcmp "${CMAKE_SOURCE_DIR}/tools/refcmp/refcmp.py")
 

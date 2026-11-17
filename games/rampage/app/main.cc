@@ -54,22 +54,16 @@ namespace {
 constexpr std::string_view kDefaultScene = se::rampage::kDefaultGameplayScene;
 
 // What a state loads before it is created: its scene as a text (the lane
-// adds the prefabs it names), the textures it draws and the table's sounds.
-// The Gameplay and the sandbox may draw any texture of the table (their
-// scene is configurable); the Title, Pause and GameOver draw the wallpaper.
+// adds the prefabs it names), every texture and sound of the tables (the
+// table's three textures are small; a texture named outside the table is
+// an error, and a headless App has no table). The sandbox keeps M9's
+// assets and reads its scene file itself (ADR-126): a sandbox session that
+// loaded texts would start its replays and dumps from a content bundle
+// instead of the scene file.
 se::StateAssets AssetsOf(std::string_view state_id) {
   se::StateAssets assets;
-  if (state_id == se::rampage::kSandboxState) {
-    assets.texts.push_back(se::rampage::SandboxScene().content_path);
-    return assets;
-  }
   const std::string scene = se::rampage::FlowSceneOf(state_id);
-  if (scene.empty()) return assets;
-  assets.texts.push_back(scene);
-  if (state_id != se::rampage::kGameplayState) {
-    assets.all_textures = false;
-    assets.textures.emplace_back("bg");
-  }
+  if (!scene.empty()) assets.texts.push_back(scene);
   return assets;
 }
 
@@ -138,7 +132,6 @@ std::expected<se::GameSetup, se::Error> MakeRampage(
     request.path = se::fs::Join(paths.content_root, scene);
     request.asset_root = se::fs::Join(paths.content_root, "assets");
     request.legacy_root = paths.content_root;
-    request.content_path = scene;
     if (!se::fs::Exists(request.path)) {
       return std::unexpected(se::Error{se::ErrorCode::kNotFound,
                                        "rampage: no scene file", request.path,

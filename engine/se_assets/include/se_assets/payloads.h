@@ -11,6 +11,8 @@
 //                      se_audio through SoundDecoder; ADR-087)
 //   PrefabPayload      a prefab file's top-level members
 //   SceneChunkPayload  one chunk of a scene's entities
+//   TextPayload        a text file's bytes as read (M13: scenes and
+//                      prefabs for the states' ContentSource)
 //   SaveOutcome        a SaveRequest renamed into place (or superseded)
 //   FileChange         the hot-reload scan saw a watched file change
 //
@@ -91,6 +93,12 @@ struct SceneChunkPayload {
 };
 
 inline constexpr std::string_view kSceneChunkFormat = "se-scene-chunk-v1";
+
+// A text file, unparsed (M13): its consumer parses it on the owner thread.
+struct TextPayload {
+  std::string path;
+  std::string text;
+};
 
 struct SaveOutcome {
   std::string path;

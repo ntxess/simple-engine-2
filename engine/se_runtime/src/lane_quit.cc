@@ -2,6 +2,7 @@
 
 #include "se_runtime/lane_quit.h"
 
+#include <algorithm>
 #include <cstdint>
 
 #include "se_core/log.h"
@@ -16,11 +17,19 @@ QuitPoll LaneQuitProvider::PollQuit(QuitReason /*reason*/) {
     waiting_logged_ = false;
     failures_at_start_ = failures;
   }
-  if (failures > failures_at_start_) {
+  if (failures > failures_at_start_ && cancel_on_failure_) {
     polling_ = false;
     SE_LOG_WARN("quit cancelled: {} Durable job(s) failed during the quit",
                 failures - failures_at_start_);
     return QuitPoll::kCancel;
+  }
+  if (failures > failures_at_start_ && failures > failures_logged_) {
+    // The game build: logged, and the quit goes on (M13 decision 5).
+    SE_LOG_ERROR(
+        "{} Durable job(s) failed during the quit; the game's quit goes on "
+        "(what they wrote is lost)",
+        failures - std::max(failures_at_start_, failures_logged_));
+    failures_logged_ = failures;
   }
   if (const std::uint32_t pending = lane_->DurablePending(); pending > 0) {
     // Logged once per quit (ADR-089).

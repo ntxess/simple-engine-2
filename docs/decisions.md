@@ -4318,6 +4318,193 @@ narrow` (R9: the headers are cut to their columns), `jobs.DebugDraw slices
 merge in chunk order for every W` (W = 0, 1, 3, 7 and the chaos seeds;
 TSan in WSL) and `death.debug_draw_in_fork`.
 
+## ADR-122 The content contract's details (2026-11-17)
+
+**Context.** docs/milestone-specs.md "The content contract (between M13a
+and M13b)" gives the declarations; M13b copies them. These are the details
+it leaves open, fixed in the first M13a commit.
+
+**Decision.**
+- **Placement.** Every new member goes at the end of its struct:
+  `GameModule::game_start_state` after `actions` (modules use designated
+  initializers, which must follow declaration order: rampage writes
+  `.actions = ..., .game_start_state = "title"`), `StateEnv::content` after
+  `world_kind`, and `GameSetup::start_state`, `text_dependencies` and
+  `on_focus_lost` after `raw_keyboard`. `StateAssets::texts` follows
+  `all_sounds`. `ModuleInstance` does not check `game_start_state` (a
+  module may name a state only its runtime registers); the App rejects an
+  unregistered start state at boot step 10 as before.
+- **Paths.** A ContentSource path is content-relative with forward
+  slashes ("assets/scenes/title.scene.json"), compared as given (no
+  normalisation in se_sim); the runtime's source normalises before it
+  looks a text up. A returned view is valid while the source lives; the
+  runtime's views stay valid while the state that loaded the text is on
+  the stack (a hot reload never frees a version a running state holds).
+  `CachedContentSource` keeps the first text a path read (later changes on
+  disk are not seen) and fills in the path of a reader's Error that has
+  none.
+- **The gate.** `GameStateStack::ApplyPending` asks the gate for the front
+  command only, before it creates the state: pops never wait, and a
+  command naming an unregistered state is not asked about (Apply rejects
+  it as before). The gate is asked again at every ApplyPending until it
+  answers true, so `Ready` must be idempotent and cheap. `Waiting()` is
+  the front command's state while the last ApplyPending stopped at the
+  gate; a `Request` behind it does not change it; `Clear()` ends the wait.
+- **Focus loss.** `on_focus_lost` returns at most one command; the App
+  queues it as `MakeGameStateCommand` (op and state id), so a replay
+  carries it like any other state command.
+
+**Why.** Appending keeps every existing aggregate initializer and golden
+unchanged; the gate's rules are the smallest ones under which "the same
+commands apply before the same tick either way" holds without asking
+the gate about commands that cannot create a state.
+
+## ADR-123 Content through the lane: the gate, pinned texts, kAssetSwap and the content bundle (2026-11-17)
+
+**Context.** docs/milestone-specs.md "M13a": scenes and prefabs load as
+text through the background lane (decision 6), a GameState is created only
+once its texts are loaded and its assets resident, no World steps early,
+replays get the same ticks, and multi-state sessions replay from a content
+bundle. ADR-122 fixed the contract's shape; this records how the engine
+keeps it.
+
+**Decision.**
+- **The Text store.** `AssetRegistry::RequestText(scope, path)` reads a file
+  on the lane with `MakeTextJob` (SteppedRead: an opening step, then at most
+  `kReadStepBytes`, 1 MB, per step) into a `TextPayload`; main keeps it as a
+  `shared_ptr<const std::string>` (`Text(handle)`). The hot-reload scan
+  watches it; a reload replaces the registry's string and every holder of
+  the old one keeps it. `SetGameplayFrozen` defers text changes like prefab
+  and scene-chunk changes. The Prefab and SceneChunk stores stay, unused,
+  for M19's importer (a ledger row).
+- **The gate.** `AssetRuntime` is the stack's `StateContentGate`. The first
+  `Ready(id)` creates the waiting state's AssetScope (StateAssets: textures,
+  sounds, prefabs, scene chunks and `texts`) as a *pending* scope; each
+  later call requests the dependencies `text_dependencies` names for every
+  text that has landed, and answers true once every text has landed and
+  been expanded and the scope is resident. Then it pins the texts (the
+  scope keeps the `shared_ptr` of each version) and logs the familiar
+  "state 'X': its N assets are resident after ... ms (... ; T texts); its
+  Worlds step". `SyncScopes` adopts the pending scope when the state
+  appears on the stack and releases a pending scope whose state no longer
+  waits. A text that fails to load is the state's error (`StateError`):
+  `Ready` never answers true, and the App takes the fault path (game build:
+  dump, message box, quit) with the error's path, line and column.
+- **No tick before the state.** `Hold()` holds while `Waiting()` is not
+  empty (logged once: "sim held (no ticks planned): state 'X' waits at the
+  content gate for N of its M assets") and `HoldTicks` holds a frame's
+  remaining ticks while it is. At every iterate where a state waits the App
+  completes the boundary again (`SimDriver::CompleteBoundary`: the stack's
+  pending commands, then the SessionLog's due entries), so the push applies
+  at the boundary before the same tick as in a replay, where no tick ran
+  meanwhile. `SessionLog::ApplyDue` stops while a state waits (an entry
+  that pushes a state not yet ready leaves the entries behind it pending, so
+  they apply to the new top, as in a replay), and `Enqueue` while a state
+  waits queues the entry against the next tick instead of applying it.
+  `TickInline` with a TickGate calls `CompleteBoundary` (it called
+  `ApplyPending` only) before asking the gate.
+- **The ContentSource.** `AssetRuntime::Text(path)` serves pinned versions,
+  newest scope first (the state being created reads its own), from the
+  normalised content-relative path; anything else is kNotFound with a hint.
+  A running World never sees a changed text: the next state that loads the
+  path gets the version the registry holds then; when it differs from the
+  version the path served before, the App logs
+  `MakeAssetSwap(next_tick, ContentPathGuid(path), ContentTextHash(text))`
+  with `AddScheduled` and the log says "a changed text applies to the next
+  state that loads it".
+- **The content bundle.** `se-content-bundle-v1` as the spec gives it, plus
+  two choices: `"hash"` is 16 lower-case hex digits (a JSON number loses
+  bits above 2^53 in most readers), and an optional `"start_state"` member
+  records the state the session started in. Texts are in the order first
+  served. `ContentBundleSource` serves each path's *first* version until a
+  kAssetSwap entry selects another by hash; as a `StateContentGate` it is
+  always ready and, before each state is created, selects every swap of the
+  session's log due by the driver's next tick (`Follow(log, driver)`). The
+  spec's "a path's newest version" would give a replay's first states the
+  text a later state read; the first version, then the swaps in order, is
+  what the live session read. The runtime's bundle is
+  `AssetRuntime::LoadedTexts()` with the start state set.
+- **Start bytes.** The App's replay and dump start bytes are the scene file
+  (`GameSetup::replay_start`) unless the states loaded a text that differs
+  from it; then the bundle. A rampage sandbox session (which loads no text
+  in M13a) keeps its scene file, so every existing replay and golden is
+  unchanged. `ReplayRecorder::SetStart` replaces the start bytes and the
+  header's hash at the save.
+- **se_replay.** A replay whose start bytes are a bundle (or any
+  `--start-state`) runs the module's states through a
+  `ContentBundleSource` from `--start-state`, default the bundle's start
+  state, else the module's game_start_state (the spec's default is the
+  module's game_start_state; the bundle's own start state is the one the
+  session started in, which a `--start-state sandbox` session needs).
+  `--module content_test` runs the content test module.
+- **Headless windows.** A headless App takes window events of window 0 as
+  its own, so tests push focus events with `SDL_PushEvent` without a
+  window.
+
+**Why.** The gate and the hold together keep the spec's rule that the same
+commands apply before the same tick with and without a gate: the gate
+only ever delays a boundary at which no tick runs. Pinning is what makes
+"gameplay content never changes under a running World" hold for views a
+state keeps, and the swap entry is what lets a replay read what each state
+read.
+
+## ADR-124 The game's quit, focus loss, the empty stack and its dumps (2026-11-17)
+
+**Decision.**
+- **Replays at QuitPending.** A game's `--record` replay is submitted to the
+  lane (a Durable save, ADR-089) at the first iterate that sees the quit
+  pending, before the providers are polled, so QuitPending lasts until its
+  rename ("quit waits for 1 Durable lane job"); the ticks of the drain are
+  not recorded. A quit that is ready at once (session end, TERMINATING)
+  still submits it at the start of the shutdown. The editor's replay path is
+  unchanged.
+- **A failed Durable save at quit (decision 5).**
+  `LaneQuitProvider::SetCancelOnFailure(false)`, the App's setting without
+  an extension, logs "N Durable job(s) failed during the quit; the game's
+  quit goes on" and waits only for the Durable jobs still pending; the
+  editor (an extension) keeps M10a's cancel.
+- **The empty stack.** After a frame's ticks, a game whose stack is empty
+  with nothing waiting or queued requests the quit with the new
+  `QuitReason::kGameEnded` ("the game ended: no state left").
+- **Focus loss.** `SDL_EVENT_WINDOW_FOCUS_LOST` of the App's window calls
+  `GameSetup::on_focus_lost(top)` while a state is on the stack; a command
+  is enqueued as `MakeGameStateCommand` against the next tick (logged
+  "focus lost on 'X': GameState command push 'Y' logged before tick N").
+- **The game's dumps carry the SessionLog.** The App attaches ADR-111's
+  stream (`integration::PlayStartStream`, the same stream type: the
+  session's replay file without frames) at boot step 10 and again before a
+  frame's ticks when the log's entries or the loaded texts grew; the
+  extension (the editor) attaches its own. The session header keeps flags
+  0. `se_replay --from-dump` applies a game stream's SessionLog and, when
+  its start bytes are a bundle, runs the module's states from it (rampage
+  or the content test module). `crash.rampage_hang` now expects the stream
+  in a game's dump (it checked that a game's dump had none).
+- **Test hooks.** `--push-event FRAME:quit|terminating|focus-lost|
+  focus-gained` (SDL_PushEvent at the end of iterate FRAME),
+  `--fs-faults write-ms=N,read-ms=N,busy-ms=N` (the se::fs injector for
+  the whole run, set at boot step 9) and `--expect-no-threads` (after the teardown,
+  "engine threads left at exit: N"; a thread left fails the run). The
+  deadline hook logs "shutdown deadline started: the quit drain is over".
+- **Main's breadcrumb carries the session tick.** `Schedule::Step` sets
+  the breadcrumb's tick from the InputFrame (the SimDriver's tick) instead
+  of the World's clock, which starts at 0 for a state pushed later: a dump
+  of a multi-state session names the tick a replay runs to. For a session
+  of one World from tick 1 (every rampage and editor session so far) the
+  two are equal; a frame without a tick (unit tests) keeps the World's.
+- **The content test module and content_probe.** rampage's own states are
+  M13b's, so the engine's runtime tests run `tests/support/
+  content_test_module.h` (title, play and pause Worlds built from texts in
+  tests/fixtures/content, with includes as dependencies) in a headless App
+  (`runtime.*`), and `content_probe` (tests/crash) is that module as a game
+  executable for the dump test, `crash.runtime_dump_with_session_log` (the
+  spec's `crash.rampage_dump_with_session_log` needs rampage's Pause; the
+  integration adds that variant on the same script).
+
+**Why.** Submitting the replay when the quit starts is the only way the
+drain can wait for it; the drain's ticks were never part of what a replay
+promises. Decision 5 is the game's side of ADR-089: a game has nothing a
+user could save again, so a failed write must not keep it running.
+
 ## ADR-125 rampage's game flow: four sprite states, a FlowSystem that acts only where a state put a role (2026-11-17)
 
 **Context.** M13b gives rampage a player's session: the Title (the legacy
@@ -4380,7 +4567,12 @@ keyboard.
 **Checked by.** `rampage.flow.*` (each rule from synthetic InputFrames; one
 transition per tick; GameOver on the player's death and on a destroy
 request alone; Pause's two-command return; the sandbox state's World has
-no FlowContext) and `determinism_rampage_flow` (ADR-127).
+no FlowContext), `determinism_rampage_flow` (ADR-127), and through the
+executable `rampage.headless_flow` (the log's state sequence; se_replay
+reproduces the recorded hashes from the replay's content bundle),
+`rampage.desktop.flow` (an unfocused window read back in each state: the
+Title, Pause and GameOver images differ from the Gameplay's and from each
+other) and `rampage.frames_300_title`.
 
 ## ADR-126 The flow's content: scenes and prefabs through StateEnv::content, rampage's state assets (2026-11-17)
 
@@ -4413,13 +4605,36 @@ game what a loaded text needs besides itself
   wires 'Play game') still runs them.
 - **The executable.** games/rampage/app/main.cc starts at
   `--start-state` (default "title"; "gameplay" or "sandbox" for tests),
-  with `--scene` the Gameplay's and the sandbox's scene. Each state's
-  StateAssets: its scene as a text (the lane adds its prefabs through
-  `text_dependencies`), every sound of the table, and the textures it
-  draws: the wallpaper ("bg") for the Title, Pause and GameOver, every
-  texture of the table for Gameplay and the sandbox (their scene is
-  configurable). `on_focus_lost` pushes "pause" when "gameplay" is on top
-  and asks for nothing otherwise.
+  with `--scene` the Gameplay's and the sandbox's scene. The flow states'
+  StateAssets: the state's scene as a text (the lane adds its prefabs
+  through `text_dependencies`) and every texture and sound of the tables.
+  The Title, Pause and GameOver draw only the wallpaper, but naming "bg"
+  alone is an error in a headless App (it reads no texture table, and a
+  texture named outside the table is a state error), and the table's three
+  textures are small; the Gameplay's scene is configurable anyway.
+- **GameSetup::text_dependencies reaches the AssetRuntime.** M13a's App
+  (commit cc195a039) did not copy it into AssetRuntimeConfig, so a scene's
+  prefabs were never requested and the Gameplay state failed to build its
+  World; `App::StartAssets` now sets it (one line).
+  With it the content test module's start state also waits for its
+  text's include, and `crash.runtime_dump_with_session_log` (M13a's
+  tests/crash/session_log_dump_test.py), whose focus loss at iterate 60
+  only raced the lane before, now always arrived before "play" existed:
+  the test pushes it at iterate 3000 and dumps after tick 6000 (the
+  InputFrame ring holds 7200), its only change.
+  `on_focus_lost` pushes "pause" when "gameplay" is on top and asks for
+  nothing otherwise.
+- **The executable's sandbox reads its scene file as before.** Its
+  StateAssets stay M9's (every texture and sound, no text) and its
+  SceneRequest has no content_path, so the runtime's sandbox state is
+  exactly the one before M13. A sandbox that loaded its scene and prefabs
+  as texts would make M13a's App start every sandbox replay and dump from
+  a content bundle (ADR-123: the start bytes are the bundle whenever a
+  loaded text differs from the scene file, and the prefabs do), which
+  se_replay's bundle run cannot start the sandbox from (it sets no
+  SceneRequest), and which would change the meaning of the M4/M12 crash
+  tests and `input.pushed_keys_replay_*`. The content path stays
+  available (tests, the integration's editor).
 
 **Why.** Keeping prefab references relative to the asset directory leaves
 every scene and prefab file unchanged; one rule for the asset directory is

@@ -329,6 +329,77 @@ std::expected<void, Error> NeedTestHooks(std::string_view option) {
       std::format("{} is a test hook, not built into this build", option));
 }
 
+// "FRAME:KIND" (--push-event, M13).
+std::expected<PushEventHook, Error> ParsePushEvent(std::string_view text) {
+  const std::size_t colon = text.find(':');
+  const auto bad = [text] {
+    return Bad(std::format(
+        "--push-event {}: expected FRAME:quit|terminating|focus-lost|"
+        "focus-gained",
+        text));
+  };
+  if (colon == std::string_view::npos) return bad();
+  PushEventHook hook;
+  const std::string_view frame = text.substr(0, colon);
+  const auto [end, ec] =
+      std::from_chars(frame.data(), frame.data() + frame.size(), hook.frame);
+  if (ec != std::errc() || end != frame.data() + frame.size() ||
+      hook.frame < 1) {
+    return bad();
+  }
+  const std::string_view kind = text.substr(colon + 1);
+  if (kind == "quit") {
+    hook.kind = PushedEvent::kQuit;
+  } else if (kind == "terminating") {
+    hook.kind = PushedEvent::kTerminating;
+  } else if (kind == "focus-lost") {
+    hook.kind = PushedEvent::kFocusLost;
+  } else if (kind == "focus-gained") {
+    hook.kind = PushedEvent::kFocusGained;
+  } else {
+    return bad();
+  }
+  return hook;
+}
+
+// "write-ms=N,busy-ms=N" (--fs-faults, M13).
+std::expected<void, Error> ParseFsFaults(std::string_view text,
+                                         AppConfig& config) {
+  while (!text.empty()) {
+    const std::size_t comma = text.find(',');
+    const std::string_view item = text.substr(0, comma);
+    text = comma == std::string_view::npos ? std::string_view()
+                                           : text.substr(comma + 1);
+    const std::size_t equals = item.find('=');
+    std::uint32_t value = 0;
+    const std::string_view number = equals == std::string_view::npos
+                                        ? std::string_view()
+                                        : item.substr(equals + 1);
+    const auto [end, ec] =
+        std::from_chars(number.data(), number.data() + number.size(), value);
+    if (number.empty() || ec != std::errc() ||
+        end != number.data() + number.size()) {
+      return Bad(std::format(
+          "--fs-faults: bad item '{}' (expected write-ms=N or busy-ms=N)",
+          item));
+    }
+    const std::string_view key = item.substr(0, equals);
+    if (key == "write-ms") {
+      config.fs_write_delay_ms = value;
+    } else if (key == "read-ms") {
+      config.fs_read_delay_ms = value;
+    } else if (key == "busy-ms") {
+      config.fs_rename_busy_ms = value;
+    } else {
+      return Bad(std::format(
+          "--fs-faults: bad item '{}' (expected write-ms=N, read-ms=N or "
+          "busy-ms=N)",
+          item));
+    }
+  }
+  return {};
+}
+
 }  // namespace
 
 std::span<const std::string_view> InitStepNames() noexcept {
@@ -594,6 +665,32 @@ std::expected<AppConfig, Error> ParseAppConfig(
       auto hook = ParsePushKey(*value);
       if (!hook) return std::unexpected(hook.error());
       config.push_keys.push_back(std::move(*hook));
+    } else if (option == "--push-event") {
+      if (auto ok = NeedTestHooks(option); !ok) {
+        return std::unexpected(ok.error());
+      }
+      auto value = reader.Value(option);
+      if (!value) return std::unexpected(value.error());
+      auto hook = ParsePushEvent(*value);
+      if (!hook) return std::unexpected(hook.error());
+      config.push_events.push_back(*hook);
+    } else if (option == "--fs-faults") {
+      if (auto ok = NeedTestHooks(option); !ok) {
+        return std::unexpected(ok.error());
+      }
+      auto value = reader.Value(option);
+      if (!value) return std::unexpected(value.error());
+      if (auto parsed = ParseFsFaults(*value, config); !parsed) {
+        return std::unexpected(parsed.error());
+      }
+    } else if (option == "--expect-no-threads") {
+      if (auto ok = NeedTestHooks(option); !ok) {
+        return std::unexpected(ok.error());
+      }
+      if (auto ok = flag(); !ok) {
+        return std::unexpected(ok.error());
+      }
+      config.expect_no_threads = true;
     } else {
       return Bad(std::format("unknown option '{}'", option));
     }

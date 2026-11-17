@@ -13,7 +13,18 @@
 //             [--jitter-ms MS] [--hash-out FILE] [--projection-out FILE]
 //             [--record FILE] [--jobs W] [--expect-golden NAME]
 //   se_replay --from-dump DUMP [--root DIR] [--hash-out FILE]
-//             [--start-scene FILE]
+//             [--start-scene FILE] [--start-state ID]
+//   se_replay --module content_test [--start-state ID] [--root DIR]
+//             [--inputs FILE] [--ticks N] [--hash-out FILE]
+//
+// M13: a replay whose start bytes are a content bundle (se_sim/
+// content_bundle.h: a multi-state session's texts) runs the module's
+// states from --start-state (default the bundle's start state, else the
+// module's game_start_state) through a ContentBundleSource, with the
+// replay's SessionLog selecting the texts' versions (kAssetSwap); the same
+// for a game's dump whose session stream holds a bundle. The content test
+// module (tests/support/content_test_module.h) reads its texts from --root
+// (default tests/fixtures) when the replay has no bundle.
 //
 // --jobs W runs the session on a threaded ForkJoinPool of W workers with
 // every fork site enabled (M14); the hashes do not depend on W, and
@@ -71,6 +82,7 @@
 #include <cstdlib>
 #include <entt/entity/registry.hpp>
 #include <exception>
+#include <expected>
 #include <format>
 #include <fstream>
 #include <iterator>
@@ -89,6 +101,7 @@
 #include "se_core/breadcrumb.h"
 #include "se_core/core_components.h"
 #include "se_core/dump_stream.h"
+#include "se_core/error.h"
 #include "se_core/fp.h"
 #include "se_core/guid.h"
 #include "se_core/input_frame.h"
@@ -98,12 +111,17 @@
 #include "se_core/types.h"
 #include "se_core/world.h"
 #include "se_replay/dump_session.h"
+#include "se_sim/content_bundle.h"
+#include "se_sim/content_source.h"
+#include "se_sim/game_module.h"
 #include "se_sim/game_state.h"
 #include "se_sim/replay.h"
+#include "support/content_test_module.h"
 #include "support/fork_config.h"
 #include "support/golden.h"
 #include "support/kernel_session.h"
 #include "support/kernel_test_module.h"
+#include "support/module_session.h"
 #include "support/test_roles.h"
 
 namespace se {
@@ -131,6 +149,7 @@ struct Args {
   int jobs = 0;
   std::string expect_golden;
   std::string from_dump;
+  std::string start_state;
 };
 
 void Usage() {
@@ -148,7 +167,11 @@ void Usage() {
                "                 [--edges-out FILE] [--start-scene FILE]\n"
                "       se_replay --from-dump DUMP [--root DIR] "
                "[--hash-out FILE]\n"
-               "                 [--start-scene FILE]\n");
+               "                 [--start-scene FILE] [--start-state ID]\n"
+               "       se_replay --module content_test [--start-state ID] "
+               "[--root DIR]\n"
+               "                 [--inputs FILE] [--ticks N] "
+               "[--hash-out FILE]\n");
 }
 
 std::optional<Args> Parse(int argc, char** argv) {
@@ -200,6 +223,8 @@ std::optional<Args> Parse(int argc, char** argv) {
       args.expect_golden = value;
     } else if (flag == "--from-dump") {
       args.from_dump = value;
+    } else if (flag == "--start-state") {
+      args.start_state = value;
     } else {
       std::fprintf(stderr, "se_replay: unknown flag %s\n", argv[i - 1]);
       return std::nullopt;
@@ -311,6 +336,90 @@ int ReportHashes(const Args& args, const std::vector<std::uint64_t>& hashes,
   return status;
 }
 
+// A replay whose start bytes are a content bundle, or (|fallback|) a module
+// reading |fallback|'s texts: the module's states from the start state,
+// the replay's frames and SessionLog (M13).
+int RunStates(const Args& args, const GameModule& module,
+              const ContentSource* fallback) SE_REQUIRES(g_main)
+    SE_EXCLUDES(g_sim_owner) {
+  std::optional<ReplayReader> reader;
+  std::optional<ContentBundleSource> bundle;
+  testing::ModuleSessionOptions options;
+  options.module = &module;
+  options.seed = args.seed;
+  options.pool = PoolFor(args);
+  if (!args.inputs.empty()) {
+    const std::optional<std::vector<std::byte>> bytes = ReadFile(args.inputs);
+    if (!bytes) {
+      std::fprintf(stderr, "se_replay: cannot read %s\n", args.inputs.c_str());
+      return 2;
+    }
+    auto opened = ReplayReader::Open(*bytes);
+    if (!opened) {
+      std::fprintf(stderr, "se_replay: %s: %s\n", args.inputs.c_str(),
+                   opened.error().message.c_str());
+      return 2;
+    }
+    reader = std::move(*opened);
+    if (ContentBundle::IsBundle(reader->StartBytes())) {
+      auto read = ContentBundle::Read(reader->StartBytes());
+      if (!read) {
+        std::fprintf(stderr, "se_replay: %s: the content bundle: %s\n",
+                     args.inputs.c_str(), read.error().message.c_str());
+        return 2;
+      }
+      bundle.emplace(std::move(*read));
+    }
+    options.seed = reader->Header().seed;
+    options.tick_rate = reader->Header().tick_rate;
+    options.input = &*reader;
+    const std::span<const std::byte> session = reader->SessionBytes();
+    options.session.assign(session.begin(), session.end());
+  }
+  if (bundle) {
+    options.bundle = &*bundle;
+  } else if (fallback != nullptr) {
+    options.content = fallback;
+  } else {
+    std::fprintf(stderr,
+                 "se_replay: the replay's start bytes are not a "
+                 "content bundle\n");
+    return 2;
+  }
+  options.start_state = !args.start_state.empty() ? args.start_state
+                        : bundle ? bundle->Bundle().StartState()
+                                 : std::string();
+  options.ticks = args.ticks.value_or(
+      reader ? static_cast<Tick>(reader->Frames().size()) : Tick{600});
+  const testing::ModuleSessionResult result =
+      testing::RunModuleSession(options);
+  if (!result.error.empty()) {
+    std::fprintf(stderr, "se_replay: %s\n", result.error.c_str());
+    return 2;
+  }
+  const int status =
+      ReportHashes(args, result.hashes, reader ? &*reader : nullptr);
+  std::fputs(std::format("se_replay: {} {} ticks from state '{}'{}, final "
+                         "hash {:016x}; {} text swaps\n",
+                         module.name, result.hashes.size(),
+                         result.top_states.empty() ? std::string()
+                                                   : result.top_states.front(),
+                         bundle ? " on the replay's content bundle" : "",
+                         result.hashes.empty() ? 0 : result.hashes.back(),
+                         result.swaps_selected)
+                 .c_str(),
+             stdout);
+  // The top state after each tick, for tests of the flow (--hash-out
+  // FILE.states).
+  if (!args.hash_out.empty()) {
+    std::ofstream out(args.hash_out + ".states", std::ios::trunc);
+    for (std::size_t i = 0; i < result.top_states.size(); ++i) {
+      out << std::format("{} {}\n", i + 1, result.top_states[i]);
+    }
+  }
+  return status;
+}
+
 int RunRampage(const Args& args) SE_REQUIRES(g_main) SE_EXCLUDES(g_sim_owner) {
   if (!args.edits.empty() || args.det_crosscheck > 0) {
     std::fprintf(stderr,
@@ -375,6 +484,11 @@ int RunRampage(const Args& args) SE_REQUIRES(g_main) SE_EXCLUDES(g_sim_owner) {
         return 2;
       }
       reader = std::move(*opened);
+      // M13: a multi-state session's replay starts from its content bundle.
+      if (ContentBundle::IsBundle(reader->StartBytes()) ||
+          !args.start_state.empty()) {
+        return RunStates(args, rampage::RampageModule(), nullptr);
+      }
       input_ticks = reader->Frames().size();
       options.input = &*reader;
       if (reader->Header().seed != 0) options.seed = reader->Header().seed;
@@ -505,8 +619,8 @@ int RunFromDump(const Args& args) SE_REQUIRES(g_main) SE_EXCLUDES(g_sim_owner) {
                    .c_str(),
                stdout);
   }
-  const replay::FromDumpResult result =
-      replay::ReplayDumpedRampage(*session, root, start_scene);
+  const replay::FromDumpResult result = replay::ReplayDumpedRampage(
+      *session, root, start_scene, args.start_state);
   if (result.hashes.empty() && !result.error.empty()) {
     std::fprintf(stderr, "se_replay: --from-dump: %s\n", result.error.c_str());
     return 2;
@@ -516,6 +630,14 @@ int RunFromDump(const Args& args) SE_REQUIRES(g_main) SE_EXCLUDES(g_sim_owner) {
     for (std::size_t i = 0; i < result.hashes.size(); ++i) {
       out << std::format("{} {:016x}\n", header.start_tick + i,
                          result.hashes[i]);
+    }
+    // M13: a multi-state session's top state per tick.
+    if (!result.top_states.empty()) {
+      std::ofstream states(args.hash_out + ".states", std::ios::trunc);
+      for (std::size_t i = 0; i < result.top_states.size(); ++i) {
+        states << std::format("{} {}\n", header.start_tick + i,
+                              result.top_states[i]);
+      }
     }
   }
   const std::size_t shown = std::min<std::size_t>(result.hashes.size(), 8);
@@ -554,6 +676,22 @@ int RunFromDump(const Args& args) SE_REQUIRES(g_main) SE_EXCLUDES(g_sim_owner) {
 int Run(const Args& args) SE_REQUIRES(g_main) SE_EXCLUDES(g_sim_owner) {
   if (!args.from_dump.empty()) return RunFromDump(args);
   if (args.module == "rampage") return RunRampage(args);
+  if (args.module == "content_test") {
+    const std::string root =
+        args.root.empty() ? testing::ContentFixtureRoot() : args.root;
+    const CachedContentSource content(
+        [&root](std::string_view path) -> std::expected<std::string, Error> {
+          const std::optional<std::vector<std::byte>> bytes =
+              ReadFile(root + "/" + std::string(path));
+          if (!bytes) {
+            return std::unexpected(Error{ErrorCode::kNotFound, "no such text",
+                                         root + "/" + std::string(path), 0, 0});
+          }
+          return std::string(reinterpret_cast<const char*>(bytes->data()),
+                             bytes->size());
+        });
+    return RunStates(args, testing::ContentTestModule(), &content);
+  }
   if (args.module != "kernel_test") {
     std::fprintf(stderr, "se_replay: unknown module '%s'\n",
                  args.module.c_str());

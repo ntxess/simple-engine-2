@@ -16,6 +16,7 @@ se_add_module(se_assets_tests KIND EXECUTABLE
     atlas_test.cc
     lane_test.cc
     registry_test.cc
+    text_assets_test.cc
     support/lane_test_support.cc
     support/png.cc
     ../support/tracy_inert_listener.cc

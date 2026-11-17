@@ -287,6 +287,39 @@ class JsonJob final : public LaneJob {
   std::expected<LanePayload, Error> result_;
 };
 
+// --- Text ---
+
+class TextJob final : public LaneJob {
+ public:
+  explicit TextJob(std::string path) : read_(std::move(path)) {}
+
+  [[nodiscard]] std::string_view Kind() const noexcept override {
+    return "text";
+  }
+
+  StepResult Step(LaneContext& /*lane*/) override {
+    auto done = read_.Step();
+    if (!done) {
+      error_ = std::move(done.error());
+      return StepResult::Done();
+    }
+    return *done ? StepResult::Done() : StepResult::Continue();
+  }
+
+  std::expected<LanePayload, Error> TakeResult() override {
+    if (error_) return std::unexpected(std::move(*error_));
+    const std::vector<std::byte>& bytes = read_.Bytes();
+    TextPayload text;
+    text.path = read_.Path();
+    text.text.assign(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+    return LanePayload(std::move(text));
+  }
+
+ private:
+  SteppedRead read_;
+  std::optional<Error> error_;
+};
+
 }  // namespace
 
 // --- SteppedRead ---
@@ -364,6 +397,10 @@ std::unique_ptr<LaneJob> MakeWatchJob(std::string path, std::uint64_t tag,
 
 std::unique_ptr<LaneJob> MakeJsonJob(std::string path, JsonKind kind) {
   return std::make_unique<JsonJob>(std::move(path), kind);
+}
+
+std::unique_ptr<LaneJob> MakeTextJob(std::string path) {
+  return std::make_unique<TextJob>(std::move(path));
 }
 
 }  // namespace se

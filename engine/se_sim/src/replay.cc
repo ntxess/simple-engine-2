@@ -141,6 +141,13 @@ void ReplayRecorder::Begin(const ReplayHeader& header,
   start_.assign(start.begin(), start.end());
 }
 
+void ReplayRecorder::SetStart(std::span<const std::byte> start) {
+  if (!active_) return;
+  start_.assign(start.begin(), start.end());
+  header_.scene_hash =
+      MakeReplayHeader(start, header_.seed, header_.tick_rate).scene_hash;
+}
+
 void ReplayRecorder::Record(const InputFrame& frame) {
   if (!active_) return;
   if (frames_ == 0) first_tick_ = frame.tick;
