@@ -4317,3 +4317,44 @@ focus), `editor.script.open_dirty`, `editor.script.autosave_after_save`,
 narrow` (R9: the headers are cut to their columns), `jobs.DebugDraw slices
 merge in chunk order for every W` (W = 0, 1, 3, 7 and the chaos seeds;
 TSan in WSL) and `death.debug_draw_in_fork`.
+
+## ADR-122 The content contract's details (2026-11-17)
+
+**Context.** docs/milestone-specs.md "The content contract (between M13a
+and M13b)" gives the declarations; M13b copies them. These are the details
+it leaves open, fixed in the first M13a commit.
+
+**Decision.**
+- **Placement.** Every new member goes at the end of its struct:
+  `GameModule::game_start_state` after `actions` (modules use designated
+  initializers, which must follow declaration order: rampage writes
+  `.actions = ..., .game_start_state = "title"`), `StateEnv::content` after
+  `world_kind`, and `GameSetup::start_state`, `text_dependencies` and
+  `on_focus_lost` after `raw_keyboard`. `StateAssets::texts` follows
+  `all_sounds`. `ModuleInstance` does not check `game_start_state` (a
+  module may name a state only its runtime registers); the App rejects an
+  unregistered start state at boot step 10 as before.
+- **Paths.** A ContentSource path is content-relative with forward
+  slashes ("assets/scenes/title.scene.json"), compared as given (no
+  normalisation in se_sim); the runtime's source normalises before it
+  looks a text up. A returned view is valid while the source lives; the
+  runtime's views stay valid while the state that loaded the text is on
+  the stack (a hot reload never frees a version a running state holds).
+  `CachedContentSource` keeps the first text a path read (later changes on
+  disk are not seen) and fills in the path of a reader's Error that has
+  none.
+- **The gate.** `GameStateStack::ApplyPending` asks the gate for the front
+  command only, before it creates the state: pops never wait, and a
+  command naming an unregistered state is not asked about (Apply rejects
+  it as before). The gate is asked again at every ApplyPending until it
+  answers true, so `Ready` must be idempotent and cheap. `Waiting()` is
+  the front command's state while the last ApplyPending stopped at the
+  gate; a `Request` behind it does not change it; `Clear()` ends the wait.
+- **Focus loss.** `on_focus_lost` returns at most one command; the App
+  queues it as `MakeGameStateCommand` (op and state id), so a replay
+  carries it like any other state command.
+
+**Why.** Appending keeps every existing aggregate initializer and golden
+unchanged; the gate's rules are the smallest ones under which "the same
+commands apply before the same tick either way" holds without asking
+the gate about commands that cannot create a state.
