@@ -1,0 +1,4 @@
+# content_test: the play World
+include content/common.txt
+entity player 0 0 1 0.5
+entity enemy 50 20 -0.25 0

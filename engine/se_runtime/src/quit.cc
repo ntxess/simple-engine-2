@@ -25,6 +25,8 @@ std::string_view QuitReasonName(QuitReason reason) noexcept {
       return "terminating";
     case QuitReason::kFault:
       return "fault";
+    case QuitReason::kGameEnded:
+      return "the game ended";
   }
   return "?";
 }

@@ -210,15 +210,13 @@ def check_dump(failures, dump, expected, system):
     if failures.check(ring is not None, "no InputFrame ring"):
         failures.equal(ring["head"], TICK, "InputFrame ring head (frames 1 "
                        f"to {TICK}, the hanging tick's included)")
+    # The editor's Play-start stream, and since M13a a game's session
+    # stream: the session's replay file without frames (the scene in it).
     start = base.stream(dump, STREAM_PLAY_START)
-    if editor:
-        if failures.check(start is not None, "no Play-start stream"):
-            failures.check(start.get("head", 0) > 1000,
-                           f"the Play-start stream holds {start.get('head')} "
-                           "bytes (a replay file with the scene in it)")
-    else:
-        failures.check(start is None or not start.get("head"),
-                       "a game's dump has a Play-start stream")
+    if failures.check(start is not None, "no session (Play-start) stream"):
+        failures.check(start.get("head", 0) > 1000,
+                       f"the session stream holds {start.get('head')} "
+                       "bytes (a replay file with the scene in it)")
 
 
 def main():

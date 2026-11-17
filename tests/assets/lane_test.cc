@@ -993,5 +993,42 @@ TEST_CASE("Replay and SessionLog flushes go through the lane",
   CHECK(SessionLog::Read(ReadBytes(log_path)).has_value());
 }
 
+// M13 decision 5: the game build logs a Durable save that fails during its
+// quit and quits anyway; the editor's provider (the default) cancels.
+TEST_CASE("A Durable failure does not cancel a game's quit",
+          "[lane][sharing]") {
+  if constexpr (!fs::kFsFaultHooks) {
+    SKIP("the se::fs fault injector is compiled out of Release builds");
+  }
+  const MainThreadScope main;
+  const std::string dir = ScratchDir("game_quit");
+  const std::string path = fs::Join(dir, "run.sereplay");
+  auto lane = StartLane(TestConfig());
+  fs::SetFsFaults(fs::FsFaults{.rename_busy_ms = 2500});
+  LaneQuitProvider provider(*lane);
+  provider.SetCancelOnFailure(false);
+  QuitController quit;
+  quit.AddProvider(&provider);
+  quit.Request(QuitReason::kRequested);
+  SaveRequest save;
+  save.path = path;
+  save.revision = 1;
+  save.durable = true;
+  save.bytes = TextBytes("replay");
+  SubmitSave(*lane, std::move(save));
+  std::vector<LaneCompletion> done;
+  REQUIRE(DrainUntil(*lane, done, [&] {
+    AssertMainThread();
+    quit.Poll();
+    return !done.empty() && quit.ReadyToExit();
+  }));
+  fs::ClearFsFaults();
+  REQUIRE_FALSE(done[0].result.has_value());
+  REQUIRE(lane->DurableFailures() == 1);
+  REQUIRE(quit.Cancellations() == 0);
+  CHECK(quit.ReadyToExit());
+  CHECK_FALSE(fs::Exists(path));
+}
+
 }  // namespace
 }  // namespace se
