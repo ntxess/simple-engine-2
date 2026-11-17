@@ -3,6 +3,7 @@
 #include "game_rampage/scene.h"
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <entt/entity/registry.hpp>
@@ -12,6 +13,7 @@
 #include <functional>
 #include <iterator>
 #include <map>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -24,6 +26,7 @@
 #include "se_core/core_components.h"
 #include "se_core/error.h"
 #include "se_core/guid.h"
+#include "se_core/hash.h"
 #include "se_core/world.h"
 #include "se_render_core/render_components.h"
 
@@ -42,10 +45,16 @@ std::unexpected<Error> FailAt(std::string_view where, std::string_view what) {
 }
 
 // Components a scene may not set: the Guid comes from "guid", the name from
-// "name", and the spawn record from the load itself.
+// "name", the prefab link from "prefab", and the spawn record from the load
+// itself.
 bool Reserved(std::string_view name) {
-  return name == "IdComponent" || name == "Name" || name == "Spawned";
+  return name == "IdComponent" || name == "Name" || name == "Spawned" ||
+         name == "PrefabInstance";
 }
+
+// PrefabRootGuid's constants (ADR-114).
+constexpr std::uint64_t kPrefabRootSeed = 0x9EFAB5007C0DE000ULL;
+constexpr std::uint64_t kPrefabRootLo = 0x5EEDF00D0F1CE5EDULL;
 
 std::expected<std::int64_t, Error> IntegerAt(const json::Value& value,
                                              std::string_view where) {
@@ -197,6 +206,7 @@ std::expected<const json::Value*, Error> PrefabComponents(
           ? options.resolver(ref)
           : ReadTextFile(options.asset_root + "/" + std::string(ref));
   if (!text) return FailAt(where, text.error());
+  if (options.on_prefab) options.on_prefab(ref, *text);
   auto doc = json::Parse(*text);
   if (!doc) return FailAt(where, doc.error());
   if (!doc->IsObject()) return FailAt(where, "expected an object");
@@ -245,6 +255,7 @@ std::expected<void, Error> CreateEntity(World& world, const json::Value& entity,
 
   json::Value components = json::Value::Object();
   const json::Value* overrides = nullptr;
+  const std::string* prefab_ref = nullptr;
   for (const json::Member& member : entity.Members()) {
     const std::string at = where + "." + member.key;
     if (member.key == "guid" || member.key == "name") continue;
@@ -252,6 +263,7 @@ std::expected<void, Error> CreateEntity(World& world, const json::Value& entity,
       if (!member.value.IsString()) return FailAt(at, "expected a path");
       auto prefab = PrefabComponents(member.value.Text(), options, cache);
       if (!prefab) return FailAt(where, prefab.error());
+      prefab_ref = &member.value.Text();
       for (const json::Member& c : (*prefab)->Members()) {
         if (components.Find(c.key) == nullptr) components.Set(c.key, c.value);
       }
@@ -297,6 +309,7 @@ std::expected<void, Error> CreateEntity(World& world, const json::Value& entity,
     if (!name->IsString()) return FailAt(where + ".name", "expected a string");
     reg.emplace<Name>(e, name->Text());
   }
+  if (prefab_ref != nullptr) reg.emplace<PrefabInstance>(e, *prefab_ref);
   // Registration order: Transform before the gameplay components.
   for (const ComponentInfo& info : registry.All()) {
     const json::Value* value = components.Find(info.name);
@@ -340,6 +353,31 @@ void ApplySceneSettings(World& world, const SceneSettings& settings) {
   if (ctx.find<StatNames>() == nullptr) ctx.emplace<StatNames>();
   if (ctx.find<TextureNames>() == nullptr) ctx.emplace<TextureNames>();
 }
+
+namespace {
+
+// What FinishLoad derives, by source: written once here, beside FinishLoad,
+// so RemovedWith and the load never disagree (a test checks every
+// component FinishLoad adds is listed under its source).
+struct DerivedComponents {
+  std::string_view source;
+  std::span<const std::string_view> derived;
+};
+
+constexpr std::string_view kFromPath[] = {"PathCache"};
+constexpr std::string_view kFromStats[] = {"ActiveEffects"};
+constexpr std::string_view kFromEffectSource[] = {"PairCooldowns"};
+constexpr DerivedComponents kDerivedComponents[] = {
+    {"Path", kFromPath},
+    {"Stats", kFromStats},
+    {"EffectSource", kFromEffectSource},
+};
+
+// The identity, the spawn record, the prefab link and the pose.
+constexpr std::array<std::string_view, 5> kNotRemovable = {
+    "IdComponent", "Name", "Spawned", "PrefabInstance", "Transform"};
+
+}  // namespace
 
 void FinishLoad(World& world) {
   entt::registry& reg = world.Reg();
@@ -491,7 +529,11 @@ std::expected<SceneSummary, Error> LoadSceneFile(
 }
 
 std::expected<std::string, Error> SaveScene(const World& world,
-                                            std::string_view name) {
+                                            std::string_view name,
+                                            const SceneWriteOptions& options) {
+  if (options.mode != SceneWriteMode::kFlatten) {
+    return Fail(ErrorCode::kUnsupported, "kPrefabs: not yet (M11a)");
+  }
   const entt::registry& reg = world.CReg();
   const auto& ctx = reg.ctx();
   const auto* bounds = ctx.find<ArenaBounds>();
@@ -557,6 +599,69 @@ std::expected<std::string, Error> SaveScene(const World& world,
   }
   doc.Set("entities", std::move(list));
   return json::Write(doc, 2) + "\n";
+}
+
+// M11a stubs: the scene contract's declarations build; the bodies follow.
+
+Guid PrefabRootGuid(std::string_view ref) noexcept {
+  Hasher hasher(kPrefabRootSeed);
+  hasher.AddString(ref);
+  Guid guid;
+  guid.hi = hasher.Finish();
+  hasher.AddU64(kPrefabRootLo);
+  guid.lo = hasher.Finish();
+  if (guid.IsNil()) guid.lo = 1;
+  return guid;
+}
+
+std::expected<SceneSummary, Error> LoadPrefabDocument(
+    World& world, std::string_view text, std::string_view ref,
+    const SceneLoadOptions& options) {
+  static_cast<void>(world);
+  static_cast<void>(text);
+  static_cast<void>(ref);
+  static_cast<void>(options);
+  return Fail(ErrorCode::kUnsupported, "LoadPrefabDocument: not yet (M11a)");
+}
+
+std::expected<std::string, Error> SavePrefabDocument(const World& world,
+                                                     std::string_view ref,
+                                                     std::string_view name) {
+  static_cast<void>(world);
+  static_cast<void>(ref);
+  static_cast<void>(name);
+  return Fail(ErrorCode::kUnsupported, "SavePrefabDocument: not yet (M11a)");
+}
+
+std::expected<EntityComponentsJson, Error> PrefabBaseline(
+    const World& world, Guid guid, const SceneLoadOptions& options) {
+  static_cast<void>(world);
+  static_cast<void>(guid);
+  static_cast<void>(options);
+  return Fail(ErrorCode::kUnsupported, "PrefabBaseline: not yet (M11a)");
+}
+
+std::expected<std::vector<EntityComponentsJson>, Error> RebasePrefabInstances(
+    const World& world, std::string_view ref, std::string_view old_text,
+    std::string_view new_text, const SceneLoadOptions& options) {
+  static_cast<void>(world);
+  static_cast<void>(ref);
+  static_cast<void>(old_text);
+  static_cast<void>(new_text);
+  static_cast<void>(options);
+  return Fail(ErrorCode::kUnsupported, "RebasePrefabInstances: not yet (M11a)");
+}
+
+std::span<const std::string_view> RemovedWith(
+    std::string_view component) noexcept {
+  for (const DerivedComponents& entry : kDerivedComponents) {
+    if (entry.source == component) return entry.derived;
+  }
+  return {};
+}
+
+bool Removable(std::string_view component) noexcept {
+  return std::ranges::find(kNotRemovable, component) == kNotRemovable.end();
 }
 
 }  // namespace se::rampage

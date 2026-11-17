@@ -18,6 +18,10 @@ void RegisterCoreComponents(ComponentRegistry& registry) {
   registry.Add<PrevTransform>("PrevTransform", 1, kHashed);
   registry.Add<Spawned>("Spawned", 1, kHashed | kSerialized);
   registry.Add<DestroyRequest>("DestroyRequest", 1, kNone);
+  // Which prefab a scene entity came from (M11): saved as the entity's
+  // "prefab", not hashed, so linking changes no tick result.
+  registry.Add<PrefabInstance>("PrefabInstance", 1,
+                               kSerialized | kEditorVisible);
 }
 
 }  // namespace se

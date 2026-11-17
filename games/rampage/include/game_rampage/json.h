@@ -115,6 +115,18 @@ struct Member {
 // whole.
 void MergePatch(Value& target, const Value& patch);
 
+// Whether two values are the same JSON: numbers by value (1 equals 1.0),
+// objects regardless of member order.
+[[nodiscard]] bool Equal(const Value& a, const Value& b);
+
+// The RFC 7386 merge patch that turns |from| into |to|, or nullopt when
+// they are Equal: objects member by member (a member |to| lacks as null),
+// arrays and scalars whole. MergePatch(from, *MergeDiff(from, to)) is
+// Equal to |to| whenever |to| holds no null (a merge patch cannot set
+// one).
+[[nodiscard]] std::optional<Value> MergeDiff(const Value& from,
+                                             const Value& to);
+
 }  // namespace se::rampage::json
 
 #endif  // GAME_RAMPAGE_JSON_H_

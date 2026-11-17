@@ -3,7 +3,8 @@
 // The engine's own components. Every World entity has an IdComponent and a
 // Spawned record; Transform and PrevTransform carry the 2D pose and its
 // previous-tick copy for interpolation; DestroyRequest marks an entity for
-// destruction at the end of the tick.
+// destruction at the end of the tick; PrefabInstance records the prefab a
+// scene entity was loaded from (M11).
 
 #ifndef SE_CORE_CORE_COMPONENTS_H_
 #define SE_CORE_CORE_COMPONENTS_H_
@@ -50,6 +51,16 @@ struct Spawned {
 };
 
 struct DestroyRequest {};
+
+// The prefab an entity is an instance of: its reference relative to the
+// asset root ("prefabs/enemy.prefab.json"). Registered "PrefabInstance",
+// kSerialized | kEditorVisible, not kHashed: linking or unlinking an
+// entity changes no tick result and no golden. The scene writer writes it
+// as the entity's "prefab", never under "components"; the loader sets it
+// and nothing else may (it is reserved like IdComponent, Name, Spawned).
+struct PrefabInstance {
+  std::string prefab;
+};
 
 // Registers the components above (core_components.cc).
 void RegisterCoreComponents(ComponentRegistry& registry);

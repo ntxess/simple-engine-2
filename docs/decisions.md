@@ -4317,3 +4317,56 @@ focus), `editor.script.open_dirty`, `editor.script.autosave_after_save`,
 narrow` (R9: the headers are cut to their columns), `jobs.DebugDraw slices
 merge in chunk order for every W` (W = 0, 1, 3, 7 and the chaos seeds;
 TSan in WSL) and `death.debug_draw_in_fork`.
+
+## ADR-114 The scene contract's details: PrefabInstance, the root Guid, what the entity JSON holds (2026-11-17)
+
+**Decision.** docs/milestone-specs.md "The scene contract (between M11a and
+M11b)" is copied verbatim into se_core/core_components.h and
+game_rampage/scene.h. Where it leaves a detail open:
+
+- **PrefabInstance** is registered right after DestroyRequest, version 1,
+  `kSerialized | kEditorVisible`. It joins IdComponent, Name and Spawned as
+  a reserved name: a scene may not set it under "components" or
+  "overrides", and neither writer puts it there (kFlatten drops it,
+  kPrefabs writes it as "prefab"). The loader adds `PrefabInstance{ref}`
+  with the reference exactly as the file spells it.
+- **PrefabRootGuid(ref)**: `Hasher(0x9EFAB5007C0DE000)`, `AddString(ref)`,
+  hi = `Finish()`, then `AddU64(0x5EEDF00D0F1CE5ED)`, lo = `Finish()`; a nil
+  result (never seen) becomes lo = 1. The reference is hashed byte for byte:
+  callers pass it as scenes write it (relative to the asset root, forward
+  slashes); nothing normalises it.
+- **SceneLoadOptions::on_prefab** is called once per distinct reference per
+  load, with the text as read, before it is parsed. LoadPrefabDocument does
+  not report the document's own text (it is the document, not a prefab the
+  document uses), and the scratch loads inside SaveScene (kPrefabs),
+  PrefabBaseline and RebasePrefabInstances never report.
+- **EntityComponentsJson** holds every kSerialized component the entity has
+  except the four reserved ones (identity, not content), each as its
+  registry hook writes it (compact, stat ids, texture keys), in
+  registration order. Derived components with a serialized form
+  (ActiveEffects, PairCooldowns) are included: they are what the entity
+  holds. PrefabBaseline fails with kNotFound for an unknown Guid and
+  kInvalidArgument for an entity without PrefabInstance.
+- **SceneWriteOptions** resolves like SceneLoadOptions (|resolver| when set,
+  else `<asset_root>/<ref>`); kPrefabs takes the rules version from the
+  World's RulesConfig. A prefab that cannot be read fails the save: writing
+  the entity flattened instead would silently unlink it.
+- **RemovedWith / Removable** of a name nothing registers: nothing, and
+  removable (the registry, not this table, says what exists).
+
+**Why.** Each detail is the one the M11b track has to rely on before the
+bodies exist: the root Guid must be the same on every machine (a prefab
+document's hash), the callback must not report scratch loads (the editor
+would watch prefab texts it never loaded), and EntityComponentsJson must
+cover everything a set/add/remove command can change, which is exactly the
+serialized, non-reserved set.
+
+**Consequences.** The declarations were committed first, with stub bodies,
+so M11b could copy them; later changes to them are additive only.
+`serialization.*` gained PrefabInstance's sample (the round trip "for every
+registered component" requires one). An entity's PrefabInstance is never
+hashed, so no golden changed.
+
+**Checked by.** `rampage.scene.A prefab root's Guid is fixed`, the
+serialization round trips, and the determinism and reference suites
+unchanged.
