@@ -1,0 +1,9 @@
+# A dirty document autosaves after 2 s without input, through the lane
+# (M10a). recover.editor, run next with the same pref directory, takes the
+# recovery file.
+set 5a4db0c5-0000-4000-8000-000000000000 Transform {"pos":{"x":333,"y":222},"rot":0,"scale":{"x":1,"y":1},"teleport_tick":0}
+expect-recovery no
+wait-ms 2600
+wait-ms 500
+expect-recovery yes
+quit discard

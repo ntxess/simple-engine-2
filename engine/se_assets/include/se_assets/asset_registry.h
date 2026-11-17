@@ -219,6 +219,21 @@ class AssetRegistry {
   // The decoder sound loads use (M8's, at the integration).
   void SetSoundDecoder(SoundDecoder* decoder) noexcept { decoder_ = decoder; }
   // Completions the registry did not submit (saves, flushes).
+  // M10a: editor Play freezes gameplay assets (prefabs, scene chunks): a
+  // change of one is kept and reloaded when the freeze ends. Visual assets
+  // (textures, sounds) still reload; while frozen each such change is
+  // reported to the swap listener (key, a hash of the file's size and
+  // time), which logs it in the play session's SessionLog.
+  void SetGameplayFrozen(bool frozen) SE_REQUIRES(g_main);
+  [[nodiscard]] bool GameplayFrozen() const noexcept { return frozen_; }
+  [[nodiscard]] std::size_t DeferredChanges() const noexcept {
+    return deferred_.size();
+  }
+  using SwapListener =
+      std::function<void(std::string_view key, std::uint64_t content_hash)>;
+  void SetSwapListener(SwapListener listener) {
+    swap_listener_ = std::move(listener);
+  }
   void SetForeignHandler(std::function<void(LaneCompletion&&)> handler) {
     foreign_ = std::move(handler);
   }
@@ -333,6 +348,9 @@ class AssetRegistry {
   AssetRegistryConfig config_;
   SoundDecoder* decoder_ = nullptr;
   std::function<void(LaneCompletion&&)> foreign_;
+  bool frozen_ = false;
+  std::vector<FileChange> deferred_;
+  SwapListener swap_listener_;
 
   Store<TextureEntry> textures_store_;
   Store<SoundEntry> sounds_;

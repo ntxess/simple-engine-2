@@ -123,6 +123,14 @@ class ParallelView {
     return std::get<entt::storage_for_t<T>*>(storages_)->get(entity);
   }
 
+  // Whether |entity| has T, a tag included (T must be declared, as for
+  // Read).
+  template <class T>
+  [[nodiscard]] bool Has(entt::entity entity) const {
+    CheckAccess<T>(entity, /*write=*/false);
+    return std::get<entt::storage_for_t<T>*>(storages_)->contains(entity);
+  }
+
   template <class T>
   [[nodiscard]] T& Write(entt::entity entity) const {
     static_assert(!std::is_empty_v<T>, "a tag has no data to write");

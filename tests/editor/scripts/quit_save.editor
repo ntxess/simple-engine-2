@@ -1,0 +1,8 @@
+# Quit with a dirty document: the prompt's Save is a Durable lane job on a
+# throttled disk, the quit waits for it, then the editor exits (M10a).
+set 5a4db0c5-0000-4000-8000-000000000000 Transform {"pos":{"x":321,"y":234},"rot":0,"scale":{"x":1,"y":1},"teleport_tick":0}
+expect-dirty yes
+throttle-disk 400
+quit save
+wait-frames 2
+expect-quit-pending yes

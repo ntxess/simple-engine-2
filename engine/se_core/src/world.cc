@@ -91,6 +91,10 @@ void World::CheckMutation() const {
   CheckAccess();
   SE_ASSERT_MSG(desc_.kind != WorldKind::kPlay || open_gates_ > 0,
                 "Play World mutated while its MutationGate is closed");
+  // M10a (ADR-096): an editor document changes only through commands (and
+  // its load), each under an open gate.
+  SE_ASSERT_MSG(desc_.kind != WorldKind::kEditDocument || open_gates_ > 0,
+                "document World mutated outside an editor command");
 }
 
 entt::registry& World::Reg() {

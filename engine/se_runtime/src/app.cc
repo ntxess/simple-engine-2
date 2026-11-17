@@ -36,10 +36,13 @@
 #include "se_core/jobs.h"
 #include "se_core/log.h"
 #include "se_core/profile.h"
+#include "se_core/session_header.h"
 #include "se_core/thread_role.h"
 #include "se_core/time.h"
 #include "se_core/world.h"
+#include "se_os/fork_workers.h"
 #include "se_platform/display_output.h"
+#include "se_platform/driver_wait.h"
 #include "se_platform/fatal.h"
 #include "se_platform/fs.h"
 #include "se_platform/fs_faults.h"
@@ -61,6 +64,7 @@
 #include "se_runtime/app_config.h"
 #include "se_runtime/audio_bridge.h"
 #include "se_runtime/frame_pacer.h"
+#include "se_runtime/heartbeat.h"
 #include "se_runtime/input_service.h"
 #include "se_runtime/integration.h"
 #include "se_runtime/lifecycle.h"
@@ -76,6 +80,7 @@
 #include "se_sim/session_log.h"
 #include "se_sim/sim_driver.h"
 #include "src/game_hook.h"
+#include "src/hang_test.h"
 
 namespace se {
 
@@ -102,8 +107,8 @@ struct GameRuntime {
 
   ModuleInstance instance;
   GameStateStack states;
-  // No workers (W = 0) until M14; the most it may start comes from the CPU
-  // topology (boot step 8).
+  // The threaded pool (M14) with up to the CPU topology's W_max workers
+  // (boot step 8), none started: no site is enabled in a shipped build.
   jobs::ForkJoinPool pool;
   SimDriver driver;
   SessionLog session;
@@ -118,6 +123,9 @@ namespace {
 constexpr std::uint64_t kTitleIntervalNs = 250'000'000;
 constexpr std::uint64_t kLogIntervalNs = 2'000'000'000;
 constexpr double kNsToSec = 1e-9;
+constexpr std::uint64_t kNsPerMs = 1'000'000;
+// A teardown this long logs where its time went (the CI gate is 2 s).
+constexpr std::uint64_t kSlowTeardownNs = 500'000'000;
 // A failed device recreation is retried this often, this many times.
 constexpr std::uint64_t kRecreateRetryNs = 1'000'000'000;
 constexpr std::uint32_t kMaxRecreateAttempts = 5;
@@ -172,9 +180,15 @@ std::optional<audio::Output> AudioOutputFor(const AppConfig& config) {
   }
 }
 
-FramePacerConfig PacerConfigFrom(const AppConfig& config) {
+FramePacerConfig PacerConfigFrom(const AppConfig& config,
+                                 const GameSetup& setup) {
   FramePacerConfig pacer;
   pacer.request = config.pacing;
+  // M10a: the editor's auto is Standard, with frame latency 2.
+  if (pacer.request == PacingRequest::kAuto) {
+    pacer.request = setup.default_pacing;
+  }
+  pacer.frame_latency = setup.frame_latency;
 #if defined(_WIN32)
   // Paced is the Windows runtime default; elsewhere it is not claimed
   // until measured.
@@ -209,8 +223,25 @@ App::App(const AppConfig& config, GameSetup setup)
     : config_(config),
       setup_(std::move(setup)),
       lifecycle_(setup_.lifecycle),
-      pacer_(PacerConfigFrom(config)),
-      stepper_(setup_.tick_rate) {}
+      pacer_(PacerConfigFrom(config, setup_)),
+      stepper_(setup_.tick_rate) {
+  config_.raw_keyboard = config_.raw_keyboard && setup_.raw_keyboard;
+}
+
+ModuleInstance* App::GameInstance() noexcept {
+  return game_ ? &game_->instance : nullptr;
+}
+
+jobs::ForkJoinPool* App::GamePool() noexcept {
+  return game_ ? &game_->pool : nullptr;
+}
+
+const GameStateStack& App::ActiveStates() const {
+  if (setup_.extension && ext_session_.states != nullptr) {
+    return *ext_session_.states;
+  }
+  return game_->states;
+}
 
 App::~App() {
   AssertMainThread();
@@ -355,6 +386,8 @@ std::expected<void, Error> App::Boot() {
   inputs.modal = &modal_flag_;
   inputs.suspended = &suspended_flag_;
   inputs.heartbeat = &heartbeat_flag_;
+  // SDL_GPU and pacer waits label a hang a GPU or compositor stall (M12).
+  inputs.in_driver = &DriverWaitFlag();
   integration::VblankStart vblank;
   vblank.enabled = window_ != nullptr;
   vblank.monitor = monitor_;
@@ -377,6 +410,12 @@ std::expected<void, Error> App::Boot() {
   StartAudio();
   if (auto game = StartGame(); !game) {
     return game;
+  }
+  // M10a: the extension (the editor) boots on the game's runtime.
+  if (setup_.extension) {
+    if (auto extended = setup_.extension->Boot(*this); !extended) {
+      return extended;
+    }
   }
 
   quit_.SetRecoveryHook(setup_.recovery);
@@ -460,6 +499,11 @@ std::expected<void, Error> App::StartGame() {
   env.tick_rate = setup_.tick_rate;
   jobs::ForkJoinPool::Config pool_config;
   pool_config.max_workers = cpu_.fork_pool_size;
+  // M14: the threaded pool's workers come from se_os, and only start when a
+  // site is enabled (none is; M16 decides). SE_CHAOS_SEED turns chaos on.
+  pool_config.workers = -1;
+  pool_config.threads = ForkWorkersFactory();
+  pool_config.chaos_seed = ChaosSeedFromEnv();
   // The action map: the module's bindings and the settings file's keys;
   // an unknown key is a boot error naming it (M8).
   auto map = ActionMap::Build(setup_.module->actions, settings_);
@@ -482,9 +526,10 @@ std::expected<void, Error> App::StartGame() {
 #else
   input_config.key_source = EdgeSource::kWinMessage;
 #endif
-  game_ = std::make_unique<GameRuntime>(*setup_.module, env, pool_config,
-                                        std::move(*map), input_config,
-                                        audio_.get());
+  // --hang-test (test builds): the module with the HangTest system (M12).
+  game_ = std::make_unique<GameRuntime>(
+      *HangTestModule(setup_.module, config_.hang_test), env, pool_config,
+      std::move(*map), input_config, audio_.get());
   // Every latched InputFrame goes into the process's ring, a dump stream.
   game_->driver.AttachInputRing(&integration::DumpInputRing());
   if (setup_.configure) {
@@ -497,24 +542,40 @@ std::expected<void, Error> App::StartGame() {
     return Fail(ErrorCode::kInvalidArgument,
                 std::string(setup_.module->name) + " has no start state");
   }
-  {
+  if (setup_.push_start_state) {
     const InlineOwnerScope owner(OnMainThread());
     game_->states.Request(StackOp::kPush, start);
     game_->states.ApplyPending();
   }
-  if (game_->states.Depth() != 1 || game_->states.RejectedCount() != 0) {
+  if (setup_.push_start_state &&
+      (game_->states.Depth() != 1 || game_->states.RejectedCount() != 0)) {
     return Fail(ErrorCode::kInvalidArgument,
                 std::format("the start state '{}' could not be pushed", start));
   }
   // --record: every tick's InputFrame (edges and their sources included)
-  // and hash, written at shutdown (M8).
+  // and hash, written at shutdown (M8). The session header (M12) carries
+  // the same header for replays from a dump.
+  std::vector<std::byte> start_bytes;
+  if (setup_.replay_start) start_bytes = setup_.replay_start(paths_);
+  const ReplayHeader replay_header =
+      MakeReplayHeader(start_bytes, setup_.seed, setup_.tick_rate);
   if (!config_.record_path.empty()) {
-    std::vector<std::byte> start_bytes;
-    if (setup_.replay_start) start_bytes = setup_.replay_start(paths_);
-    game_->recorder.Begin(
-        MakeReplayHeader(start_bytes, setup_.seed, setup_.tick_rate),
-        start_bytes);
+    game_->recorder.Begin(replay_header, start_bytes);
   }
+  SessionHeaderInfo session;
+  session.module = setup_.module->name;
+  session.scene = setup_.scene;
+  session.scene_hash = replay_header.scene_hash;
+  session.seed = setup_.seed;
+  session.tick_rate = setup_.tick_rate;
+  session.build = replay_header.build;
+  session.platform = replay_header.platform;
+  session.compiler = replay_header.compiler;
+  session.math_hash = replay_header.math_hash;
+  session.cpu_features = replay_header.cpu_features;
+  session.start_tick = game_->driver.NextTick();
+  session.first_frame = integration::DumpInputRing().Head();
+  integration::DumpSessionHeader().Begin(session);
   // The start state's scope requests its assets now; no tick runs until
   // they are resident (M9).
   game_->driver.SetTickGate(assets_.get());
@@ -763,6 +824,14 @@ void App::NoteTeardown(std::string_view step) noexcept {
   if (teardown_count_ < teardown_steps_.size()) {
     teardown_steps_[teardown_count_++] = step;
   }
+  MarkTeardown(step);
+}
+
+void App::MarkTeardown(std::string_view part) noexcept {
+  if (teardown_mark_count_ < teardown_marks_.size()) {
+    teardown_marks_[teardown_mark_count_++] = {.part = part,
+                                               .end_ns = SDL_GetTicksNS()};
+  }
 }
 
 void App::RunPushKeys(const FrameReport& report) {
@@ -831,6 +900,7 @@ Camera2D App::CameraFor(const World& world) const {
 }
 
 Tick App::NextTick() const noexcept {
+  if (setup_.extension) return ext_session_.next_tick;
   return game_ ? game_->driver.NextTick() : 0;
 }
 
@@ -876,7 +946,12 @@ SDL_AppResult App::HandleEvent(const SDL_Event& event) {
     InjectedThrow("SDL_AppEvent");
   }
   lifecycle_.OnAnyEvent();
+  // The event ended an Idle wait: main is watched again from here.
+  EndIdleWait();
   if (ConsumeWakeEvent(event)) return SDL_APP_CONTINUE;
+  // M10a: the extension's UI first; input it takes skips the game's.
+  const bool taken =
+      setup_.extension && setup_.extension->OnEvent(*this, event);
   const std::uint64_t now = SDL_GetTicksNS();
   const bool ours = window_ != nullptr &&
                     event.type >= SDL_EVENT_WINDOW_FIRST &&
@@ -886,11 +961,14 @@ SDL_AppResult App::HandleEvent(const SDL_Event& event) {
     case SDL_EVENT_QUIT:
       quit_.Request(QuitReason::kQuitEvent);
       break;
-    case SDL_EVENT_TERMINATING:
+    case SDL_EVENT_TERMINATING: {
       SE_LOG_WARN("SDL_EVENT_TERMINATING: running the recovery hook");
+      // A blocking save at session end: known long work (M12).
+      const HeartbeatScope beat = KnownLongWork("recovery at TERMINATING");
       quit_.RequestImmediate(QuitReason::kTerminating);
       std::fflush(stderr);
       break;
+    }
     case SDL_EVENT_LOW_MEMORY:
       ++low_memory_events_;
       SE_LOG_WARN("SDL_EVENT_LOW_MEMORY");
@@ -946,7 +1024,7 @@ SDL_AppResult App::HandleEvent(const SDL_Event& event) {
     case SDL_EVENT_GAMEPAD_BUTTON_UP:
     case SDL_EVENT_GAMEPAD_AXIS_MOTION:
       // Every input event with its SDL timestamp (M8).
-      if (game_) game_->input.HandleEvent(event);
+      if (game_ && !taken) game_->input.HandleEvent(event);
       lifecycle_.OnInputActivity(now);
       break;
     case SDL_EVENT_MOUSE_MOTION:
@@ -1057,6 +1135,7 @@ void App::EnterDeviceLost() {
   // new device can claim it. The old device lives until the new one does.
   pacer_.Detach();
   present_.reset();
+  if (setup_.extension) setup_.extension->OnDeviceLost(*this);
   renderer_->ReleaseGpuObjects();
   gpu_->ReleaseWindow();
 }
@@ -1081,6 +1160,7 @@ std::expected<void, Error> App::RecreateDevice() {
   gpu_ = std::move(fresh);
   present_ = std::make_unique<RenderPresentPort>(*gpu_, *renderer_);
   pacer_.Attach(present_.get(), MakeVblankReader());
+  if (setup_.extension) setup_.extension->OnDeviceRecreated(*this);
   return {};
 }
 
@@ -1095,24 +1175,16 @@ std::expected<void, Error> App::RenderFrame(FrameReport& report,
       gpu_->ForceNullAcquires(1);
     }
   }
-  layers_.clear();
-  // A tick may have changed the stack: the scopes follow it before any
-  // World is asked about (M9).
-  if (assets_) assets_->BeforeRender(game_->states);
-  for (const WorldRenderSource& source :
-       game_->states.RenderSources(report.plan)) {
-    if (source.world == nullptr) continue;
-    // A state whose assets are still loading is not drawn yet (M9).
-    if (assets_ && !assets_->Drawable(source.world)) continue;
-    RenderLayer layer;
-    layer.world = source.world;
-    layer.camera = CameraFor(*source.world);
-    layer.alpha = source.alpha;
-    layers_.push_back(layer);
-  }
+  // M10a: the extension built this frame's request already (BuildFrame).
+  if (!ext_frame_ready_) FillLayers(ActiveStates(), report.plan);
   FrameRequest request;
   request.layers = layers_;
   request.clear = setup_.clear_color;
+  if (ext_frame_ready_) {
+    request.viewports = ext_viewports_;
+    request.overlay = ext_overlay_;
+    request.clear = ext_clear_;
+  }
   renderer_->Faults().SetFrame(iterates_);
   FrameResult result = renderer_->Frame(request);
   report.rendered = result.submitted;
@@ -1120,6 +1192,12 @@ std::expected<void, Error> App::RenderFrame(FrameReport& report,
   report.render = renderer_->LastFrame();
   wait_sec = static_cast<double>(report.render.swapchain_wait_ns) * kNsToSec;
   if (result.build_fault) {
+    // M10a: a fault of the play World's render build is the editor's
+    // (Play.Faulted); anything else takes the callbacks' fault path.
+    if (setup_.extension &&
+        setup_.extension->OnRenderFault(*this, *result.build_fault)) {
+      return {};
+    }
     return std::unexpected(std::move(*result.build_fault));
   }
   if (result.error) {
@@ -1136,6 +1214,23 @@ std::expected<void, Error> App::RenderFrame(FrameReport& report,
     device_removed_ = true;
   }
   return {};
+}
+
+void App::FillLayers(const GameStateStack& states, const StepPlan& plan) {
+  layers_.clear();
+  // A tick may have changed the stack: the scopes follow it before any
+  // World is asked about (M9).
+  if (assets_) assets_->BeforeRender(states);
+  for (const WorldRenderSource& source : states.RenderSources(plan)) {
+    if (source.world == nullptr) continue;
+    // A state whose assets are still loading is not drawn yet (M9).
+    if (assets_ && !assets_->Drawable(source.world)) continue;
+    RenderLayer layer;
+    layer.world = source.world;
+    layer.camera = CameraFor(*source.world);
+    layer.alpha = source.alpha;
+    layers_.push_back(layer);
+  }
 }
 
 void App::RunTextureReloads() {
@@ -1164,7 +1259,8 @@ void App::RunReadbacks(const FrameReport& report) {
                                             readback.frame;
     if (readbacks_done_[i] || !due) continue;
     readbacks_done_[i] = true;
-    auto image = renderer_->Readback();
+    // An extension that draws the World into a viewport names it (M10).
+    auto image = renderer_->Readback(ext_readback_);
     if (!image) {
       SE_LOG_ERROR("--readback {}: {}", readback.file, image.error().message);
       continue;
@@ -1174,8 +1270,8 @@ void App::RunReadbacks(const FrameReport& report) {
       continue;
     }
     SE_LOG_INFO("readback of frame {} (tick {}, {}x{}) written to {}",
-                iterates_, game_->driver.NextTick() - 1, image->width,
-                image->height, readback.file);
+                iterates_, LastTick(), image->width, image->height,
+                readback.file);
   }
 }
 
@@ -1184,6 +1280,9 @@ SDL_AppResult App::Iterate() {
   const std::uint64_t iterate_start = SDL_GetTicksNS();
   iterate_counter_.fetch_add(1, std::memory_order_relaxed);
   ++iterates_;
+  // A callback runs: an Idle wait is over (the mark at this function's
+  // end).
+  EndIdleWait();
   if (iterates_ == 1) {
     if (helpers_) helpers_->ArmWatchdog();
     // SDL_AppInit has returned and SDL has added its own event watcher:
@@ -1200,9 +1299,17 @@ SDL_AppResult App::Iterate() {
   // Events diverted off main by the filter, the background lane's
   // completions (M9), then the two-phase quit.
   TakeInbox();
-  if (assets_) assets_->BeginFrame(game_->states);
+  if (assets_) assets_->BeginFrame(ActiveStates());
   quit_.Poll();
   SyncQuitState();
+  // M10a: the extension's frame start and this frame's session; the
+  // asset scopes follow its stack at once (a Stop destroyed the last one).
+  if (setup_.extension && !quit_.ReadyToExit()) {
+    ext_session_ = setup_.extension->BeginFrame(*this, SDL_GetTicksNS());
+    if (assets_) assets_->BeforeRender(ActiveStates());
+    lifecycle_.SetIdleAllowed(ext_session_.idle_allowed);
+    if (ext_session_.reset_accumulator) stepper_.ResetAccumulator();
+  }
   if (quit_.ReadyToExit()) {
     lifecycle_.OnShutdownStarted();
     if (quit_requested_ns_ != 0) {
@@ -1212,6 +1319,12 @@ SDL_AppResult App::Iterate() {
     }
     SE_LOG_INFO("quit ({}): exiting after {} iterates",
                 QuitReasonName(quit_.Reason()), iterates_);
+    // M10a: an extension that failed (a test script) fails the process.
+    // SDL's main returns the result of the callback that ended the loop,
+    // not Shutdown's, so the failure is carried here.
+    if (setup_.extension && setup_.extension->ExitFailure()) {
+      return SDL_APP_FAILURE;
+    }
     return SDL_APP_SUCCESS;
   }
 
@@ -1271,28 +1384,46 @@ SDL_AppResult App::Iterate() {
   const double fence_wait_sec =
       static_cast<double>(pacer_.LastFrame().fence_wait_ns) * kNsToSec;
   // The sim holds while the top state's AssetScope is not resident (M9).
-  const bool assets_held = assets_ && assets_->Hold(game_->states);
-  report.gameplay_ran = lifecycle_.GameplayRuns() &&
-                        game_->states.SimRunning() && !exit_test_hold_ &&
-                        !assets_held;
-  report.plan =
-      stepper_.Plan(frame_clock, costs_.Current(), report.gameplay_ran,
-                    /*debugger=*/false, /*editor_play=*/false);
-  report.first_tick = game_->driver.NextTick();
+  const bool assets_held = assets_ && assets_->Hold(ActiveStates());
+  const bool sim_running =
+      setup_.extension ? ext_session_.running : game_->states.SimRunning();
+  report.gameplay_ran = lifecycle_.GameplayRuns() && sim_running &&
+                        !exit_test_hold_ && !assets_held;
+  // M10a: editor Play lets Overloaded run 0 ticks.
+  report.plan = stepper_.Plan(
+      frame_clock, costs_.Current(), report.gameplay_ran,
+      /*debugger=*/false,
+      /*editor_play=*/setup_.extension && ext_session_.editor_play);
+  report.first_tick = NextTick();
   if (kRuntimeTestHooks) StopPlanAtExitTestTick(report.plan, report.first_tick);
   BeginAudioFrame(report.plan, frame_clock);
   const std::uint64_t ticks_start = SDL_GetTicksNS();
-  game_->driver.TickInline(game_->states, report.plan, game_->input,
-                           game_->session, game_->recorder, game_->audio);
+  int ran = 0;
+  if (setup_.extension) {
+    // M10a: the extension's session ticks (the editor's Play).
+    const ExtensionTicks ticks = setup_.extension->TickFrame(
+        *this, report.plan, game_->input, game_->audio);
+    ran = ticks.ran;
+    ext_session_.next_tick = ticks.next_tick;
+  } else {
+    game_->driver.TickInline(game_->states, report.plan, game_->input,
+                             game_->session, game_->recorder, game_->audio);
+    // The assets' TickGate may have stopped the frame's ticks early.
+    ran = static_cast<int>(game_->driver.FrameResults().size());
+    if (ran > 0) {
+      // The session header's newest hash (M12: se_replay --from-dump
+      // checks it).
+      const TickResult& last = game_->driver.FrameResults().back();
+      integration::DumpSessionHeader().PublishTick(last.tick, last.hash);
+    }
+  }
   const double ticks_sec =
       static_cast<double>(SDL_GetTicksNS() - ticks_start) * kNsToSec;
-  // The assets' TickGate may have stopped the frame's ticks early.
-  const auto ran = static_cast<int>(game_->driver.FrameResults().size());
   ticks_run_ += static_cast<std::uint64_t>(ran);
   for (int i = 0; i < ran; ++i) {
     costs_.AddTick(ticks_sec / ran);
   }
-  report.next_tick = game_->driver.NextTick();
+  report.next_tick = NextTick();
   if (kRuntimeTestHooks) RunExitTests(report.next_tick);
   if (kRuntimeTestHooks && config_.late_frame_ms > 0.0 &&
       !late_frame_injected_ &&
@@ -1304,6 +1435,20 @@ SDL_AppResult App::Iterate() {
     SDL_DelayNS(static_cast<std::uint64_t>(config_.late_frame_ms * 1e6));
   }
 
+  // M10a: the extension's UI and render request, every iterate.
+  if (setup_.extension) {
+    FillLayers(ActiveStates(), report.plan);
+    ExtensionFrame frame;
+    frame.layers = &layers_;
+    frame.viewports = &ext_viewports_;
+    frame.clear = setup_.clear_color;
+    ext_viewports_.clear();
+    setup_.extension->BuildFrame(*this, report, frame);
+    ext_overlay_ = frame.overlay;
+    ext_readback_ = frame.readback;
+    ext_clear_ = frame.clear;
+    ext_frame_ready_ = true;
+  }
   if (!report.rendered && lifecycle_.ShouldRender()) {
     if (auto rendered = RenderFrame(report, wait_sec); !rendered) {
       // The game build's policy for a render build fault: the callbacks'
@@ -1362,12 +1507,35 @@ SDL_AppResult App::Iterate() {
   pacer_.EndFrame(stepper_.PlanNext(frame_clock, costs_.Current()),
                   costs_.Current(), lifecycle_.Modal());
   report.pacer = pacer_.LastFrame();
+  ext_frame_ready_ = false;
+  if (setup_.extension) setup_.extension->EndFrame(*this, report);
   if (kRuntimeTestHooks && !config_.push_keys.empty()) RunPushKeys(report);
   if (kRuntimeTestHooks && config_.durable_save_test.frame > 0) {
     RunDurableSaveTest();
   }
   if (setup_.on_frame) setup_.on_frame(*this, report);
+  // Idle (M10: the editor in Edit mode): SDL calls no iterate until an
+  // event arrives, so main makes no progress by design. From this return
+  // until the next callback starts the watchdog sees the App as it sees a
+  // Suspended one; a hang inside a callback is still a hang (ADR-111).
+  if (lifecycle_.Idle()) {
+    suspended_flag_.store(true, std::memory_order_release);
+    if (!idle_waiting_) {
+      idle_waiting_ = true;
+      idle_wait_start_ns_ = SDL_GetTicksNS();
+      SE_LOG_DEBUG("idle: waiting for events after iterate {}", iterates_);
+    }
+  }
   return SDL_APP_CONTINUE;
+}
+
+void App::EndIdleWait() {
+  suspended_flag_.store(lifecycle_.Suspended(), std::memory_order_release);
+  if (!idle_waiting_ || lifecycle_.Idle()) return;
+  idle_waiting_ = false;
+  SE_LOG_DEBUG(
+      "idle: the wait ended after {:.1f} s",
+      static_cast<double>(SDL_GetTicksNS() - idle_wait_start_ns_) * kNsToSec);
 }
 
 std::int64_t App::ExitTestTick() const noexcept {
@@ -1418,8 +1586,7 @@ void App::RunExitTests(Tick next_tick) {
 void App::UpdateTitle(std::uint64_t now_ns) {
   if (window_ == nullptr || now_ns - last_title_ns_ < kTitleIntervalNs) return;
   last_title_ns_ = now_ns;
-  std::string title = std::format("{} | tick {} | {}", setup_.title,
-                                  game_->driver.NextTick() - 1,
+  std::string title = std::format("{} | tick {} | {}", setup_.title, LastTick(),
                                   LifecycleStateName(lifecycle_.State()));
   // Test builds show the pacer's mode, rate, interval, latency and misses.
   if (kRuntimeTestHooks) title += " | " + pacer_.Summary();
@@ -1431,8 +1598,7 @@ void App::LogProgress(std::uint64_t now_ns) {
   if (now_ns - last_log_ns_ < kLogIntervalNs) return;
   last_log_ns_ = now_ns;
   SE_LOG_INFO("tick {} | {} | {} iterates, {} presented, {} NULL acquires | {}",
-              game_->driver.NextTick() - 1,
-              LifecycleStateName(lifecycle_.State()), iterates_,
+              LastTick(), LifecycleStateName(lifecycle_.State()), iterates_,
               presented_frames_, lifecycle_.NullAcquires(), pacer_.Summary());
   if (renderer_ != nullptr) {
     const Renderer2DStats& last = renderer_->LastFrame();
@@ -1498,6 +1664,13 @@ SDL_AppResult App::Shutdown(SDL_AppResult result) {
   if (device_recoveries_ > 0) {
     SE_LOG_INFO("device losses recovered: {}", device_recoveries_);
   }
+  if (long_work_.scopes > 0) {
+    SE_LOG_INFO(
+        "known long work (the watchdog's heartbeat): {} scopes, the longest "
+        "'{}' {:.1f} ms",
+        long_work_.scopes, long_work_.longest,
+        static_cast<double>(long_work_.longest_ns) * 1e-6);
+  }
   if (game_) {
     const AudioBridgeStats& sound = game_->audio.Stats();
     SE_LOG_INFO(
@@ -1518,7 +1691,27 @@ SDL_AppResult App::Shutdown(SDL_AppResult result) {
   // The renderer's totals and leak check, while logging still runs; the
   // teardown below only destroys it.
   if (renderer_) renderer_->Shutdown();
+  const std::uint64_t teardown_start = SDL_GetTicksNS();
   Teardown();
+  // CI keeps every teardown under 2 s (M12; the callback tests gate it).
+  const std::uint64_t teardown_ns = SDL_GetTicksNS() - teardown_start;
+  SE_LOG_INFO("teardown took {:.1f} ms",
+              static_cast<double>(teardown_ns) * 1e-6);
+  if (teardown_ns >= kSlowTeardownNs) {
+    // Where a slow teardown spent its time: the parts of 1 ms and more.
+    std::string parts;
+    std::uint64_t from = teardown_start;
+    for (std::size_t i = 0; i < teardown_mark_count_; ++i) {
+      const TeardownMark& mark = teardown_marks_[i];
+      const std::uint64_t ns = mark.end_ns > from ? mark.end_ns - from : 0;
+      from = std::max(from, mark.end_ns);
+      if (ns < kNsPerMs) continue;
+      if (!parts.empty()) parts += ", ";
+      parts += std::format("{} {:.0f} ms", mark.part,
+                           static_cast<double>(ns) * 1e-6);
+    }
+    SE_LOG_INFO("slow teardown: {}", parts.empty() ? "no part of 1 ms" : parts);
+  }
   if (lane_stats_) AssetRuntime::LogLaneStopped(*lane_stats_);
   if (replay_submitted_) {
     if (lane_durable_failures_ > replay_failures_before_) {
@@ -1551,6 +1744,10 @@ SDL_AppResult App::Shutdown(SDL_AppResult result) {
         "the vblank sampler was still in WaitForVBlank at shutdown: detached "
         "(it ends when the wait returns)");
   }
+  // M10a: an extension that failed (a test script) fails the process.
+  if (setup_.extension && setup_.extension->ExitFailure()) {
+    return SDL_APP_FAILURE;
+  }
   return shutdown_faulted_ ? SDL_APP_FAILURE : result;
 }
 
@@ -1575,6 +1772,17 @@ void App::Teardown() {
   if (filter_) filter_->Remove();
   if (gpu_) gpu_->WaitForIdle();
   NoteTeardown("event-filter (4)");
+  // Step 5 (M10a): the extension's Worlds (play Worlds, documents).
+  if (setup_.extension && booted_) {
+    auto worlds = [this] {
+      AssertMainThread();
+      setup_.extension->ShutdownWorlds(*this);
+    };
+    if (!RunGameHook("AppExtension::ShutdownWorlds", worlds)) {
+      shutdown_faulted_ = true;
+    }
+    NoteTeardown("extension-worlds (5)");
+  }
   // Steps 5-6: every World, on main. A throwing OnExit leaves its state
   // and the ones below it on the stack; destroying the GameRuntime destroys
   // them (and their Worlds) without another OnExit.
@@ -1629,22 +1837,38 @@ void App::Teardown() {
   }
   // The lane's sound decoder, after every job that held it.
   sound_decoder_.reset();
+  // Step 11 (M10a): the extension's UI (ImGui's backends and context),
+  // before the renderer and the device go.
+  if (setup_.extension && booted_) {
+    auto ui = [this] {
+      AssertMainThread();
+      setup_.extension->ShutdownUi(*this);
+    };
+    if (!RunGameHook("AppExtension::ShutdownUi", ui)) {
+      shutdown_faulted_ = true;
+    }
+    NoteTeardown("extension-ui (11)");
+  }
   // Step 12: the present port's fences, the renderer's objects (the GPU
   // is idle), then release the window from the device and destroy the
   // device.
   present_.reset();
   renderer_.reset();
+  MarkTeardown("renderer (12)");
   gpu_.reset();
+  MarkTeardown("gpu-device (12)");
   // Step 14: remove the subclass, destroy the window.
   if (window_) window_->SetListener(nullptr);
   window_.reset();
   wake_.reset();
   filter_.reset();
   SDL_ResetHint(SDL_HINT_MAIN_CALLBACK_RATE);
+  MarkTeardown("window (14)");
   // The open gamepads, before their subsystem goes.
   gamepads_.CloseAll();
   // Step 15: SDL_QuitSubSystem(GAMEPAD | VIDEO).
   sdl_.reset();
+  MarkTeardown("sdl (15)");
   // Step 16: SDL's log output to stderr, then drain and stop the log
   // worker (spdlog::shutdown); SE_LOG_* is synchronous from here on.
   if (logging_) {
@@ -1678,9 +1902,15 @@ SDL_AppResult App::OnCallbackFault(std::string_view where,
   return SDL_APP_FAILURE;
 }
 
+crash::WatchdogStats App::WatchdogStats() const noexcept {
+  return helpers_ ? helpers_->WatchdogStats() : crash::WatchdogStats{};
+}
+
 void App::OnSessionEnd(SessionEnd kind) noexcept {
   // Synchronous: the recovery hook runs before the window procedure
-  // returns to Windows.
+  // returns to Windows. A blocking save at session end: known long work
+  // (M12).
+  const HeartbeatScope beat = KnownLongWork("session-end recovery");
   quit_.RequestImmediate(QuitReason::kSessionEnd);
   std::fflush(stderr);
   static_cast<void>(kind);
@@ -1692,7 +1922,9 @@ void App::OnPower(PowerChange change) noexcept {
   } else {
     lifecycle_.OnPowerResume();
   }
-  suspended_flag_.store(lifecycle_.Suspended(), std::memory_order_release);
+  // An App that idles keeps waiting for events across the change.
+  suspended_flag_.store(lifecycle_.Suspended() || lifecycle_.Idle(),
+                        std::memory_order_release);
 }
 
 void App::OnModalChanged(bool modal) noexcept {

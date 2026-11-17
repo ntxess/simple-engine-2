@@ -19,10 +19,15 @@ if(SE_BUILD_PLATFORM)
   add_subdirectory(se_assets)
   add_subdirectory(se_render)
   add_subdirectory(se_runtime)
+  # M10a: Dear ImGui and the editor shell (the game build never links them).
+  add_subdirectory(se_imgui)
+  add_subdirectory(se_editor)
   # M9: the texture cook, run at build time into <build>/bin/cooked.
   add_subdirectory("${CMAKE_SOURCE_DIR}/tools/asset_cook"
                    "${CMAKE_BINARY_DIR}/tools/asset_cook")
   # M8: the key stamp probe (needs a person; docs/gates.md).
   add_subdirectory("${CMAKE_SOURCE_DIR}/tools/input_probe"
                    "${CMAKE_BINARY_DIR}/tools/input_probe")
+  # M10b: the editor's panels (over se_editor and game_rampage).
+  add_subdirectory(se_editor/panels)
 endif()

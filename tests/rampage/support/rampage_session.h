@@ -17,6 +17,7 @@
 
 #include "game_rampage/module.h"
 #include "se_core/input_frame.h"
+#include "se_core/jobs.h"
 #include "se_core/thread_role.h"
 #include "se_core/thread_safety.h"
 #include "se_core/types.h"
@@ -65,9 +66,14 @@ struct RampageSessionOptions {
   AudioSink* audio = nullptr;
   // Record a replay (start bytes: the scene file).
   bool record = false;
+  // A SessionLog to apply (SessionLog::Write bytes: a replay's session, an
+  // editor Play session's edits and markers, M10a); empty: none.
+  std::vector<std::byte> session;
   // Called with the sandbox World after the load (tick 0) and after every
   // tick; ticks then run one at a time.
   std::function<void(const World&)> on_world;
+  // The session's ForkJoinPool (M14; W = 0 by default).
+  jobs::ForkJoinPool::Config pool{};
 };
 
 struct RampageSessionResult {

@@ -86,6 +86,41 @@ if(TARGET rampage AND _se_crash_backend STREQUAL "crashpad" AND
       LABELS "desktop;crash;rampage" TIMEOUT 90
       ENVIRONMENT "SE_NO_MESSAGE_BOX=1")
   endforeach()
+  # M12: --hang-test after-ticks:240 gives an out-of-process hang dump
+  # within 6 s that se_replay --from-dump replays to tick 240; a 6.5 s stall
+  # inside a driver wait is labelled a GPU or compositor stall, its end is
+  # logged and rampage quits on its own (rampage_hang_test.py).
+  foreach(_se_scenario hang driver_stall)
+    add_test(NAME crash.rampage_${_se_scenario}
+      COMMAND Python3::Interpreter
+              "${CMAKE_CURRENT_SOURCE_DIR}/rampage_hang_test.py"
+              --rampage "$<TARGET_FILE:rampage>"
+              --se-replay "$<TARGET_FILE:se_replay>"
+              --read-dump "${_se_read_dump}"
+              --work "${_se_crash_work}/rampage_${_se_scenario}"
+              --scenario ${_se_scenario})
+    set_tests_properties(crash.rampage_${_se_scenario} PROPERTIES
+      LABELS "desktop;crash;rampage" TIMEOUT 120
+      ENVIRONMENT "SE_NO_MESSAGE_BOX=1")
+  endforeach()
+  # The integration of M12 and M10: a hang inside a tick of the editor's
+  # Play gives a dump within 6 s that carries the Play-start stream, and
+  # se_replay --from-dump replays the session, its edits included, to the
+  # hanging tick (the same script, with the editor executable).
+  if(TARGET simple_editor)
+    add_test(NAME crash.editor_play_hang
+      COMMAND Python3::Interpreter
+              "${CMAKE_CURRENT_SOURCE_DIR}/rampage_hang_test.py"
+              --editor "$<TARGET_FILE:simple_editor>"
+              --script "${CMAKE_SOURCE_DIR}/tests/editor/scripts/play_hang.editor"
+              --se-replay "$<TARGET_FILE:se_replay>"
+              --read-dump "${_se_read_dump}"
+              --work "${_se_crash_work}/editor_play_hang"
+              --scenario editor_play_hang)
+    set_tests_properties(crash.editor_play_hang PROPERTIES
+      LABELS "desktop;crash;editor" TIMEOUT 120
+      ENVIRONMENT "SE_NO_MESSAGE_BOX=1")
+  endif()
 endif()
 
 # read_dump.py on synthetic minidumps (any platform).

@@ -12,6 +12,9 @@
 //     Schedule opens one per tick, the SessionLog one per applied entry,
 //     the GameStateStack one when it takes the World's queued commands);
 //     reading it, Clone() included, needs no gate;
+//   - so may an editor document (kEditDocument, M10a): its load opens a
+//     kLoad gate and every editor command a kEditorCommand gate, so any
+//     other mutation of a document fails at once (ADR-096);
 //   - every registered storage is created in the constructor, so nothing
 //     creates a storage lazily later (EnTT's non-const access would);
 //   - destroys are requested and drained in Cleanup, followed by
@@ -50,6 +53,8 @@ namespace se {
 
 enum class WorldKind : std::uint8_t {
   kRuntime,
+  // An editor document (M10a): never stepped; mutations need an open
+  // MutationGate (its load, editor commands).
   kEditDocument,
   // An editor Play session: mutations need an open MutationGate.
   kPlay,

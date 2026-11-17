@@ -1,7 +1,9 @@
 // Copyright 2026 The simple-engine-2 Authors.
 //
 // Renderer2D on a window (label desktop; once per driver): two viewport
-// targets and the composite in one frame, and the M7 exit test of a
+// targets and the composite in one frame, RepresentLast's overlay after a
+// viewport resize and ImGui's overlay on a swapchain smaller than its
+// display (R1 and R2 of the M10-M14 review), and the M7 exit test of a
 // texture reloaded while the App's window is minimized. Windows open
 // without taking focus; minimize and restore use the non-activating forms
 // (ShowWindow SW_SHOWMINNOACTIVE / SW_SHOWNOACTIVATE, as M5's tests do):
@@ -10,7 +12,9 @@
 // machine.
 
 #include <SDL3/SDL_events.h>
+#include <SDL3/SDL_gpu.h>
 #include <SDL3/SDL_video.h>
+#include <imgui.h>
 
 #include <catch2/catch_test_macros.hpp>
 #include <cstdint>
@@ -26,9 +30,13 @@
 #include "render_gpu/support/gpu_fixture.h"
 #include "render_gpu/support/image_compare.h"
 #include "se_core/error.h"
+#include "se_core/thread_role.h"
 #include "se_core/types.h"
 #include "se_core/world.h"
+#include "se_imgui/imgui_context.h"
+#include "se_imgui/imgui_renderer.h"
 #include "se_platform/fs.h"
+#include "se_render/gpu_resources.h"
 #include "se_render/image_io.h"
 #include "se_render/renderer_2d.h"
 #include "se_render/texture_table.h"
@@ -229,7 +237,177 @@ TEST_CASE("RepresentLast blits the last composite again", "[desktop]") {
   CHECK(again->pixels == drawn->pixels);
 }
 
+// An overlay whose draw data names one texture, resolved before the frame
+// as an editor panel's ImGui::Image does. Each Draw checks the texture
+// against the release log (ImGuiRenderer's check, builds with asserts). It
+// keeps the address as a void* (check_gpu_members bans texture members).
+class NamingOverlay final : public SwapchainOverlay {
+ public:
+  explicit NamingOverlay(const GpuResources& resources)
+      : resources_(&resources) {}
+  void Name(const SDL_GPUTexture* texture) noexcept { named_ = texture; }
+  void BeforeFrame() noexcept override {}
+  void Prepare(
+      [[maybe_unused]] SDL_GPUCommandBuffer* commands) noexcept override {}
+  void Draw([[maybe_unused]] SDL_GPUCommandBuffer* commands,
+            [[maybe_unused]] SDL_GPURenderPass* pass,
+            [[maybe_unused]] std::uint32_t width,
+            [[maybe_unused]] std::uint32_t height) noexcept override {
+    ++draws_;
+    if (resources_->ReleasedThisFrame(
+            static_cast<const SDL_GPUTexture*>(named_))) {
+      ++released_draws_;
+    }
+  }
+  [[nodiscard]] int Draws() const noexcept { return draws_; }
+  [[nodiscard]] int ReleasedDraws() const noexcept { return released_draws_; }
+
+ private:
+  const GpuResources* resources_;
+  const void* named_ = nullptr;
+  int draws_ = 0;
+  int released_draws_ = 0;
+};
+
+// R1 of the M10-M14 review: HalfRate re-presents the last frame's overlay
+// after that frame resized a viewport. The draw data still names the old
+// texture, so the frame holds it past RepresentLast() and releases it at
+// the next Frame() (ADR-113).
+TEST_CASE("RepresentLast's overlay outlives a viewport resized in the frame",
+          "[desktop]") {
+  const testing::MainThreadScope main;
+  testing::GpuFixtureOptions options;
+  options.window = true;
+  options.window_width = 320;
+  options.window_height = 240;
+  GpuFixture gpu(options);
+  if (!gpu.Available()) SKIP(gpu.SkipReason());
+  REQUIRE(testing::LoadTestTextures(gpu.Resources()));
+  Renderer2D& renderer = gpu.Renderer();
+  GpuResources& resources = gpu.Resources();
+
+  SceneBuilder scene("represent_overlay");
+  scene.Add(SpriteOf("white", 1, 1, kRed), {100, 75}, 0.0F, {40, 40});
+  const std::unique_ptr<World> world = scene.Finish();
+  auto viewport = renderer.CreateViewport(64, 64);
+  REQUIRE(viewport);
+  (*viewport)->SetCamera(CanvasCamera(64, 64));
+  RenderLayer layer;
+  layer.world = world.get();
+  layer.camera = CanvasCamera(200, 150);
+  const std::vector<RenderLayer> layers = {layer};
+  const std::vector<ViewportDraw> viewports = {{*viewport, layers}};
+  NamingOverlay overlay(resources);
+  FrameRequest request;
+  request.layers = layers;
+  request.viewports = viewports;
+  request.clear = ClearColor{0.0F, 0.0F, 0.0F, 1.0F};
+  request.overlay = &overlay;
+  auto frame = [&] {
+    AssertMainThread();
+    // The editor's frame start: the release log restarts, then the UI
+    // names the viewport's texture of this frame.
+    resources.MarkFrameStart();
+    overlay.Name(resources.Resolve((*viewport)->TargetTexture()).texture);
+    SDL_PumpEvents();
+    return renderer.Frame(request);
+  };
+  REQUIRE(frame().submitted);
+  REQUIRE(resources.HeldCount() == 0);
+
+  // The panel asks for a new size in the frame whose draw data shows the
+  // old texture; the frame resizes and retires the old one.
+  resources.MarkFrameStart();
+  overlay.Name(resources.Resolve((*viewport)->TargetTexture()).texture);
+  (*viewport)->RequestSize(96, 48);
+  SDL_PumpEvents();
+  REQUIRE(renderer.Frame(request).submitted);
+  REQUIRE((*viewport)->Width() == 96);
+  REQUIRE(resources.HeldCount() == 1);
+  const int drawn = overlay.Draws();
+  constexpr int kRepresents = 3;
+  for (int i = 0; i < kRepresents; ++i) {
+    SDL_PumpEvents();
+    REQUIRE(renderer.RepresentLast().submitted);
+  }
+  // The swapchain wait makes the acquires succeed on a visible window.
+  REQUIRE(overlay.Draws() > drawn);
+  REQUIRE(overlay.ReleasedDraws() == 0);
+  REQUIRE(resources.HeldCount() == 1);
+
+  // The next frame's draw data names the new texture: the held one goes
+  // out at its submit.
+  REQUIRE(frame().submitted);
+  REQUIRE(resources.HeldCount() == 0);
+  REQUIRE(resources.RetireQueueSize() == 0);
+  REQUIRE(overlay.ReleasedDraws() == 0);
+
+  // Without an overlay nothing is held.
+  request.overlay = nullptr;
+  (*viewport)->RequestSize(64, 64);
+  SDL_PumpEvents();
+  REQUIRE(renderer.Frame(request).submitted);
+  REQUIRE(resources.HeldCount() == 0);
+  renderer.ForgetOverlay(&overlay);
+  renderer.DestroyViewport(*viewport);
+}
+
+// R2 of the M10-M14 review: another process grew the window (a snap or
+// tiling tool) and ImGui read the new size at NewFrame before SDL resized
+// the swapchain. The overlay crops its display to the swapchain it is
+// given; without that, the backend's viewport exceeds the render target
+// and SDL's debug mode (SE_ASSERTS builds) aborts.
+TEST_CASE("ImGui's overlay crops to a swapchain smaller than its display",
+          "[desktop]") {
+  const testing::MainThreadScope main;
+  testing::GpuFixtureOptions options;
+  options.window = true;
+  options.window_width = 320;
+  options.window_height = 240;
+  GpuFixture gpu(options);
+  if (!gpu.Available()) SKIP(gpu.SkipReason());
+  auto context = imgui::Context::Create(imgui::ContextConfig{});
+  REQUIRE(context);
+  auto overlay = imgui::ImGuiRenderer::Create(
+      **context, gpu.Device(), gpu.GetWindow()->Native(), gpu.Renderer());
+  REQUIRE(overlay);
+  FrameRequest request;
+  request.clear = ClearColor{0.0F, 0.0F, 0.0F, 1.0F};
+  request.overlay = overlay->get();
+  constexpr int kFrames = 4;
+  for (int frame = 0; frame < kFrames; ++frame) {
+    SDL_PumpEvents();
+    (*overlay)->NewFrame(1.0 / 60.0);
+    // A window over the whole grown display, so draws and scissors reach
+    // past the swapchain.
+    ImGui::SetNextWindowPos(ImVec2(0.0F, 0.0F));
+    ImGui::SetNextWindowSize(ImVec2(640.0F, 480.0F));
+    ImGui::Begin("Grown");
+    ImGui::TextUnformatted("the window grew");
+    ImGui::End();
+    ImDrawData* data = (*overlay)->Render();
+    REQUIRE(data != nullptr);
+    const ImVec2 grown(data->DisplaySize.x * 1.5F, data->DisplaySize.y * 1.5F);
+    data->DisplaySize = grown;
+    for (ImDrawList* list : data->CmdLists) {
+      for (ImDrawCmd& command : list->CmdBuffer) {
+        command.ClipRect = ImVec4(0.0F, 0.0F, grown.x, grown.y);
+      }
+    }
+    REQUIRE(gpu.Renderer().Frame(request).submitted);
+
+    // The crop is for the draw only.
+    REQUIRE(data->DisplaySize.x == grown.x);
+    REQUIRE(data->DisplaySize.y == grown.y);
+  }
+  // A visible window's acquires succeed (the swapchain wait), so the
+  // overlay drew and cropped.
+  REQUIRE((*overlay)->Stats().cropped_draws >= 1);
+  (*overlay)->Shutdown();
+}
+
 // The sandbox in the real App, the player texture replaced by an opaque
+
 // green one while the window is minimized.
 TEST_CASE("A texture reloaded while minimized is correct after restore",
           "[desktop]") {

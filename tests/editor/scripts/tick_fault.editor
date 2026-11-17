@@ -1,0 +1,17 @@
+# A throw in a play tick: Play.Faulted, the editor alive, the World
+# inspectable; Stop returns to Edit with the document unchanged (M10a).
+play
+wait-ticks 60
+inject-throw tick
+wait-frames 3
+expect-faulted yes
+expect-state faulted
+expect-entities play 17
+wait-frames 10
+expect-faulted yes
+expect-entities play 17
+stop
+wait-frames 2
+expect-state edit
+expect-hash document initial
+quit discard

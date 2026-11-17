@@ -57,6 +57,7 @@ se_add_module(se_render_gpu_tests KIND EXECUTABLE
     se_platform_test_support
     se_render
     se_render_test_support
+    se_imgui
     se_runtime
     se_assets
     Catch2::Catch2WithMain

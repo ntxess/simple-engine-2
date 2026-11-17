@@ -5,9 +5,14 @@
 // throws injected in AppIterate and AppEvent, throws from game code during
 // shutdown, a failure at every boot step, the two-phase quit with
 // providers, and immediate events from an engine thread through the inbox.
+// M12: every run's teardown is measured and gated under 2 s (RunTestApp);
+// the watchdog declares a hang in a tick (--hang-test, a 50 ms period),
+// labels one in a driver wait, logs its end, and excuses known long work;
+// the session header follows the App's ticks.
 
 #include <SDL3/SDL_events.h>
 #include <SDL3/SDL_init.h>
+#include <SDL3/SDL_timer.h>
 
 #include <atomic>
 #include <catch2/catch_test_macros.hpp>
@@ -20,11 +25,15 @@
 #include <vector>
 
 #include "platform/support/test_app.h"
+#include "se_core/dump_stream.h"
 #include "se_core/log.h"
+#include "se_core/session_header.h"
 #include "se_core/thread_role.h"
+#include "se_crash/watchdog.h"
 #include "se_platform/wake.h"
 #include "se_runtime/app.h"
 #include "se_runtime/app_config.h"
+#include "se_runtime/heartbeat.h"
 #include "se_runtime/integration.h"
 #include "se_runtime/lifecycle.h"
 #include "se_runtime/quit.h"
@@ -376,6 +385,112 @@ TEST_CASE("Wakes from another thread reach SDL only while the app runs",
   REQUIRE(pushed_during_boot == 0);
   REQUIRE(pushed_while_running > 0);
   CHECK(pushed_later == pushed_after_quit);
+}
+
+TEST_CASE("Every app test tears down in under 2 s", "[callbacks]") {
+  // RunTestApp gates every run (kSlowTeardown); this one shows the time.
+  REQUIRE(RunTestApp(TestGameSetup(), {"--headless", "--frames", "30"}) == 0);
+  INFO("teardown took " << testing::LastTeardownSec() << " s");
+  CHECK(testing::LastTeardownSec() > 0.0);
+  CHECK(testing::LastTeardownSec() < testing::kTeardownLimitSec);
+}
+
+TEST_CASE("The app begins the session header and publishes its ticks",
+          "[callbacks][watchdog]") {
+  const std::uint64_t sessions = integration::DumpSessionHeader().Sessions();
+  REQUIRE(RunTestApp(TestGameSetup(), {"--headless", "--frames", "30",
+                                       "--fixed-frame-dt", "16.6667"}) == 0);
+  SessionHeaderRecord record;
+  REQUIRE(integration::DumpSessionHeader().Read(record));
+  CHECK(record.session == sessions + 1);
+  REQUIRE(std::string_view(record.module) == "platform_test");
+  REQUIRE(record.tick_rate == 120);
+  REQUIRE(record.start_tick == 1);
+  // 30 frames at 60 Hz, two ticks each: the last frame published tick 60.
+  REQUIRE(record.last_tick == 60);
+  REQUIRE(record.last_hash != 0);
+  CHECK(record.first_frame + 60 == integration::DumpInputRing().Head());
+}
+
+// While the watchdog is in a hang, a frame waits up to 100 ms for it to see
+// the progress the next iterate makes: the few headless iterates left
+// would otherwise end before its next sample, and the shutdown deadline
+// stops the judging.
+void LetTheWatchdogSeeProgress(const App& app) {
+  for (int i = 0; i < 100 && app.WatchdogStats().in_hang; ++i) {
+    SDL_DelayNS(1'000'000);
+  }
+}
+
+// The watchdog's counters at shutdown.
+GameSetup ObserveWatchdog(crash::WatchdogStats& stats) {
+  GameSetup setup = TestGameSetup();
+  setup.on_frame = [](App& app, const FrameReport& /*report*/) {
+    AssertMainThread();
+    LetTheWatchdogSeeProgress(app);
+  };
+  setup.on_shutdown = [&stats](App& app, SDL_AppResult /*result*/) {
+    stats = app.WatchdogStats();
+  };
+  return setup;
+}
+
+TEST_CASE("A hang in a tick is declared once and ends when main runs again",
+          "[callbacks][watchdog]") {
+  if (!kRuntimeTestHooks) SKIP("test hooks are not built into Release");
+  for (const bool in_driver : {false, true}) {
+    INFO("in a driver wait: " << in_driver);
+    const LogCapture log;
+    crash::WatchdogStats stats;
+    // A 50 ms period: the hang is declared 250 ms into the 600 ms loop.
+    const std::string hook = std::string("after-ticks:20:for-ms:600") +
+                             (in_driver ? ":in-driver" : "");
+    REQUIRE(RunTestApp(
+                ObserveWatchdog(stats),
+                {"--headless", "--frames", "40", "--fixed-frame-dt", "16.6667",
+                 "--watchdog-period-ms", "50", "--hang-test", hook}) == 0);
+    REQUIRE(stats.hangs == 1);
+    REQUIRE(stats.hangs_ended == 1);
+    CHECK_FALSE(stats.in_hang);
+    CHECK(stats.last_hang_in_driver == in_driver);
+    // The test apps run without the crash handler: the dump fails softly.
+    REQUIRE(stats.hang_dumps_written == 0);
+    REQUIRE(stats.dumps_failed == 1);
+    REQUIRE(stats.last_episode_ns >= 500'000'000);
+    CHECK(Logged("hang test: main loops for 600 ms in system 'HangTest'"));
+    CHECK(Logged(in_driver ? "hang 1: GPU or compositor stall, main in an "
+                             "SDL_GPU or pacer wait for "
+                           : "hang 1: main made no progress for "));
+    CHECK(Logged("at tick 20"));
+    CHECK(Logged("dump not written (hang 1"));
+    CHECK(Logged("hang 1 ended: main made progress again after"));
+  }
+}
+
+TEST_CASE("Known long work raises the heartbeat and no hang is declared",
+          "[callbacks][watchdog]") {
+  if (!kRuntimeTestHooks) SKIP("test hooks are not built into Release");
+  for (const bool beat : {true, false}) {
+    INFO("heartbeat: " << beat);
+    crash::WatchdogStats stats;
+    GameSetup setup = ObserveWatchdog(stats);
+    // Half a second on main at iterate 10: ten 50 ms periods.
+    setup.on_frame = [beat](App& app, const FrameReport& report) {
+      AssertMainThread();
+      LetTheWatchdogSeeProgress(app);
+      if (report.iterate != 10) return;
+      if (beat) {
+        const HeartbeatScope work = app.KnownLongWork("a test load");
+        SDL_DelayNS(500'000'000);
+      } else {
+        SDL_DelayNS(500'000'000);
+      }
+    };
+    REQUIRE(RunTestApp(std::move(setup), {"--headless", "--frames", "20",
+                                          "--watchdog-period-ms", "50"}) == 0);
+    CHECK(stats.hangs == (beat ? 0U : 1U));
+    CHECK(stats.hangs_ended == (beat ? 0U : 1U));
+  }
 }
 
 }  // namespace

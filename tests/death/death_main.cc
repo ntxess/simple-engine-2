@@ -10,6 +10,7 @@
 //   se_death_tests <scenario>
 
 #include <array>
+#include <atomic>
 #include <csignal>
 #include <cstdint>
 #include <cstdio>
@@ -28,10 +29,14 @@
 
 #include "se_core/component_registry.h"
 #include "se_core/core_components.h"
+#include "se_core/debug_draw.h"
 #include "se_core/jobs.h"
+#include "se_core/profile_clock.h"
 #include "se_core/thread_role.h"
 #include "se_core/thread_safety.h"
 #include "se_core/world.h"
+#include "se_sim/audio_events.h"
+#include "support/fork_config.h"
 #include "support/test_roles.h"
 
 namespace se {
@@ -133,6 +138,53 @@ void NestedForkOutsideChunk() {
   NestedForkFromOwner(site);
 }
 
+// A World-level sink (M14): AudioEvents takes no pushes from a fork chunk,
+// inline or on a worker.
+void SinkInFork() {
+  const testing::MainThreadScope main_thread;
+  const InlineOwnerScope owner(OnMainThread());
+  AudioEvents events;
+  jobs::ForkJoinPool pool;
+  jobs::ForkSite site{.name = "death", .grain = 1};
+  pool.ParallelFor(site, 1, [&](jobs::ChunkRange) { events.Push({}); });
+}
+
+// The World-level DebugDraw (ADR-113) takes nothing from a fork chunk: a
+// chunk draws into its DebugDrawSlices slice.
+void DebugDrawInFork() {
+  const testing::MainThreadScope main_thread;
+  const InlineOwnerScope owner(OnMainThread());
+  DebugDraw draw;
+  jobs::ForkJoinPool pool;
+  jobs::ForkSite site{.name = "death", .grain = 1};
+  pool.ParallelFor(
+      site, 1, [&](jobs::ChunkRange) { draw.Point({0.0F, 0.0F}, Rgba8{}); });
+}
+
+// Two chunks on a pool of one worker: the caller's chunk waits (at most
+// 10 s) while the worker's pushes, so the assert fails on the worker thread.
+void SinkInWorkerChunk() {
+  const testing::MainThreadScope main_thread;
+  const InlineOwnerScope owner(OnMainThread());
+  AudioEvents events;
+  testing::ForkTestOptions options;
+  options.chunks_per_participant = 1;
+  jobs::ForkJoinPool pool(testing::ForkTestConfig(1, options));
+  jobs::ForkSite site{.name = "death", .grain = 1, .enabled = true};
+  std::atomic<bool> pushed{false};
+  pool.ParallelFor(site, 2, [&](jobs::ChunkRange) {
+    if (jobs::CurrentWorker() >= 0) {
+      events.Push({});
+      pushed.store(true);
+      return;
+    }
+    const std::uint64_t start = ProfileNowNs();
+    while (!pushed.load() && ProfileNowNs() - start < 10'000'000'000) {
+      std::this_thread::yield();
+    }
+  });
+}
+
 void UndeclaredRead() {
   const testing::MainThreadScope main_thread;
   const InlineOwnerScope owner(OnMainThread());
@@ -222,6 +274,18 @@ void PlayMutationWithGateClosed() {
   static_cast<void>(play.Create(Guid{0, 2}));
 }
 
+// M10a: a document World changes only inside an editor command's gate.
+void DocumentMutationOutsideCommand() {
+  const testing::MainThreadScope main_thread;
+  const InlineOwnerScope owner(OnMainThread());
+  World document(CoreRegistry(), {.kind = WorldKind::kEditDocument});
+  {
+    MutationGate gate = document.OpenGate(GateReason::kEditorCommand);
+    static_cast<void>(document.Create(Guid{0, 1}));
+  }
+  static_cast<void>(document.Create(Guid{0, 2}));
+}
+
 void AccessFromAnotherThread() {
   World world(CoreRegistry(), {});
   std::thread other([&] { TouchRegistry(world); });
@@ -256,6 +320,9 @@ const std::map<std::string, std::function<void()>>& Scenarios() {
       {"world_access_in_fork", WorldAccessInFork},
       {"structural_call_in_fork", StructuralCallInFork},
       {"create_in_fork", CreateInFork},
+      {"sink_in_fork", SinkInFork},
+      {"sink_in_worker_chunk", SinkInWorkerChunk},
+      {"debug_draw_in_fork", DebugDrawInFork},
       {"owner_fork_inside_chunk", OwnerForkInsideChunk},
       {"nested_fork_outside_chunk", NestedForkOutsideChunk},
       {"undeclared_read", UndeclaredRead},
@@ -264,6 +331,7 @@ const std::map<std::string, std::function<void()>>& Scenarios() {
       {"view_after_structural_change", ViewAfterStructuralChange},
       {"view_after_remove_and_emplace", ViewAfterRemoveAndEmplace},
       {"play_mutation_gate_closed", PlayMutationWithGateClosed},
+      {"document_mutation_outside_command", DocumentMutationOutsideCommand},
       {"access_from_another_thread", AccessFromAnotherThread},
       {"inline_owner_off_main", InlineOwnerOffMain},
       {"duplicate_guid", DuplicateGuid},

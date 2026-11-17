@@ -1,0 +1,16 @@
+# An autosave still in the lane when a newer save completes (R5 of the
+# M10-M14 review): the lane does not complete in submission order, so the
+# older recovery write may land last. It leaves no recovery file holding
+# the older revision. Each file write step takes 400 ms more, which keeps
+# the autosave in the lane while the save goes through.
+expect-state edit
+throttle-disk 400
+set 5a4db0c5-0000-4000-8000-000000000000 Transform {"pos":{"x":111,"y":111},"rot":0,"scale":{"x":1,"y":1},"teleport_tick":0}
+wait-autosave
+set 5a4db0c5-0000-4000-8000-000000000000 Transform {"pos":{"x":222,"y":222},"rot":0,"scale":{"x":1,"y":1},"teleport_tick":0}
+save
+wait-saves
+wait-frames 2
+expect-dirty no
+expect-recovery no
+quit discard

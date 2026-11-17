@@ -132,6 +132,17 @@ class AssetRuntime final : public TickGate {
     sound_listener_ = std::move(listener);
   }
 
+  // M10a: requests into |scope| what a state with the default StateAssets
+  // loads (every texture and sound of the tables), so an editor scope
+  // keeps them while its sessions' stacks come and go.
+  void RetainDefaults(AssetScope scope) SE_REQUIRES(g_main);
+  // M10a: every lane completion the registry did not submit (saves,
+  // flushes) is also handed to |listener| on main, after it is logged.
+  using ForeignListener = std::function<void(const LaneCompletion&)>;
+  void SetForeignListener(ForeignListener listener) {
+    foreign_listener_ = std::move(listener);
+  }
+
   // --reload-texture: re-cooks |name| (from |file| instead when given) on
   // the lane. False when the table has no such texture.
   bool ReloadTexture(std::string_view name, std::string_view file)
@@ -190,6 +201,7 @@ class AssetRuntime final : public TickGate {
   std::vector<StateScope> scopes_;
   std::vector<TrackedSound> sounds_;
   SoundListener sound_listener_;
+  ForeignListener foreign_listener_;
   bool holding_ = false;
   std::uint64_t held_frames_ = 0;
 };

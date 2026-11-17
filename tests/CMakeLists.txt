@@ -27,9 +27,12 @@ else()
 endif()
 set(SE_GOLDEN_PLATFORM "${_se_golden_os}-${_se_golden_cc}")
 
-# Shared test support: goldens, role scopes and the null WakeMain().
+# Shared test support: goldens, role scopes and the null WakeMain(); the
+# fork pool configurations of the M14 tests (support/fork_config.h, se_os's
+# ForkWorkers).
 se_add_module(se_test_support KIND STATIC
   SOURCES
+    support/fork_config.cc
     support/golden.cc
     support/kernel_session.cc
     support/kernel_test_components.cc
@@ -39,6 +42,7 @@ se_add_module(se_test_support KIND STATIC
     support/virtual_display.cc
   PUBLIC_DEPS
     se_core
+    se_os
     se_sim
   DETERMINISTIC
   TEST)
@@ -61,6 +65,7 @@ se_add_module(se_tests KIND EXECUTABLE
     kernel/hash_test.cc
     kernel/input_buffer_test.cc
     kernel/input_frame_ring_test.cc
+    kernel/session_header_test.cc
     kernel/log_test.cc
     kernel/parallel_view_test.cc
     kernel/profile_test.cc
@@ -113,6 +118,7 @@ se_add_module(se_death_tests KIND EXECUTABLE
     death/death_main.cc
   PRIVATE_DEPS
     se_core
+    se_sim
     se_test_support
   DETERMINISTIC
   TEST)
@@ -121,6 +127,9 @@ if(NOT CMAKE_BUILD_TYPE STREQUAL "Release")
     "world_access_in_fork|not allowed inside a fork chunk"
     "structural_call_in_fork|not allowed inside a fork chunk"
     "create_in_fork|not allowed inside a fork chunk"
+    "sink_in_fork|not allowed inside a fork chunk"
+    "sink_in_worker_chunk|not allowed inside a fork chunk"
+    "debug_draw_in_fork|not allowed inside a fork chunk"
     "owner_fork_inside_chunk|ParallelFor inside a fork chunk: use jobs::NestedParallelFor"
     "nested_fork_outside_chunk|NestedParallelFor outside a fork chunk"
     "undeclared_read|ParallelView read of a component the ForkSite does not declare"
@@ -129,6 +138,7 @@ if(NOT CMAKE_BUILD_TYPE STREQUAL "Release")
     "view_after_structural_change|a structural change invalidated this ParallelView"
     "view_after_remove_and_emplace|a structural change invalidated this ParallelView"
     "play_mutation_gate_closed|Play World mutated while its MutationGate is closed"
+    "document_mutation_outside_command|document World mutated outside an editor command"
     "access_from_another_thread|World accessed from a thread that does not own it"
     "inline_owner_off_main|InlineOwnerScope outside the main thread"
     "duplicate_guid|Guid already in use in this World"
@@ -185,6 +195,8 @@ endif()
 
 add_subdirectory(os)
 add_subdirectory(rampage)
+# M14: the threaded ForkJoinPool's properties and determinism across W.
+add_subdirectory(jobs)
 add_subdirectory(render)
 # M17a: the dedicated sim driver, headless.
 add_subdirectory(sim)
@@ -200,8 +212,12 @@ if(SE_BUILD_PLATFORM)
   add_subdirectory(render_gpu)
   # M9: the background lane and the AssetRegistry.
   add_subdirectory(assets)
+  # M10a: the editor shell (headless; its desktop tests through scripts).
+  add_subdirectory(editor)
   add_subdirectory("${CMAKE_SOURCE_DIR}/tools/render_shot"
                    "${CMAKE_BINARY_DIR}/tools/render_shot")
+  # M10b: the editor's panels, headless.
+  add_subdirectory(editor_panels)
 endif()
 
 # tools/se_replay links the kernel test module from tests/support, so it is

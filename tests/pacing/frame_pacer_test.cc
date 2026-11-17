@@ -24,6 +24,7 @@
 
 #include "se_core/error.h"
 #include "se_core/time.h"
+#include "se_platform/driver_wait.h"
 #include "se_platform/vblank_sampler.h"
 #include "se_runtime/app_config.h"
 #include "se_runtime/pacer_policy.h"
@@ -455,6 +456,39 @@ TEST_CASE("The N-L fence: pending at frame start, then waited for", "[pacer]") {
   CHECK_FALSE(loop.Step().clock.gpu_fence_pending_at_start);
 }
 
+TEST_CASE("Every wait of the pacer raises the in-driver flag", "[pacer]") {
+  // M12: the watchdog labels a hang inside one a GPU or compositor stall.
+  const testing::MainThreadScope main;
+  for (const bool patched : {true, false}) {
+    INFO("patched " << patched);
+    Loop loop(patched ? Patched() : Unpatched());
+    loop.Attach();
+    for (int i = 0; i < 10; ++i) loop.Step();
+    loop.port.fence_pending = true;
+    for (int i = 0; i < 10; ++i) loop.Step();
+    const FakePresentPort& port = loop.port;
+    REQUIRE(port.waitable_waits + port.waitable_polls + port.swapchain_waits +
+                port.fence_polls + port.fence_waits >
+            10);
+    REQUIRE(port.waits_outside_driver == 0);
+    CHECK_FALSE(InDriverWait());
+  }
+}
+
+TEST_CASE("Driver wait scopes nest and restore the flag", "[pacer]") {
+  REQUIRE_FALSE(InDriverWait());
+  {
+    const DriverWaitScope outer;
+    REQUIRE(InDriverWait());
+    {
+      const DriverWaitScope inner;
+      REQUIRE(DriverWaitFlag().load());
+    }
+    REQUIRE(InDriverWait());
+  }
+  REQUIRE_FALSE(InDriverWait());
+}
+
 TEST_CASE("Frames that present nothing do not wait", "[pacer]") {
   const testing::MainThreadScope main;
   Loop loop(Unpatched());
@@ -589,6 +623,48 @@ TEST_CASE("Standard HalfRate: a frame's present one vblank late is a miss",
   // The next frame's own present shows one vblank late (ADR-071).
   loop.port.LatePresents(1);
   for (int i = 0; i < 6; ++i) loop.Step();
+  REQUIRE(totals.missed_presents >= 1);
+}
+
+TEST_CASE("Standard at frame latency 2: a present behind one is on time",
+          "[pacer]") {
+  const testing::MainThreadScope main;
+  // The editor's pacing (M10a, ADR-097): Standard at frame latency 2. One
+  // present waits in the queue ahead of each frame's own, so a frame's
+  // present shows two vblanks after the frame's vblank, and that is on
+  // time: no misses and no HalfRate from an editor presenting every
+  // vblank.
+  FramePacerConfig config = StandardConfig();
+  config.frame_latency = 2;
+  Loop loop(Windowed(), config);
+  loop.port.model_frame_latency = true;
+  loop.Attach();
+  REQUIRE(loop.pacer.Mode() == PacingMode::kStandard);
+  REQUIRE(loop.pacer.FrameLatency() == 2);
+  REQUIRE(loop.port.latencies.back() == 2);
+  loop.Run(2.0);
+  const PacerTotals& totals = loop.pacer.Totals();
+  // A frame every vblank.
+  REQUIRE(loop.frames.size() > 320);
+  REQUIRE(totals.resolved_presents > 300);
+  REQUIRE(totals.missed_presents == 0);
+  REQUIRE(totals.half_rate_entries == 0);
+  REQUIRE_FALSE(loop.pacer.HalfRate());
+  for (std::size_t i = loop.frames.size() - 20; i < loop.frames.size(); ++i) {
+    const PacerFrame& frame = loop.frames[i].pacer;
+    // The target is two vblanks after the frame's vblank, where the fake
+    // display shows the present (presents are 1-based, one a frame).
+    const std::uint64_t vblank = loop.port.LatestVblank(frame.frame_start_ns);
+    CHECK(std::abs(static_cast<double>(frame.target_ns - vblank) -
+                   2.0 * kPeriod165) < 2.0);
+    const auto shown = loop.port.ShownRefresh(i + 1);
+    REQUIRE(shown.has_value());
+    CHECK(*shown ==
+          loop.port.RefreshAt(frame.target_ns) + FakePresentPort::kRefreshBase);
+  }
+  // One vblank later than that is a miss.
+  loop.port.LatePresents(1);
+  for (int i = 0; i < 8; ++i) loop.Step();
   REQUIRE(totals.missed_presents >= 1);
 }
 

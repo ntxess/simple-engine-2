@@ -13,7 +13,9 @@
 # scope per GameState, the hold until it is resident, GpuResources behind
 # the registry's upload port) and the lane's QuitProvider (lane_quit.h). The
 # M8/M9 integration decodes the sounds on the lane (sound_assets.h, over
-# se_audio's PcmDecoder; ADR-087).
+# se_audio's PcmDecoder; ADR-087). M12 adds the heartbeat for known long
+# work on main (heartbeat.h), the session header and the Play-start bytes
+# hook (integration.h) and the --hang-test system (src/hang_test.h).
 
 se_add_module(se_runtime KIND STATIC
   SOURCES
@@ -24,6 +26,8 @@ se_add_module(se_runtime KIND STATIC
     src/audio_bridge.cc
     src/frame_clock.cc
     src/frame_pacer.cc
+    src/hang_test.cc
+    src/heartbeat.cc
     src/input_service.cc
     src/integration.cc
     src/json_reader.cc

@@ -96,7 +96,16 @@
 // main right after tick N; --dump-test after-ticks:N has the watchdog write
 // a dump after tick N, holds the ticks until it is written, then quits.
 // M7 adds --inject-frame-fault, --reload-texture and --readback
-// (app_config.h); M9 --lane-step-trace.
+// (app_config.h); M9 --lane-step-trace; M12 --hang-test (main loops inside
+// a system at tick N) and --watchdog-period-ms.
+//
+// The watchdog (M12): main's iterate counter, the Suspended and Modal flags,
+// the heartbeat (KnownLongWork) and the in-driver flag (se_platform/
+// driver_wait.h, raised around SDL_GPU and pacer waits) are its inputs; a
+// hang (5 periods of 1 s without progress, armed after the first iterate)
+// gets one dump per episode. The session header (integration.h) is begun at
+// boot step 10 and gets the last tick's hash after each frame's ticks. The
+// teardown's length is logged ("teardown took ...").
 
 #ifndef SE_RUNTIME_APP_H_
 #define SE_RUNTIME_APP_H_
@@ -134,8 +143,10 @@
 #include "se_render/texture_table.h"
 #include "se_render_core/render_components.h"
 #include "se_runtime/app_config.h"
+#include "se_runtime/app_extension.h"
 #include "se_runtime/asset_runtime.h"
 #include "se_runtime/frame_pacer.h"
+#include "se_runtime/heartbeat.h"
 #include "se_runtime/integration.h"
 #include "se_runtime/lifecycle.h"
 #include "se_runtime/quit.h"
@@ -216,8 +227,11 @@ struct GameSetup {
   // to the audio engine when resident (ADR-087).
   std::string sound_table;
   // The start bytes of a --record replay (rampage: its scene file); empty:
-  // none.
+  // none. Their hash goes into the session header too (M12).
   std::function<std::vector<std::byte>(const ContentPaths& paths)> replay_start;
+  // The scene the session starts from, relative to the content root, for
+  // the session header's replays from a dump (M12); empty: none.
+  std::string scene;
   // The camera a World is drawn with; empty: its primary Camera2D, else a
   // default one.
   std::function<Camera2D(const World& world)> camera;
@@ -234,6 +248,20 @@ struct GameSetup {
   std::function<void(App& app)> on_boot;
   std::function<void(App& app, const FrameReport& report)> on_frame;
   std::function<void(App& app, SDL_AppResult result)> on_shutdown;
+
+  // M10a: an extension that owns the frame's session and adds its UI (the
+  // editor; app_extension.h). The App keeps it until its teardown ends.
+  std::shared_ptr<AppExtension> extension;
+  // Push the module's start state at boot (false: the extension decides
+  // what runs; the editor starts in Edit mode).
+  bool push_start_state = true;
+  // What --pacing auto means for this program (the editor: Standard), and
+  // the frame latency the pacer starts with (the editor: 2).
+  PacingRequest default_pacing = PacingRequest::kAuto;
+  int frame_latency = 1;
+  // SDL's raw keyboard (the editor turns it off: IME, hotkeys); also
+  // --no-raw-keyboard.
+  bool raw_keyboard = true;
 };
 
 using GameFactory =
@@ -265,12 +293,33 @@ class App final : public WindowListener {
   // Starts the two-phase quit.
   void RequestQuit() SE_REQUIRES(g_main);
 
+  // Known long work on main (a large synchronous load, a blocking save at
+  // session end; M12): the watchdog's heartbeat is up while the scope
+  // lives (heartbeat.h). Main only.
+  [[nodiscard]] HeartbeatScope KnownLongWork(std::string_view what) noexcept {
+    return HeartbeatScope(heartbeat_flag_, what, &long_work_);
+  }
+  // The known long work so far (logged at shutdown).
+  [[nodiscard]] const LongWorkStats& LongWork() const noexcept {
+    return long_work_;
+  }
+  // The watchdog's counters (M12); zeros without a watchdog.
+  [[nodiscard]] crash::WatchdogStats WatchdogStats() const noexcept;
+
   // WindowListener (the window subclass, on main).
   void OnSessionEnd(SessionEnd kind) noexcept override;
   void OnPower(PowerChange change) noexcept override;
   void OnModalChanged(bool modal) noexcept override;
 
   [[nodiscard]] const AppConfig& Config() const noexcept { return config_; }
+  // The game's module instance and fork pool (boot step 10 to shutdown
+  // step 6), for an extension's sessions; null outside them.
+  [[nodiscard]] ModuleInstance* GameInstance() noexcept;
+  [[nodiscard]] jobs::ForkJoinPool* GamePool() noexcept;
+  // The log worker (boot step 2 to shutdown step 16), or null.
+  [[nodiscard]] integration::Logging* Logs() noexcept {
+    return logging_ ? &*logging_ : nullptr;
+  }
   [[nodiscard]] const ContentPaths& Paths() const noexcept { return paths_; }
   [[nodiscard]] const Lifecycle& GetLifecycle() const noexcept {
     return lifecycle_;
@@ -328,6 +377,12 @@ class App final : public WindowListener {
   }
   [[nodiscard]] MonitorHandle Monitor() const noexcept { return monitor_; }
   [[nodiscard]] Tick NextTick() const noexcept;
+  // The last tick run: 0 before the first, and while an extension has no
+  // session (the editor in Edit mode, whose next tick is 0).
+  [[nodiscard]] Tick LastTick() const noexcept {
+    const Tick next = NextTick();
+    return next == 0 ? 0 : next - 1;
+  }
   [[nodiscard]] std::uint64_t Iterates() const noexcept { return iterates_; }
   [[nodiscard]] std::uint64_t PresentedFrames() const noexcept {
     return presented_frames_;
@@ -365,6 +420,13 @@ class App final : public WindowListener {
   // An Error is a fault of the render build phase.
   std::expected<void, Error> RenderFrame(FrameReport& report, double& wait_sec)
       SE_REQUIRES(g_main);
+  // The frame's layers from |states|' render sources (M10a: split out of
+  // RenderFrame for the extension).
+  void FillLayers(const GameStateStack& states, const StepPlan& plan)
+      SE_REQUIRES(g_main);
+  // The stack whose assets load and whose Worlds draw: the extension's
+  // session, else the game's.
+  [[nodiscard]] const GameStateStack& ActiveStates() const;
   [[nodiscard]] Camera2D CameraFor(const World& world) const;
   // The --reload-texture hooks due at this iterate (through the lane, M9)
   // and the M7 readbacks.
@@ -387,6 +449,9 @@ class App final : public WindowListener {
   // of the window's monitor, else SDL's (ADR-055).
   [[nodiscard]] double PacingRefreshHz() const noexcept;
   void LogProgress(std::uint64_t now_ns);
+  // A callback starts: the watchdog's suspended flag follows the lifecycle
+  // again, and an Idle wait that an event ended is logged (ADR-111).
+  void EndIdleWait();
   // The M4 exit hooks (test builds): the tick they act after (0: none),
   // the frame's plan cut so that it ends at that tick, and the action.
   [[nodiscard]] std::int64_t ExitTestTick() const noexcept;
@@ -411,6 +476,9 @@ class App final : public WindowListener {
   void RunDurableSaveTest() SE_REQUIRES(g_main);
   // Records a teardown step for the shutdown-order log (ADR-088).
   void NoteTeardown(std::string_view step) noexcept;
+  // Records when a part of the teardown ended, for the log line that says
+  // where a slow teardown spent its time (M12's 2 s gate).
+  void MarkTeardown(std::string_view part) noexcept;
   void RunPushKeys(const FrameReport& report) SE_REQUIRES(g_main);
   // The input sampler (M8): started at the first iterate, inside ADR-047's
   // window; parked while Suspended or Idle; its rate from the power source
@@ -463,9 +531,24 @@ class App final : public WindowListener {
   // The teardown steps run, in order (ADR-088).
   std::array<std::string_view, 24> teardown_steps_{};
   std::size_t teardown_count_ = 0;
+  // The parts of the teardown and when each ended (SDL_GetTicksNS).
+  struct TeardownMark {
+    std::string_view part;
+    std::uint64_t end_ns = 0;
+  };
+  std::array<TeardownMark, 24> teardown_marks_{};
+  std::size_t teardown_mark_count_ = 0;
   UserSettings settings_;
   std::unique_ptr<audio::AudioEngine> audio_;
   std::unique_ptr<GameRuntime> game_;
+  // M10a: the extension's session of this frame and its render request.
+  ExtensionSession ext_session_;
+  std::vector<ViewportDraw> ext_viewports_;
+  SwapchainOverlay* ext_overlay_ = nullptr;
+  // The extension's readback target of the frame (null: the composite).
+  const ViewportTarget* ext_readback_ = nullptr;
+  ClearColor ext_clear_;
+  bool ext_frame_ready_ = false;
   // M8: gamepads are opened on main as SDL reports them; the sampler
   // updates them.
   Gamepads gamepads_;
@@ -495,13 +578,19 @@ class App final : public WindowListener {
   // teardown).
   bool vblank_detached_ = false;
 
-  // Read by the watchdog (integration). The heartbeat flag is for long
-  // work on main that still makes progress (M9's loads, M12); nothing in
-  // M5 raises it.
+  // Read by the watchdog (integration). The heartbeat flag is raised only
+  // by KnownLongWork (M12: the session-end recovery hook; M10's loads and
+  // saves). The suspended flag is also up while the App waits for events
+  // in Idle, between the iterate that entered the wait and the next
+  // callback (ADR-111).
   std::atomic<std::uint64_t> iterate_counter_{0};
   std::atomic<bool> suspended_flag_{false};
+  // The App returned to SDL to wait for events (Idle), and since when.
+  bool idle_waiting_ = false;
+  std::uint64_t idle_wait_start_ns_ = 0;
   std::atomic<bool> modal_flag_{false};
   std::atomic<bool> heartbeat_flag_{false};
+  LongWorkStats long_work_;
   std::uint64_t boot_start_ns_ = 0;
   bool profiling_ = false;
   bool exit_test_fired_ = false;

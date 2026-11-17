@@ -108,6 +108,7 @@ AssetRuntime::~AssetRuntime() { StopLane(); }
 
 void AssetRuntime::OnForeign(LaneCompletion&& completion) {
   const LaneCompletion done = std::move(completion);
+  if (foreign_listener_) foreign_listener_(done);
   // Saves and flushes submitted through the lane by the App's users.
   if (!done.result) {
     const Error& error = done.result.error();
@@ -119,6 +120,17 @@ void AssetRuntime::OnForeign(LaneCompletion&& completion) {
     SE_LOG_DEBUG("saved {} (revision {}, {} bytes{})", saved->path,
                  saved->revision, saved->bytes,
                  saved->superseded ? ", superseded" : "");
+  }
+}
+
+void AssetRuntime::RetainDefaults(AssetScope scope) {
+  AssertMainThread();
+  for (const TextureTableEntry& entry : config_.textures) {
+    static_cast<void>(registry_->RequestTexture(scope, SourceOf(entry)));
+  }
+  for (const std::string& sound : config_.sounds) {
+    static_cast<void>(
+        registry_->RequestSound(scope, fs::Join(config_.content_root, sound)));
   }
 }
 

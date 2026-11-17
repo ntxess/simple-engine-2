@@ -13,7 +13,10 @@
 // vblank as the sync pair (with caps.present_stats; a composed window has
 // none). The waitable and the swapchain wait return when the newest
 // present has been shown (frame latency 1), wake_latency_ns after its
-// vblank; a zero-timeout waitable call polls.
+// vblank; a zero-timeout waitable call polls. With model_frame_latency the
+// waits follow the latency the pacer set (M10a): at frame latency L they
+// return once the L-th newest present has been shown, so L - 1 presents
+// may wait in the queue.
 
 #ifndef TESTS_SUPPORT_FAKE_PRESENT_PORT_H_
 #define TESTS_SUPPORT_FAKE_PRESENT_PORT_H_
@@ -98,6 +101,9 @@ class FakePresentPort final : public PresentPort {
   bool present_mode_result = true;
   // The next fence poll reports pending (cleared by a waiting call).
   bool fence_pending = false;
+  // The waits return by the frame latency last set (SetFrameLatency)
+  // instead of always by latency 1.
+  bool model_frame_latency = false;
   // How long a wake after a flip takes.
   std::uint64_t wake_latency_ns = 100'000;
   // How long after a vblank the sampler stamps it.
@@ -113,6 +119,9 @@ class FakePresentPort final : public PresentPort {
   std::uint32_t fence_polls = 0;
   std::uint32_t fence_waits = 0;
   std::uint32_t submitted = 0;
+  // Waits and polls (latency, fence, swapchain) the pacer made without the
+  // in-driver flag up (M12: it raises it around each).
+  std::uint32_t waits_outside_driver = 0;
 
  private:
   struct Shown {
@@ -121,6 +130,9 @@ class FakePresentPort final : public PresentPort {
   };
   void WaitForNewestShown();
   [[nodiscard]] bool NewestShown() const;
+  // The present the waits wait for: the newest (frame latency 1), or the
+  // L-th newest with model_frame_latency; null when fewer were issued.
+  [[nodiscard]] const Shown* WaitedPresent() const;
 
   FakePacerClock* clock_;
   double period_ns_;

@@ -7,6 +7,8 @@
 #include <SDL3/SDL_stdinc.h>
 
 #include <array>
+#include <chrono>
+#include <cstdio>
 #include <expected>
 #include <memory>
 #include <span>
@@ -89,6 +91,11 @@ GameSetup& NextSetup() {
   return *kSetup;
 }
 
+double& TeardownSec() {
+  static double seconds = 0.0;
+  return seconds;
+}
+
 std::expected<GameSetup, Error> Factory(const AppConfig& /*config*/) {
   return NextSetup();
 }
@@ -145,11 +152,24 @@ int RunTestApp(GameSetup setup, std::vector<std::string> args) {
     return SdlAppEvent(appstate, event);
   };
   loop.quit = [](void* appstate, SDL_AppResult result) {
+    const auto start = std::chrono::steady_clock::now();
     SdlAppQuit(appstate, result);
+    TeardownSec() =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - start)
+            .count();
   };
+  TeardownSec() = 0.0;
   const int result = RunCallbackLoop(std::move(loop), args);
   NextSetup() = GameSetup();
+  if (TeardownSec() >= kTeardownLimitSec) {
+    std::fprintf(stderr,
+                 "test app: the teardown took %.3f s (the limit is %.1f s)\n",
+                 TeardownSec(), kTeardownLimitSec);
+    return kSlowTeardown;
+  }
   return result;
 }
+
+double LastTeardownSec() { return TeardownSec(); }
 
 }  // namespace se::testing

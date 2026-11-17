@@ -19,6 +19,10 @@
 // the frame transaction calls right after its submit. SDL's D3D12 backend
 // frees a texture's client container at release (only the GPU resource is
 // deferred), so nothing recorded this frame may name a released object.
+// While a SwapchainOverlay is kept for a re-present (HoldRetiredTextures,
+// ADR-113), a retired texture is held past the queue until ReleaseHeld():
+// the overlay's draw data, built before the frame retired it, may still
+// name it when RepresentLast() draws that data again.
 //
 // The upload queue: QueueUpload() creates the slot's next texture and
 // keeps the decoded RGBA8 payload. PlanUploads() (the frame's build phase)
@@ -219,6 +223,18 @@ class GpuResources {
   [[nodiscard]] std::size_t RetireQueueSize() const noexcept {
     return retired_.size();
   }
+  // --- Held textures (ADR-113) ---
+  // While |hold| is on, a texture retired from now on is held:
+  // RunRetireQueue() skips it until ReleaseHeld(). Renderer2D turns it on
+  // for a frame with a SwapchainOverlay, whose draw data RepresentLast()
+  // draws again after the frame's submit.
+  void HoldRetiredTextures(bool hold) noexcept SE_REQUIRES(g_main) {
+    hold_textures_ = hold;
+  }
+  // The held textures rejoin the retire queue (released at its next run):
+  // the overlay's draw data that could name them has been replaced.
+  void ReleaseHeld() noexcept SE_REQUIRES(g_main);
+  [[nodiscard]] std::size_t HeldCount() const noexcept;
   // Releases a fence now (fences are never recorded into a command
   // buffer).
   void ReleaseFence(SDL_GPUFence* fence) noexcept SE_REQUIRES(g_main);
@@ -228,6 +244,17 @@ class GpuResources {
       SE_REQUIRES(g_main) {
     ReleaseNow(kind, object);
   }
+
+  // --- Released this frame (M10a, ADR-098) ---
+  // Starts a frame of the release log: the textures released from now on
+  // are remembered (debug builds, up to kReleaseLogSize per frame) until
+  // the next call. The editor calls it at each frame start.
+  static constexpr std::size_t kReleaseLogSize = 256;
+  void MarkFrameStart() noexcept { released_count_ = 0; }
+  // |texture| was released since MarkFrameStart() (and not created again
+  // at the same address since). Always false in builds without asserts.
+  [[nodiscard]] bool ReleasedThisFrame(
+      const SDL_GPUTexture* texture) const noexcept;
 
   // --- Counted creation ---
   [[nodiscard]] SDL_GPUTexture* CreateGpuTexture(
@@ -330,6 +357,8 @@ class GpuResources {
   struct RetiredObject {
     GpuObjectKind kind = GpuObjectKind::kTexture;
     void* object = nullptr;
+    // Skipped by RunRetireQueue() until ReleaseHeld().
+    bool held = false;
   };
 
   explicit GpuResources(GpuDevice& device) : device_(&device) {}
@@ -362,6 +391,11 @@ class GpuResources {
   SDL_GPUTransferBuffer* upload_buffer_ = nullptr;
 
   std::vector<RetiredObject> retired_;
+  bool hold_textures_ = false;
+  // The release log (MarkFrameStart); a fixed array, so releasing never
+  // allocates.
+  std::array<const void*, kReleaseLogSize> released_{};
+  std::size_t released_count_ = 0;
   std::array<std::uint64_t, kGpuObjectKinds> live_{};
   GpuResourceStats stats_;
 };

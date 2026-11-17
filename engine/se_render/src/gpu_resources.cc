@@ -20,6 +20,7 @@
 #include "se_core/assert.h"
 #include "se_core/error.h"
 #include "se_core/log.h"
+#include "se_platform/driver_wait.h"
 #include "se_render/gpu_device.h"
 #include "se_render_core/render_components.h"
 #include "src/gpu_assert.h"
@@ -86,6 +87,8 @@ GpuResources::~GpuResources() {
 
 std::uint64_t GpuResources::ReleaseRemaining() noexcept {
   SE_ASSERT_GPU_THREAD();
+  hold_textures_ = false;
+  ReleaseHeld();
   RunRetireQueue();
   for (Slot& slot : slots_) {
     if (slot.resident != nullptr) {
@@ -510,9 +513,14 @@ std::expected<void, Error> GpuResources::FlushUploads() {
     for (std::size_t i = 0; i < in_flight_count_; ++i) {
       fences.push_back(in_flight_[i].fence);
     }
-    if (!fences.empty() &&
-        !SDL_WaitForGPUFences(Native(), true, fences.data(),
-                              static_cast<std::uint32_t>(fences.size()))) {
+    bool waited = true;
+    if (!fences.empty()) {
+      // A fence wait: the watchdog's GPU or compositor stall label (M12).
+      const DriverWaitScope in_driver;
+      waited = SDL_WaitForGPUFences(Native(), true, fences.data(),
+                                    static_cast<std::uint32_t>(fences.size()));
+    }
+    if (!waited) {
       return Fail(ErrorCode::kUnsupported,
                   SdlError("SDL_WaitForGPUFences(uploads)"));
     }
@@ -524,7 +532,8 @@ std::expected<void, Error> GpuResources::FlushUploads() {
 
 void GpuResources::RetireObject(GpuObjectKind kind, void* object) {
   if (object == nullptr) return;
-  retired_.push_back(RetiredObject{kind, object});
+  const bool held = hold_textures_ && kind == GpuObjectKind::kTexture;
+  retired_.push_back(RetiredObject{kind, object, held});
   ++stats_.retired;
 }
 
@@ -546,10 +555,29 @@ void GpuResources::Retire(SDL_GPUGraphicsPipeline* pipeline) {
 
 void GpuResources::RunRetireQueue() noexcept {
   SE_ASSERT_GPU_THREAD();
+  // In place, so running the queue never allocates; held textures stay.
+  std::size_t kept = 0;
   for (const RetiredObject& retired : retired_) {
-    ReleaseNow(retired.kind, retired.object);
+    if (retired.held) {
+      retired_[kept++] = retired;
+    } else {
+      ReleaseNow(retired.kind, retired.object);
+    }
   }
-  retired_.clear();
+  while (retired_.size() > kept) retired_.pop_back();
+}
+
+void GpuResources::ReleaseHeld() noexcept {
+  SE_ASSERT_GPU_THREAD();
+  for (RetiredObject& retired : retired_) retired.held = false;
+}
+
+std::size_t GpuResources::HeldCount() const noexcept {
+  std::size_t held = 0;
+  for (const RetiredObject& retired : retired_) {
+    if (retired.held) ++held;
+  }
+  return held;
 }
 
 void GpuResources::ReleaseNow(GpuObjectKind kind, void* object) noexcept {
@@ -558,6 +586,11 @@ void GpuResources::ReleaseNow(GpuObjectKind kind, void* object) noexcept {
   switch (kind) {
     case GpuObjectKind::kTexture:
       SDL_ReleaseGPUTexture(device, static_cast<SDL_GPUTexture*>(object));
+#if SE_ASSERTS
+      if (released_count_ < released_.size()) {
+        released_[released_count_++] = object;
+      }
+#endif
       break;
     case GpuObjectKind::kBuffer:
       SDL_ReleaseGPUBuffer(device, static_cast<SDL_GPUBuffer*>(object));
@@ -600,8 +633,23 @@ SDL_GPUTexture* GpuResources::CreateGpuTexture(
     const SDL_GPUTextureCreateInfo& info) noexcept {
   SE_ASSERT_GPU_THREAD();
   SDL_GPUTexture* texture = SDL_CreateGPUTexture(Native(), &info);
-  if (texture != nullptr) Created(GpuObjectKind::kTexture);
+  if (texture != nullptr) {
+    Created(GpuObjectKind::kTexture);
+    // A new texture at a released one's address is not that texture.
+    for (std::size_t i = 0; i < released_count_; ++i) {
+      if (released_[i] == texture) released_[i] = nullptr;
+    }
+  }
   return texture;
+}
+
+bool GpuResources::ReleasedThisFrame(
+    const SDL_GPUTexture* texture) const noexcept {
+  if (texture == nullptr) return false;
+  for (std::size_t i = 0; i < released_count_; ++i) {
+    if (released_[i] == texture) return true;
+  }
+  return false;
 }
 
 SDL_GPUBuffer* GpuResources::CreateGpuBuffer(

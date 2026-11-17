@@ -14,8 +14,10 @@
 //   3 sdl .. 7 gpu-device                        (se_platform, se_render)
 //   8 cpu-topology    ReadCpuTopology
 //   9 helper-threads  StartHelperThreads: the vblank sampler (Windows, a
-//                      window), then the watchdog (boot budget only)
-//  10 game            the InputFrame ring attached to the SimDriver
+//                      window), then the watchdog (the boot budget until the
+//                      first iterate arms it; hangs from then on, M12)
+//  10 game            the InputFrame ring attached to the SimDriver; the
+//                      session header begun (M12)
 // Shutdown (App::Teardown; mt-design.md "Shutdown Order"):
 //   3 HelperThreads::StartShutdownDeadline when the quit drain ends; ...;
 //   9 HelperThreads::StopSamplers: the vblank sampler (joined within a
@@ -27,17 +29,22 @@
 #ifndef SE_RUNTIME_INTEGRATION_H_
 #define SE_RUNTIME_INTEGRATION_H_
 
+#include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "se_core/error.h"
 #include "se_core/input_frame_ring.h"
+#include "se_core/session_header.h"
 #include "se_core/thread_role.h"
 #include "se_core/thread_safety.h"
 #include "se_crash/watchdog.h"
+#include "se_log/log_worker.h"
 #include "se_platform/display_output.h"
 #include "se_platform/vblank_sampler.h"
 #include "se_runtime/app_config.h"
@@ -90,6 +97,48 @@ void RequestFaultDump(std::string_view reason) noexcept;
 // never destroyed, registered as a dump stream (kind 3).
 [[nodiscard]] InputFrameRing& DumpInputRing();
 
+// The session header (M12): one per process, never destroyed, registered as
+// a dump stream (kind 6, crash::StreamType::kSessionHeader) with the
+// others. The App begins it at boot step 10 (the module, the scene and its
+// hash, the seed, the tick rate, the build, the first tick and its place in
+// DumpInputRing) and publishes the last tick's hash after each frame's
+// ticks, so tools/se_replay --from-dump can replay the session from a dump.
+[[nodiscard]] SessionHeaderStream& DumpSessionHeader();
+
+// The editor's Play-start bytes as a dump stream while Play runs
+// (docs/milestone-specs.md M12 and "Integration (M10a + M10b + M12 + M14)";
+// M10 keeps the bytes, the integration wires this hook): Attach when Play
+// starts copies the bytes behind a kind-7 header (record size 1, capacity
+// and head the byte count, name "play-start") and registers them as
+// crash::StreamType::kPlayStartBytes; Detach when Play stops (and the
+// destructor) unregisters the stream and frees the copy. Attaching again
+// replaces the bytes. Main only. Without crash capture (stub builds,
+// --no-crash-capture) the stream is still registered and unregistered, so
+// the editor needs no switches; only dumps are missing.
+class PlayStartStream {
+ public:
+  PlayStartStream() noexcept;
+  PlayStartStream(PlayStartStream&& other) noexcept;
+  PlayStartStream& operator=(PlayStartStream&& other) noexcept;
+  PlayStartStream(const PlayStartStream&) = delete;
+  PlayStartStream& operator=(const PlayStartStream&) = delete;
+  ~PlayStartStream();
+
+  // kInvalidArgument for no bytes, or while another PlayStartStream holds
+  // the stream type.
+  [[nodiscard]] std::expected<void, Error> Attach(
+      std::span<const std::byte> bytes);
+  // Idempotent.
+  void Detach() noexcept;
+  [[nodiscard]] bool Attached() const noexcept { return block_ != nullptr; }
+  // The registered region (header and bytes); empty while detached.
+  [[nodiscard]] std::span<const std::byte> StreamBytes() const noexcept;
+
+ private:
+  std::unique_ptr<std::byte[]> block_;
+  std::size_t size_ = 0;
+};
+
 // Boot step 2: the log worker (role kLogWorker), whose sinks are the
 // rotating file |log_path| (empty: none), stderr at config.log_level and
 // the panel ring. It starts before any other engine thread. When the file
@@ -108,6 +157,11 @@ class Logging {
   // then on. Idempotent.
   void Stop() noexcept;
   [[nodiscard]] bool Running() const noexcept;
+  // M10a's log panel: the panel ring's lines after |serial| (see
+  // LogWorker::TryCopyPanelLinesSince), and the worker's counts.
+  bool TryCopyPanelLinesSince(std::uint64_t& serial,
+                              std::vector<std::string>& lines) const;
+  [[nodiscard]] LogWorkerStats WorkerStats() const noexcept;
   // The log file, or empty when the worker writes none.
   [[nodiscard]] const std::string& FilePath() const noexcept {
     return file_path_;
@@ -148,10 +202,12 @@ struct VblankStart {
 
 // Boot step 9: the helper threads. M4: the watchdog (role kWatchdog, 1 s
 // period on the unbiased clock, the 30 s boot budget from
-// |boot_start_ns|, armed after the first iterate). M6b: the vblank sampler
-// (role kVblankSampler, HighQoS) before it; a sampler that cannot start is
-// logged and the pacer runs without it. M9 and M8 add the lane and the
-// input sampler here.
+// |boot_start_ns|, armed after the first iterate; M12: a hang after 5
+// periods without progress, one dump per episode; config.watchdog_period_ms
+// shortens the period in test builds). M6b: the vblank sampler (role
+// kVblankSampler, HighQoS) before it; a sampler that cannot start is logged
+// and the pacer runs without it. M9 and M8 add the lane and the input
+// sampler here.
 class HelperThreads {
  public:
   HelperThreads() noexcept;
@@ -179,6 +235,9 @@ class HelperThreads {
   bool RequestDump(std::string_view reason) noexcept;
   // Dumps the watchdog has written, or failed to write.
   [[nodiscard]] std::uint64_t DumpsFinished() const noexcept;
+  // The watchdog's counters (M12: hangs, their dumps and ends); zeros
+  // without a watchdog. Any thread.
+  [[nodiscard]] crash::WatchdogStats WatchdogStats() const noexcept;
 
  private:
   friend std::expected<HelperThreads, Error> StartHelperThreads(

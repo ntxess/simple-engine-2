@@ -2,10 +2,16 @@
 
 #include "se_os/process.h"
 
+#include <charconv>
 #include <cstddef>
+#include <cstdint>
+#include <cstdio>
 #include <expected>
 #include <format>
+#include <optional>
 #include <string>
+#include <string_view>
+#include <system_error>
 #include <vector>
 
 #include "se_core/error.h"
@@ -62,6 +68,53 @@ std::expected<std::string, Error> ExecutableDir() {
   const std::size_t slash = path.find_last_of('/');
   if (slash != std::string::npos) path.resize(slash == 0 ? 1 : slash);
   return path;
+#endif
+}
+
+std::optional<SystemCpuTimes> ReadSystemCpuTimes() {
+#if defined(_WIN32)
+  FILETIME idle{};
+  FILETIME kernel{};
+  FILETIME user{};
+  if (GetSystemTimes(&idle, &kernel, &user) == FALSE) return std::nullopt;
+  const auto ticks = [](const FILETIME& t) {
+    return (static_cast<std::uint64_t>(t.dwHighDateTime) << 32) |
+           t.dwLowDateTime;
+  };
+  // 100 ns units; kernel time includes the idle time.
+  SystemCpuTimes times;
+  times.idle_ns = ticks(idle) * 100;
+  times.total_ns = (ticks(kernel) + ticks(user)) * 100;
+  return times;
+#else
+  std::FILE* file = std::fopen("/proc/stat", "rb");
+  if (file == nullptr) return std::nullopt;
+  char line[256] = {};
+  const bool got = std::fgets(line, sizeof(line), file) != nullptr;
+  std::fclose(file);
+  if (!got) return std::nullopt;
+  // "cpu  user nice system idle iowait irq softirq ..." in clock ticks.
+  std::string_view text(line);
+  if (!text.starts_with("cpu ")) return std::nullopt;
+  text.remove_prefix(4);
+  std::uint64_t fields[7] = {};
+  for (std::uint64_t& field : fields) {
+    while (!text.empty() && text.front() == ' ') text.remove_prefix(1);
+    const auto [end, error] =
+        std::from_chars(text.data(), text.data() + text.size(), field);
+    if (error != std::errc()) return std::nullopt;
+    text.remove_prefix(static_cast<std::size_t>(end - text.data()));
+  }
+  const auto hz = sysconf(_SC_CLK_TCK);
+  if (hz <= 0) return std::nullopt;
+  const std::uint64_t ns_per_tick =
+      1'000'000'000ULL / static_cast<std::uint64_t>(hz);
+  SystemCpuTimes times;
+  times.idle_ns = (fields[3] + fields[4]) * ns_per_tick;
+  std::uint64_t total = 0;
+  for (const std::uint64_t field : fields) total += field;
+  times.total_ns = total * ns_per_tick;
+  return times;
 #endif
 }
 

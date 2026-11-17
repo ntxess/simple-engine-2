@@ -108,6 +108,12 @@ class LogWorker {
   // leaving |lines| alone, while the worker holds the panel (the main
   // thread takes shared locks only with try_lock).
   bool TryCopyPanelLines(std::vector<std::string>& lines) const;
+  // The lines appended after |serial| (lines appended since the start,
+  // counted), oldest first, appended to |lines|; |serial| becomes the
+  // count of lines appended so far. Lines the ring no longer holds are
+  // skipped. Never waits, like TryCopyPanelLines (M10a's log panel).
+  bool TryCopyPanelLinesSince(std::uint64_t& serial,
+                              std::vector<std::string>& lines) const;
 
   [[nodiscard]] LogWorkerStats Stats() const noexcept;
 

@@ -253,7 +253,9 @@ TEST_CASE("A job that throws completes with an Error and the lane runs on",
 // had already picked, and the lane exits right after the step in progress.
 // The join's wall time is gated at one step plus 5 ms; another program
 // loading the machine can delay the lane's thread past that, so an attempt
-// over the bound is reported and repeated (three attempts). Sanitizer
+// over the bound is reported and repeated (three attempts). An attempt
+// whose job had ended before the stop was requested is repeated without
+// counting (at most ten). Sanitizer
 // builds report it: their allocators take milliseconds to free the
 // cancelled job's buffers (SE_TEST_SANITIZED).
 struct QuitAttempt {
@@ -265,7 +267,9 @@ template <class MakeJob>
 void CheckQuitWithinOneStep(MakeJob make_job, std::uint64_t min_steps)
     SE_REQUIRES(g_main) {
   bool within = false;
-  for (int attempt = 1; attempt <= 3 && !within; ++attempt) {
+  int early = 0;
+  int attempt = 1;
+  while (attempt <= 3 && !within) {
     auto lane = StartLane(TestConfig());
     lane->Submit(Desc(JobClass::kBackground), make_job());
     const std::uint64_t wait_start = NowNs();
@@ -289,11 +293,22 @@ void CheckQuitWithinOneStep(MakeJob make_job, std::uint64_t min_steps)
                     << static_cast<double>(stats.stop_to_exit_ns) * ms
                     << " ms after the request; " << stats.steps << " steps, "
                     << stats.steps_after_stop << " begun after the stop");
+    if (stats.cancelled == 0 && stats.completed == 1 && early < 10) {
+      // The job ran to its end before the request: main's poll sleeps, and
+      // a 64 MB read from the file cache can end within one sleep (about
+      // one run in four when the test runs alone; it failed the gate once
+      // beside parallel tests). Such an attempt says nothing about a quit
+      // during the job, so it is repeated and does not count.
+      ++early;
+      WARN("the job ended before the stop (" << early << " so far)");
+      continue;
+    }
     REQUIRE(stats.cancelled >= 1);
     REQUIRE(stats.completed == 0);
     REQUIRE(stats.steps_after_stop <= 1);
     within = stop_ns <= stats.max_step_ns + 5'000'000 &&
              stats.stop_to_last_step_ns <= stats.max_step_ns + 5'000'000;
+    ++attempt;
   }
   if (!within && kSanitized) {
     WARN("over one step plus 5 ms in a sanitizer build: reported, not gated");

@@ -15,7 +15,9 @@
 //     BuildSnapshotRenderList, the RenderLists the inline driver builds from
 //     its World (BuildRenderList) on rampage's scenarios, tick by tick, at
 //     alpha 0.5, 0.75 and 1.
-// W = 1 and 3 are checks for M14 (docs/gates.md).
+// The same comparisons run at W = 1 and 3 (M14): both drivers build their
+// session's ForkJoinPool from one configuration (every site enabled, a
+// small grain so the scenes fork), the threaded driver's on the sim thread.
 //
 // The sim thread paces itself on a ManualClock that advances on every wait,
 // so runs take as long as their ticks.
@@ -60,6 +62,7 @@
 #include "se_sim/replay.h"
 #include "se_sim/session_log.h"
 #include "se_sim/sim_driver.h"
+#include "support/fork_config.h"
 #include "support/golden.h"
 #include "support/kernel_session.h"
 #include "support/kernel_test_module.h"
@@ -78,9 +81,11 @@ class RecordedSession final : public SimSession {
 
   RecordedSession(const GameModule& module, std::uint64_t seed,
                   std::vector<InputFrame> frames, SessionLog log,
-                  CameraFn camera = {}) SE_REQUIRES(g_sim_owner)
+                  CameraFn camera = {}, jobs::ForkJoinPool::Config pool = {})
+      SE_REQUIRES(g_sim_owner)
       : module_(module),
         states_(module_.Factory(), Env(module_, seed)),
+        pool_(std::move(pool)),
         driver_(module_.MutableSchedule(), pool_),
         log_(std::move(log)),
         frames_(std::move(frames)),
@@ -185,40 +190,54 @@ std::vector<std::uint64_t> FirstN(const std::vector<std::uint64_t>& hashes,
   return {hashes.begin(), hashes.begin() + static_cast<std::ptrdiff_t>(n)};
 }
 
+// The pool both drivers of a comparison build: W workers, every site
+// enabled, grain 2 (W = 0: the shipped inline pool).
+jobs::ForkJoinPool::Config PoolFor(int workers) {
+  if (workers == 0) return {};
+  testing::ForkTestOptions options;
+  options.grain = 2;
+  return testing::ForkTestConfig(workers, options);
+}
+
 TEST_CASE("Threaded hashes equal inline ones on the kernel golden",
           "[sim_thread][golden]") {
   const testing::MainThreadScope main;
-  // determinism_test.cc's options: one tick per frame, the logged edits.
-  testing::KernelSessionOptions options;
-  options.clock_seed = 11;
-  options.edits_path = testing::EditsFixturePath();
-  options.record = true;
-  const testing::KernelSessionResult inline_run =
-      testing::RunKernelSession(options);
-  REQUIRE(inline_run.error.empty());
-  REQUIRE(inline_run.hashes.size() == 600);
-  auto reader = ReplayReader::Open(inline_run.replay);
-  REQUIRE(reader.has_value());
-  const std::vector<InputFrame> frames(reader->Frames().begin(),
-                                       reader->Frames().end());
-  const std::vector<std::byte> session(reader->SessionBytes().begin(),
-                                       reader->SessionBytes().end());
-  const ThreadedRun threaded = RunThreaded(
-      [&frames,
-       &session]() -> std::expected<std::unique_ptr<SimSession>, Error> {
-        AssertSimThread();
-        auto log = SessionLog::Read(session);
-        if (!log) return std::unexpected(std::move(log.error()));
-        return std::make_unique<RecordedSession>(testing::KernelTestModule(),
-                                                 42, frames, std::move(*log));
-      },
-      600);
-  REQUIRE_FALSE(threaded.faulted);
-  CHECK(FirstN(threaded.hashes, 600) == inline_run.hashes);
-  const testing::GoldenResult golden =
-      testing::CheckGolden("determinism_kernel", FirstN(threaded.hashes, 600));
-  INFO(golden.message);
-  CHECK(golden.ok);
+  for (const int workers : {0, 1, 3}) {
+    INFO("W = " << workers);
+    // determinism_test.cc's options: one tick per frame, the logged edits.
+    testing::KernelSessionOptions options;
+    options.clock_seed = 11;
+    options.edits_path = testing::EditsFixturePath();
+    options.record = true;
+    options.pool = PoolFor(workers);
+    const testing::KernelSessionResult inline_run =
+        testing::RunKernelSession(options);
+    REQUIRE(inline_run.error.empty());
+    REQUIRE(inline_run.hashes.size() == 600);
+    auto reader = ReplayReader::Open(inline_run.replay);
+    REQUIRE(reader.has_value());
+    const std::vector<InputFrame> frames(reader->Frames().begin(),
+                                         reader->Frames().end());
+    const std::vector<std::byte> session(reader->SessionBytes().begin(),
+                                         reader->SessionBytes().end());
+    const ThreadedRun threaded = RunThreaded(
+        [&frames, &session,
+         workers]() -> std::expected<std::unique_ptr<SimSession>, Error> {
+          AssertSimThread();
+          auto log = SessionLog::Read(session);
+          if (!log) return std::unexpected(std::move(log.error()));
+          return std::make_unique<RecordedSession>(
+              testing::KernelTestModule(), 42, frames, std::move(*log),
+              RecordedSession::CameraFn{}, PoolFor(workers));
+        },
+        600);
+    REQUIRE_FALSE(threaded.faulted);
+    CHECK(FirstN(threaded.hashes, 600) == inline_run.hashes);
+    const testing::GoldenResult golden = testing::CheckGolden(
+        "determinism_kernel", FirstN(threaded.hashes, 600));
+    INFO(golden.message);
+    CHECK(golden.ok);
+  }
 }
 
 struct Scenario {
@@ -229,51 +248,56 @@ struct Scenario {
 TEST_CASE("Threaded hashes equal inline ones on rampage's scenarios",
           "[sim_thread][rampage]") {
   const testing::MainThreadScope main;
-  for (const Scenario scenario :
-       {Scenario{"sandbox", true}, Scenario{"effects", false},
-        Scenario{"patrol", false}, Scenario{"stress", false}}) {
-    INFO("scenario " << scenario.name);
-    testing::RampageSessionOptions options;
-    options.ticks = 3600;
-    std::vector<InputFrame> frames;
-    std::optional<testing::FrameListInput> recorded;
-    if (scenario.sandbox) {
-      options.scene = testing::SandboxSceneRequest();
-      for (Tick tick = 1; tick <= options.ticks; ++tick) {
-        frames.push_back(
-            testing::RampageScriptedInput::FrameFor(tick, options.seed));
+  for (const int workers : {0, 1, 3}) {
+    for (const Scenario scenario :
+         {Scenario{"sandbox", true}, Scenario{"effects", false},
+          Scenario{"patrol", false}, Scenario{"stress", false}}) {
+      INFO("W = " << workers << ", scenario " << scenario.name);
+      testing::RampageSessionOptions options;
+      options.ticks = 3600;
+      options.pool = PoolFor(workers);
+      std::vector<InputFrame> frames;
+      std::optional<testing::FrameListInput> recorded;
+      if (scenario.sandbox) {
+        options.scene = testing::SandboxSceneRequest();
+        for (Tick tick = 1; tick <= options.ticks; ++tick) {
+          frames.push_back(
+              testing::RampageScriptedInput::FrameFor(tick, options.seed));
+        }
+      } else {
+        options.scene = testing::ReferenceScenarioRequest(scenario.name);
+        auto read =
+            testing::ReadSeinput(testing::RampageFixtureDir() + "/reference/" +
+                                 scenario.name + ".seinput");
+        REQUIRE(read.has_value());
+        frames = *read;
+        recorded.emplace(std::move(*read));
+        options.input = &*recorded;
       }
-    } else {
-      options.scene = testing::ReferenceScenarioRequest(scenario.name);
-      auto read =
-          testing::ReadSeinput(testing::RampageFixtureDir() + "/reference/" +
-                               scenario.name + ".seinput");
-      REQUIRE(read.has_value());
-      frames = *read;
-      recorded.emplace(std::move(*read));
-      options.input = &*recorded;
-    }
-    const testing::RampageSessionResult inline_run =
-        testing::RunRampageSession(options);
-    REQUIRE(inline_run.error.empty());
-    REQUIRE(inline_run.hashes.size() == 3600);
-    // The sandbox state reads its scene request when it enters.
-    rampage::SetSandboxScene(options.scene);
-    const std::uint64_t seed = options.seed;
-    const ThreadedRun threaded = RunThreaded(
-        [&frames, seed]() -> std::expected<std::unique_ptr<SimSession>, Error> {
-          AssertSimThread();
-          return std::make_unique<RecordedSession>(rampage::RampageModule(),
-                                                   seed, frames, SessionLog{});
-        },
-        3600);
-    REQUIRE_FALSE(threaded.faulted);
-    CHECK(FirstN(threaded.hashes, 3600) == inline_run.hashes);
-    if (scenario.sandbox) {
-      const testing::GoldenResult golden = testing::CheckGolden(
-          "determinism_rampage", FirstN(threaded.hashes, 3600));
-      INFO(golden.message);
-      CHECK(golden.ok);
+      const testing::RampageSessionResult inline_run =
+          testing::RunRampageSession(options);
+      REQUIRE(inline_run.error.empty());
+      REQUIRE(inline_run.hashes.size() == 3600);
+      // The sandbox state reads its scene request when it enters.
+      rampage::SetSandboxScene(options.scene);
+      const std::uint64_t seed = options.seed;
+      const ThreadedRun threaded = RunThreaded(
+          [&frames, seed,
+           workers]() -> std::expected<std::unique_ptr<SimSession>, Error> {
+            AssertSimThread();
+            return std::make_unique<RecordedSession>(
+                rampage::RampageModule(), seed, frames, SessionLog{},
+                RecordedSession::CameraFn{}, PoolFor(workers));
+          },
+          3600);
+      REQUIRE_FALSE(threaded.faulted);
+      CHECK(FirstN(threaded.hashes, 3600) == inline_run.hashes);
+      if (scenario.sandbox) {
+        const testing::GoldenResult golden = testing::CheckGolden(
+            "determinism_rampage", FirstN(threaded.hashes, 3600));
+        INFO(golden.message);
+        CHECK(golden.ok);
+      }
     }
   }
 }

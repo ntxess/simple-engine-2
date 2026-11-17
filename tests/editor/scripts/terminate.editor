@@ -1,0 +1,6 @@
+# SDL_EVENT_TERMINATING (as at session end): the dirty document's recovery
+# file is written synchronously before the exit (M10a).
+set 5a4db0c5-0000-4000-8000-000000000000 Transform {"pos":{"x":444,"y":111},"rot":0,"scale":{"x":1,"y":1},"teleport_tick":0}
+expect-dirty yes
+terminate
+wait-frames 5

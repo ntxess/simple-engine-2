@@ -1,0 +1,4 @@
+# A failed expectation fails the process (R6 of the M10-M14 review): the
+# editor exits with a non-zero status, not only a FAILED line.
+expect-state playing
+quit discard

@@ -831,7 +831,9 @@ flush (se::FlushLog, 1 s) and ends the process with TerminateProcess
 **Why.** The design's watchdog reads only atomics and never waits on main,
 and main never waits on it; a queue main fills and a semaphore it releases
 keep both true. Declaring hangs needs M12's GPU and compositor labels, so
-M4 gives the interface and the boot budget only, as the spec asks.
+M4 gives the interface and the boot budget only, as the spec asks. *(M12
+declares hangs, samples four times a period and stops judging once the
+shutdown deadline starts: ADR-104, ADR-105.)*
 
 ## ADR-044 Game code run during shutdown is contained (2026-11-09)
 
@@ -3026,3 +3028,1292 @@ recorded in gates.md for M15.
 settles` appends to a watched file every 25 ms for 400 ms under a 100 ms
 scan: the old rule reported once per scan during the writes, the new one
 reports the finished size once (twice at most on a stalled writer).
+
+## ADR-095 se_imgui and the panel interface's details (2026-11-10)
+
+**Decision.** The M10 panel interface (docs/milestone-specs.md "The panel
+interface") is engine/se_editor/include/se_editor/panel.h, namespace
+`se::editor`, with the spec's PanelContext fields, Panel and
+EditorCommands as written, and these details the spec leaves open:
+- PanelContext gains three fields after the spec's: `paused` (Play.Paused
+  or Stepping), `play_edits` (a `PlayEdits*`, non-null while playing and
+  not faulted) and `viewports` (an `EditorViewports*`, null without a
+  renderer). `commands` stays null while playing or faulted, as the spec
+  says; edits of the play World (the inspector during Play, the stress
+  generator's spawns) go through `PlayEdits::Submit(command, tick)`, which
+  turns the command into SessionLog entries (EditorCommand::ToSession)
+  against a tick (0: the next), applied at once while paused and
+  discarded at Stop. `EditorViewports::Viewport(name)` hands a panel an M7
+  ViewportTarget that the editor draws the context's World into before
+  the ImGui pass (created on first use, destroyed at the next frame start
+  when a frame did not ask for it); the panel shows its TargetTexture()
+  through TextureIds.
+- `EditorCommand` (commands.h): `Kind()` (a CommandKind enum, because RTTI
+  is banned and coalescing needs to compare kinds), `Label()`, `Target()`,
+  `Apply(World&)` and `Revert(World&)` returning `std::expected<void,
+  Error>`, `ToSession(registry, tick)` and `Absorb(next)` for coalescing.
+  The kinds are SetComponentCommand (before and after JSON; an empty
+  before adds and its revert removes), AddComponentCommand,
+  RemoveComponentCommand (its value captured when it applies),
+  CreateEntityCommand and DestroyEntityCommand (the entity stored as
+  every registered component it holds except IdComponent and
+  DestroyRequest, Spawned and PrevTransform included, so an undone
+  destroy hashes the same), PathPointCommand (Insert, Move, Delete of one
+  point of a path component's "points" array; before and after JSON
+  computed when it is made from the World the panel sees) and
+  CommandGroup (one undo step of several). All work through the
+  ComponentRegistry's JSON hooks; the editor's small JSON model
+  (src/json_value.h) edits path points without glaze.
+- `TextureIds` is an abstract class (`Id(handle)` and `Size(handle)`):
+  the editor's implementation resolves through GpuResources and the
+  SDL_GPU backend, M10b's tests give a fake. `EditorStats` is a struct of
+  values and frame-valid pointers (the pacer's frame and totals, the
+  plan, the stepper's stats, the Schedule's SystemStats, Renderer2D's
+  stats, ForkSiteStats for M14). `LogView` is a fixed ring of formatted
+  lines with their levels and the log rings' drop and rate-limit counts.
+  `Selection` holds Guids.
+- se_imgui builds ImGui's sources, imgui_stdlib and the SDL3 and SDL_GPU
+  backends from the pinned archive as an OBJECT library folded into
+  se_imgui, without the engine's warning set and outside lint. Its
+  IMGUI_USER_CONFIG, se_imgui/imconfig_se.h, makes GImGui a
+  `thread_local` (`g_se_imgui_context`), keeps IM_ASSERT on in every
+  build through se::AssertFailed, turns IM_DEBUG_BREAK into the same
+  failure (no debugger break in the process), and disables ImGui's own
+  Win32 and shell calls (the SDL3 backend provides them) and the obsolete
+  API. `se::imgui::Context` creates the one context on main with docking
+  and gamepad navigation on, multi-viewports opt-in, ImGui's default font
+  in the dynamic atlas and no ini file (settings to and from memory);
+  `HeadlessFrames` runs frames without a window or GPU, answering the
+  atlas's texture requests, for the editor's and M10b's tests.
+- check_gpu_members.py treats `ImTextureID` and `ImTextureRef` as texture
+  types (every module but se_render), with the planted fixture
+  tools/checks/planted/imtexture_member (`checks.planted.imtexture_member`)
+  and allowed forms in gpu_texture_member_allowed.
+
+**Why.** The spec's PanelContext names commands as null while Playing, yet
+the design queues edits during Play in the SessionLog and M10b's stress
+generator spawns through it in Play: a separate interface keeps the
+spec's field meaning and gives Play edits their own path. The viewport
+panel needs targets the editor owns (Renderer2D creates them on main and
+the frame draws them), which nothing in the spec's context provides. The
+headers are what M10b builds against, so later changes to them are
+additive only.
+
+## ADR-096 Document Worlds are closed outside commands (2026-11-10)
+
+**Decision.** World::Reg() and MutableClock() assert an open MutationGate
+for `WorldKind::kEditDocument` Worlds as they already do for kPlay
+(se_core/src/world.cc; "document World mutated outside an editor
+command"). The editor opens a kLoad gate to load a document and a
+kEditorCommand gate around each command's Apply or Revert; nothing else
+may change a document. `death.document_mutation_outside_command` checks
+the assert. A path-point command that changes the point count restarts the
+path's progress (segment, u, done) when its segment no longer exists, so
+a SessionLog edit during Play never leaves a path pointing past its
+points.
+
+**Why.** The spec's "a headless test fails on any Edit-mode mutation made
+outside commands (the World's mutation gate, M2, closed while in Edit
+mode outside command application)". Using M2's gate means every path into
+the registry is covered (Reg(), Create, RequestDestroy, the clock), with
+no second mechanism.
+
+## ADR-097 The editor is the App's extension; its sessions are GameStateStacks (2026-11-10)
+
+**Decision.** The editor runs on se_runtime's App (boot, lifecycle,
+FramePacer, FixedStepper, background lane, Renderer2D, shutdown order)
+through `AppExtension` (se_runtime/app_extension.h), which
+`GameSetup::extension` installs; se_runtime never links ImGui. The App
+calls the extension's OnEvent before its own event handling (input the
+extension takes skips the game's InputService), BeginFrame after the
+quit poll (the frame's session: which GameStateStack loads assets and
+draws, whether ticks run, editor Play, Idle allowed, an accumulator
+reset), TickFrame instead of ticking the game's stack, BuildFrame every
+iterate (rendered or not, so a headless App still runs the UI frame),
+OnRenderFault, EndFrame, OnDeviceLost and OnDeviceRecreated,
+ShutdownWorlds (shutdown step 5) and ShutdownUi (step 11). `GameSetup`
+gains `push_start_state` (the editor starts in Edit mode with the game's
+stack empty), `default_pacing` and `frame_latency` (what `--pacing auto`
+means: the editor's Standard with latency 2), and `raw_keyboard` (off for
+the editor: IME, hotkeys); `Lifecycle::SetIdleAllowed` switches Idle per
+frame (Edit mode only). The App exposes `GameInstance()`, `GamePool()` and
+`Logs()`.
+- The editor's sessions are GameStateStacks: the document state (the
+  EditDocument's World, never stepped), the Play stack (the play World as
+  the one state, registered under the module's start-state id so that the
+  stack's per-tick hash is the one a headless run of the same start bytes
+  computes) and 'Play game' (the module's own stack from its start state,
+  pointed at the Play-start bytes written to <pref>play-game.scene.json
+  through `EditorGame::set_play_game_scene`). Each Play session has its
+  own SimDriver (from tick 1), SessionLog and ReplayRecorder, the game's
+  Schedule and pool, and the AssetRuntime as its TickGate. An editor
+  AssetScope retains every texture and sound of the tables, so switching
+  stacks reloads nothing.
+- The game's scene loader and writer reach the editor as `EditorGame`
+  (se_editor/editor_game.h), filled by the editor executable: se_editor
+  never links a game module (FORBID game_rampage).
+- Edits during Play are SessionLog entries (`PlayEdits`, ADR-095). Pause
+  and Step stop the play state's SimRunning, so SessionLog::Enqueue
+  applies them at once and logs them against the next tick. Play game's
+  states are the module's: while it is paused its edits wait for its next
+  tick (the one difference from Play).
+- Pause does not write the play World. The design's "Pause sets prev :=
+  current once" (no backward snap on resume) is `PlaySession::DrawsStill()`:
+  the World draws at alpha 1 while Paused, Stepping or Faulted and after a
+  Resume until the first tick has run, which shows what prev := current
+  would show. Writing PrevTransform at the Pause would change a hashed
+  component outside a tick, so the paused World's hash would no longer be
+  the last tick's recorded hash (what the script's `expect-hash play`, a
+  fault's replay and se_replay compare); the next tick's PrevTransformCopy
+  overwrites it either way.
+- se_replay replays an editor session: `--inputs REPLAY --start-scene FILE`
+  writes the replay's start bytes (the Play-start bytes) to FILE and runs
+  them as the scene, and the replay's SessionLog is applied (rampage's own
+  replays carry an empty one).
+- The editor's frame input: ImGui first; the game's InputService only in
+  'Play game' while no ImGui window wants the input; Play itself runs on
+  empty InputFrames (recorded, so it replays).
+- The 60 Hz preview caps the editor's frames at 60 Hz with a sleep after
+  the pacer's wait (the stepper then sees 60 Hz frames).
+- FramePacer: in Standard mode a present is targeted L vblanks after the
+  frame's vblank (L - 1 presents are queued ahead of it at frame latency
+  L). Before, every present at latency 2 counted one vblank late and
+  HalfRate entered by misses on an editor that presented every vblank
+  (measured on the 165 Hz display: 139 of 152 presents "missed"; 0 of 152
+  with the change). Latency 1 is unchanged. `pacing.Standard at frame
+  latency 2: a present behind one is on time` checks it on the fake
+  display, whose waits follow the set frame latency when a test asks
+  (FakePresentPort::model_frame_latency).
+
+**Why.** The spec puts the editor on "the single loop": duplicating the
+App's boot, pacing and shutdown order in se_editor would fork them; hooks
+keep them in one place. GameStateStacks for the sessions keep the asset
+scopes, holds, render sources and SimDriver as they are.
+
+## ADR-098 ImGui in the swapchain pass; saves, recovery and dialogs (2026-11-10)
+
+**Decision.**
+- Renderer2D draws a `SwapchainOverlay` (FrameRequest::overlay) inside the
+  swapchain pass after the composite's blit, and again in RepresentLast()
+  (HalfRate's re-present shows the same UI). `se::imgui::ImGuiRenderer` is
+  that overlay: BeforeFrame runs ImGui's texture updates (the backend
+  submits each in a command buffer of its own, so before the frame's),
+  Prepare runs PrepareDrawData on the frame's command buffer outside any
+  pass, Draw runs RenderDrawData through a debug wrapper. The backend's
+  vertex and index buffers are pre-sized at 128 K vertices and 384 K
+  indices; a frame that needs more grows them (doubling) and the growth is
+  logged at the next NewFrame. ImGui v1.93.0's backend no longer calls
+  SDL_WaitForGPUIdle when it grows a buffer (the archive's changelog,
+  2026-02-25), so growth costs a buffer recreation, not the GPU stall the
+  spec expected.
+- GpuResources keeps a release log (builds with asserts, 256 entries per
+  frame): `MarkFrameStart()` at the editor's frame start, every texture
+  release recorded, a texture created again at the same address dropped
+  from it. The debug wrapper asserts that no user texture the draw data
+  binds (ImGui's own atlas aside) is in it.
+- `TextureIds` resolves a Handle<Texture> through GpuResources every
+  frame; headless it returns placeholder ids.
+- The document's saves, autosaves, the dock layout, the Play-start bytes,
+  the last Play session's replay and a fault's files go through the
+  background lane as SaveRequests (Durable ones in the Urgent class, and
+  the quit waits for them; autosaves and the Play-start bytes as
+  Background jobs). The editor follows its tickets through
+  `AssetRuntime::SetForeignListener`. A recovery file is
+  <pref>recovery/<name>-<hash>.serecovery (se-recovery-v1: the document's
+  path, name, revision and scene text, se_editor/recovery.h); it is
+  written after 2 s without input or document change, once per revision,
+  removed when the document is saved, offered when the document is opened
+  again (a modal, or the script's `recovery accept|discard`), and written
+  synchronously by the recovery hook (WM_QUERYENDSESSION, TERMINATING)
+  with se::fs::WriteFileAtomic.
+- The quit (QuitProvider "editor"): kPending while a file dialog is open;
+  a dirty document opens the prompt (Save, Don't Save, Cancel; a script
+  answers with `quit save|discard|cancel`); Save submits the document and
+  the dock layout as Durable jobs and a progress modal waits for their
+  completions; a failed save keeps the document dirty, shows its error and
+  answers kCancel.
+- DialogMailbox: a shared_ptr whose SDL userdata is a heap ticket holding
+  a reference; the callback (any thread) copies the paths, counts, calls
+  WakeMain (which pushes only inside ADR-047's window) and returns.
+  Results that arrive while a quit is pending are counted and ignored;
+  Close() at shutdown step 5 marks later ones as late.
+- Editor Play freezes gameplay assets (AssetRegistry::SetGameplayFrozen:
+  prefab and scene-chunk changes wait for Stop) and reports visual swaps
+  (textures, sounds) to the play session's SessionLog as kAssetSwap
+  entries. The play World never reads gameplay assets after its start in
+  M10 (its scene is the flattened Play-start bytes), so the freeze has no
+  effect on rampage yet.
+
+**Why.** The design's frame order (ImGui after the blit, PrepareDrawData
+before the pass, texture uploads before the frame) and red team C2 (a
+texture-backed view cached across frames) fix the overlay's steps; the
+lane already gives Durable, revisioned, renamed writes, so every editor
+file goes through it.
+
+## ADR-099 Play.Faulted's fault boundary; the editor script (2026-11-10)
+
+**Decision.**
+- ADR-006's list of `// se-fault-boundary` files gains
+  engine/se_editor/src/play_fault_boundary.cc: RunContained catches what a
+  play tick (SimDriver::TickInline of the play session) or the play
+  World's RenderList build throws, copies what() into a fixed buffer
+  first (ADR-038) and returns it with the main thread's breadcrumb. The
+  session enters Play.Faulted: no more ticks or edits, drawn at alpha 1 on
+  the guarded path (the editor builds the play World's RenderLists itself,
+  in the boundary, and hands Renderer2D the lists), the replay, SessionLog,
+  breadcrumb stream and a fault.txt saved under
+  <pref>faults/play-N-tick-T/ as Durable lane jobs, and a fault dump
+  requested (integration::RequestFaultDump). A second render throw stops
+  drawing the World; the panels still read it until Stop. A render-build
+  fault Renderer2D reports while playing (OnRenderFault) is handled the
+  same way.
+- Test hooks: `inject-throw tick` throws from the tick's audio drain,
+  inside SimDriver::RunTick after the Worlds stepped (no system of the game
+  is changed); `inject-throw render` throws from the next guarded
+  RenderList build.
+- `--editor-script FILE` (test builds; se_editor/editor_script.h): one
+  action per frame at the frame start, so a command applies (after this
+  frame's ImGui::Render) before the next action looks at the document;
+  waits (`wait-ticks`, `wait-frames`, `wait-ms`, `step`) hold the script
+  for at most 60 s. The script's quit does not end it (dialogs and saves
+  drain while it waits), and a failed action makes the process exit with a
+  failure. The script tests run headless (SDL's dummy video and
+  `--fixed-frame-dt 8.3333`: one tick a frame, so a 300-tick play takes
+  well under a second) and in an unfocused window (label desktop).
+- The editor's hotkeys are ImGui global shortcuts (`ImGui::Shortcut` with
+  `ImGuiInputFlags_RouteGlobal`, submitted from the menu bar): Ctrl+S
+  saves, Ctrl+Z and Ctrl+Y undo and redo (Edit mode only; a focused text
+  field keeps its own), F5 plays or resumes, Shift+F5 stops, F10 steps.
+  The script's `key CHORD` feeds a chord to ImGui's event queue
+  (io.AddKeyEvent, pressed for one frame; never OS input), which is how
+  `editor.script.hotkeys` tests them headless.
+
+**Why.** The design names Play tick and render isolation as fault
+boundaries; building the play World's lists in the editor's own boundary
+contains a game's render throw without a second boundary in se_render and
+works headless, where the tests run everywhere.
+
+## ADR-100 The panels: a module over game_rampage, drawers from the JSON hooks, edits through one sink (2026-11-10)
+
+**Decision.** M10b's panels are one module, se_editor_panels
+(engine/se_editor/panels, ALLOW_ONLY its direct dependencies), over
+se_editor's panel interface (M10a) and game_rampage: the design places the
+editor "over se_runtime and game_rampage" (costfree-end-state.md
+"Editor"), and the ported drawers edit rampage's components (Stats,
+EffectSource, Team, Path), so the panels link the game module instead of
+reaching its types through GameModule. se_editor itself stays
+game-agnostic (it FORBIDs game_rampage, ADR-095); se_editor_panels is the
+one editor module that links the game, and the editor executable links
+both. What needs no ImGui is kept in pure
+functions with their own tests: the waypoint canvas's controls and rules,
+the profiler's series and axis rule, picking, the stress plan, the
+viewport's letterbox math, the gizmo and the overlays.
+
+- The Inspector's reflection drawer is generated from the
+  ComponentRegistry's JSON hooks (glaze's reflection supplies the field
+  names and values): the component's JSON is parsed into game_rampage's JSON
+  model (numbers keep their source text), a widget is drawn per field, and
+  an edit becomes a set-component command whose "before" is the JSON read
+  and whose "after" is the edited document read and rewritten by the
+  component's own hooks (so it is the registry's canonical JSON, and a
+  value the hook rejects is dropped and logged). A number is edited as a
+  float when the read hook accepts 0.5 in its place (probed once per field
+  on a scratch registry), else as an integer. `ComponentInfo::inspect`
+  stays null and unused: game modules may not link ImGui (they FORBID
+  se_imgui), so no module could supply a drawing hook, and a hook that
+  takes a mutable component pointer would contradict "panels never mutate
+  the World".
+- Custom drawers are chosen by registered name ("Stats", "EffectSource",
+  "Team", "Path"); each edits a copy of the typed component and submits a
+  set-component command with the copy's JSON. Stat names come from the
+  World's StatNames, then from names typed in this session (a new stat's
+  name is not in the World's StatNames, which is context, not a component;
+  M11's save path must add it).
+- Text fields commit when the edit ends (Enter or focus lost), never per
+  keystroke: a value derived from the World every frame cannot overwrite
+  what is being typed (TextEdits). Value drags submit a command per frame
+  inside BeginCoalesce/EndCoalesce, so the document shows the drag and the
+  undo stack gets one step.
+- EditSink routes every edit by the play state: EditorCommands in Edit
+  mode, PlayEdits (the SessionLog, next tick) in Play, nothing in
+  Play.Faulted (widgets disabled). Selection goes through
+  EditorCommands::Select or PlayEdits::Select.
+- The waypoint canvas's rules (waypoint_canvas.h) become path commands
+  (path_commands.h): one PathPointCommand (insert, move or delete) when the
+  rule changes exactly one point and nothing else, which is the case in an
+  Edit document (never stepped, so the path's progress is at its start and
+  the entity stands on point 0); otherwise one set-component of the edited
+  Path, one of the Transform when the entity moves to point 0, and a reset
+  of the derived PathCache (the PathSystem rebuilds a cache only when the
+  point count changes, so a moved point would keep stale lengths). The
+  commands of one rule are one undo step. "Remove all" sets the loop flag,
+  as the legacy code re-created the MovementPattern with repeat = true.
+- The Hierarchy is flat, in spawn order: the engine has no parent relation
+  (prefabs and nesting are M11), so its parent column shows none.
+- Panels draw their window's contents only: the shell calls
+  Begin(Name()) and End() around Draw (the tests' harness does the same).
+  The waypoint canvas opens its own window ("WayPoint Editor | <name>",
+  the legacy title).
+- Panels expose a WidgetProbe: when one is attached, they record the screen
+  rectangles of their notable widgets under stable keys, and the headless
+  tests click there with ImGui's own IO events.
+- The editor executable gets the panels from MakeDefaultPanels (dock order:
+  Hierarchy, Inspector, Viewport, Log, Profiler, Schedule, Stress
+  generator, Scene settings) and hands each to the shell; the Viewport and
+  Scene settings panels share one ViewSettings (the overlays' options and
+  the background colour: editor state, not document state). PanelOptions
+  carries the Profiler's flight-recorder callback, so the panels need no
+  crash-capture dependency.
+- Play.Faulted needs no path of its own in the panels: EditSink::CanEdit()
+  is false whenever the context says faulted, and a selection change goes
+  to whichever of EditorCommands and PlayEdits the shell passes, so a shell
+  that keeps PlayEdits in the context while faulted keeps the frozen World
+  selectable.
+
+**Why.** The JSON hooks exist for every component of every module, so one
+drawer covers them all and its commands are exactly what the undo stack
+and the SessionLog store. Linking game_rampage is what the design's layering
+says and keeps the custom drawers typed.
+
+## ADR-101 Picking: the drawn sprite on top, three paths that agree (2026-11-10)
+
+**Decision.** A sprite's pick box is the axis-aligned bounds of the quad
+BuildRenderList draws for it (origin, scale, flips and rotation, at zoom 1
+in world pixels), hit when min <= p < max. Of the boxes under the cursor
+the last drawn wins: the largest (layer, texture, z, spawn serial), the
+RenderList's draw order. The design's "ordered by layer and z" is that
+order; the texture key sits between layer and z in it, so following it
+exactly picks what the viewport shows.
+
+- Broadphase: a PickScratch (a uniform grid of the boxes, rampage's
+  SpatialHash) is built for a World only at a recorded tick: not an Edit
+  document, `!HashDirty()` and `LastHash().tick == Clock().tick`; it is
+  valid while the World, its tick and its recorded hash are the ones it was
+  built for. Any mutation since (a paused edit) marks the World dirty and
+  picking falls back to the exact path. Edit documents always take the
+  exact path: they are never stepped, and sprites are not hashed, so a
+  recorded hash could not vouch for them. The scratch is the editor's own,
+  not the CollisionSystem's: that one indexes collider boxes, not sprites,
+  and leaves out entities without a collider.
+- Exact: every entity with Transform, SpriteRenderer and Spawned (what the
+  renderer draws).
+- Brute force (Play.Faulted): the IdComponent storage alone, with try_get
+  for the rest, so a World a throw left half-updated is never walked
+  through a multi-component view; an entity without Spawned still picks.
+
+## ADR-102 The stress generator's distributions, Guids and spreading (2026-11-10)
+
+**Decision.** The ledger's open row "Stress generator distributions" is
+closed with explicit distributions. Spawn i of press p draws from
+`rng::Stream(seed, p, StressGuid(seed, p, i), 0x53545200)`: the point
+count is 1 + Below(10) (uniform on 1..10; the legacy loop redrew its bound
+and gave a mean of 3.66), then each point x = Below(width), y =
+Below(height) in whole pixels (uniform; the legacy doubled x = 0 and folded
+y). The entity starts at its first point. The archetype is the legacy
+enemy (Editor.cpp:966-980) as assets/prefabs/enemy.prefab.json has it
+since M3, written as a prefab-like list of component JSON plus the derived
+PathCache and ActiveEffects a loader adds, so a spawned enemy walks from
+its first tick.
+
+- Guids are a fixed hash of (seed, press, index): the same press makes the
+  same entities everywhere. A press whose first Guid the World already
+  holds (a saved earlier session's) is skipped.
+- A press of n spawns is split into batches of "Spawns per tick" (64 by
+  default). In Play each batch goes to the SessionLog against consecutive
+  ticks from the next one, so a large press is spread over ticks and
+  replays exactly; in Edit mode, where nothing ticks, one batch of
+  create-entity commands is submitted per frame inside one coalesce scope
+  (one undo step). Each press is logged with its count and its first tick.
+- Remove (and Replace's first half) destroys every entity on the enemy
+  team, as the legacy buttons did.
+
+## ADR-103 The Viewport: an editor camera, the legacy letterbox, overlays and the gizmo as ImGui (2026-11-10)
+
+**Decision.** The Viewport draws the World through an editor camera of its
+own, never the World's Camera2D: it starts as the game's view
+(rampage::SandboxCamera: the primary camera, else the arena) and pans with
+a right or middle drag and zooms with the wheel (x1.1 per notch, 0.05 to
+40, about the cursor); "Reset view" restores it.
+
+- Layout ports the legacy letterbox math: FitAspectSize (scaleSize,
+  Editor.cpp:632-642) and CenteredTopLeft (getCenteredTLPos, :644-656) place
+  an image of the camera's aspect in the panel; the panel requests its
+  ViewportTarget at that size in whole pixels and draws it 1:1 with
+  ImGui::Image through TextureIds, every frame (no ImTextureID is kept).
+  Mouse to world goes through the same FitCanvas the renderer applies
+  inside the target, so a pick lands where the sprite is drawn.
+- The overlays (ids, boxes, headings, positions; Editor.cpp:538-620) are
+  built from the const World as screen-space primitives and drawn on
+  ImGui's draw list over the image, never into the World's render. The box
+  is the collision box (the Collider of rule R4) when there is one, else the
+  sprite's bounds: the legacy outlined the sprite bounds because they were
+  the hitbox. Red marks a box overlapping the player's. The legacy
+  quad-tree visualizer is not ported (the QuadTree is not kept).
+- The move gizmo (X, Y and both) starts a drag on a press over a handle:
+  BeginCoalesce("Move <name>"), a set-component of the Transform each frame
+  the position changes (the document shows the move: the preview), and
+  EndCoalesce on release: one undo step. A press elsewhere picks
+  (ctrl-click toggles).
+
+## ADR-104 Hangs are counted from the last observed progress; the watchdog samples four times a period (2026-11-10)
+
+**Decision.** M12 turns hang declaration on (`HangDetectorConfig::
+declare_hangs` now defaults to true) with these rules (se_crash/
+hang_detector.h, watchdog.h):
+- A hang is 5 consecutive periods of 1 s on the unbiased clock without
+  progress of main's iterate counter. The periods are counted from the
+  sample that last saw the counter move (or last saw an excuse), not from
+  fixed period boundaries, and the watchdog takes a sample every quarter
+  period (`WatchdogConfig::sample_ms`, 0: period / 4, at least 1 ms). A hang
+  is therefore declared between 5 s and 5 s plus two samples (5.5 s) after
+  main's last progress; on this machine `crash.rampage_hang` measured 5.30
+  s from the hang's log line to "dump written" (the dump itself took 54 ms).
+- Suspended, Modal, the heartbeat and a debugger each excuse a sample: the
+  count starts over from it. The debugger is read only on samples without
+  progress (Linux reads /proc for it).
+- The periods must have been watched. When the detector itself got no
+  sample for longer than `HangDetectorConfig::max_sample_gap_ns` (2 s, or
+  two periods when that is longer; 0 turns the rule off) and main made no
+  progress, the whole process was stopped, not only main: a debugger that
+  detached (or was closed) while the process stood in it, so that no later
+  sample sees it; a job-control stop (SIGSTOP, CLOCK_MONOTONIC keeps
+  running); a paused virtual machine. The sample after the gap is
+  `HangVerdict::kUnobserved`: the count starts over from it, the watchdog
+  logs one WARN line with the gap's length and counts it
+  (`WatchdogStats::unobserved_gaps`). A hang already declared stays
+  declared. A real hang is not delayed: the watchdog is its own thread and
+  keeps sampling while main is stuck.
+- A hang is declared once per episode: one ERROR line ("hang N: main made
+  no progress for X s at tick T (iterate I; main's breadcrumb: tick, phase,
+  system, chunk): requesting a dump"), one DumpWithoutCrash on the
+  watchdog thread with the same text as the dump's `se.dump_reason`, and
+  then a log flush of at most 200 ms (the log file is complete up to the
+  hang and its dump's line, mt-design.md P12: a hung process is often
+  ended by hand next; the flush comes after the dump so that it takes
+  nothing from the 6 s between a hang's start and its dump). The
+  episode ends at the first sample that sees progress again, logged as
+  "hang N ended: main made progress again after X s (Hung -> Running)",
+  with the length from the last progress before the hang. The hang number
+  ties the log line to its dump; crashpad's simulated-crash call returns no
+  report id to log.
+- Hung is the watchdog's state (HangDetector::InHang, WatchdogStats::
+  in_hang), not a state of main's Lifecycle: main cannot run while it is
+  hung, so it could only ever enter and leave Hung in the same iterate.
+  M5's lifecycle.h listed Hung among the states M12 would add; it does not.
+- WatchdogStats gains hangs, hang_dumps_written, hangs_ended,
+  last_episode_ns, unobserved_gaps, in_hang and last_hang_in_driver;
+  `periods` becomes
+  `samples` (the wakes that sampled), and `stalled_periods` counts whole
+  unexcused periods.
+- The clock and the debugger check are injectable (`WatchdogConfig::clock`,
+  `debugger`), so the thread tests run the real watchdog on a fake unbiased
+  clock with a faked debugger; the waits between samples stay real.
+
+**Why.** The spec asks for 5 periods of 1 s and for an injected hang's dump
+within 6 s of the hang's start. With samples once a second at a phase
+unrelated to the hang, the fifth whole period after the last progress ends
+up to 6 s after the hang began, before the dump is written, so the 6 s
+budget would be missed in a sixth of the runs; counting from the last
+observed progress with quarter-period samples keeps the rule (no hang
+before 5 s without progress) and the budget. Four wakes a second of a
+thread that reads a few atomics is no measurable cost. The design counts a
+debugger's stalls as paused time, and `IsDebuggerPresent` only says so
+while the debugger is still attached: after "detach" from a break of 20 s
+the first sample would have seen 20 s without progress and no excuse, and
+declared a hang that never was. The gap between the watchdog's own samples
+is the evidence that works for every way of stopping a process.
+
+**Tests.** `crash_unit.*` (every platform, TSan in WSL): the detector on a
+fake clock (5 periods declare; 4.75 s do not; one hang per episode, a second
+episode after progress; the periods start at the last progress; Modal,
+Suspended, the heartbeat and a debugger each prevent a hang and an excuse
+restarts the count; a slow boot under 30 s; an hour of system sleep during
+which the unbiased clock stands still; the in-driver label; Disarm; a 20 s
+gap between samples starts the count over, a gap inside a declared hang
+changes nothing, the limit of 2 s or two periods), and
+the watchdog thread on a fake clock (one dump per episode, the episode's
+end, no dump under each excuse or a faked debugger, a slow boot and sleep,
+the stall label, no judging after the deadline starts, a 20 s jump of the
+clock between two samples and the hang 5 s after it) and on the real
+clock (the boot budget, then a hang after 5 periods of 10 ms).
+
+## ADR-105 The in-driver flag, the heartbeat and the shutdown deadline (2026-11-10)
+
+**Decision.**
+- The in-driver flag is one process-wide atomic in se_platform
+  (se_platform/driver_wait.h: `DriverWaitScope`, `DriverWaitFlag()`), set
+  by main only, with scopes that nest. It is raised around
+  SDL_WaitForGPUSwapchain with SDL_AcquireGPUSwapchainTexture and around
+  the submit that presents (FrameRecorder), the upload and readback fence
+  waits (GpuResources, Renderer2D), SDL_WaitForGPUIdle (GpuDevice), and in
+  the FramePacer around every frame-latency, fence and swapchain wait it
+  makes through its PresentPort. It is a WatchdogInputs field
+  (`in_driver`), so a test passes its own. A hang found inside one is
+  labelled: "hang N: GPU or compositor stall, main in an SDL_GPU or pacer
+  wait for X s at tick T", in the log and the dump's reason. The flag never
+  excuses a hang. It lives in se_platform because both se_render and
+  se_runtime raise it and se_crash only reads the pointer it is given.
+- The heartbeat is raised only by `App::KnownLongWork(what)`, an RAII
+  `HeartbeatScope` (se_runtime/heartbeat.h) that nests; the App counts the
+  scopes and logs the longest at shutdown ("known long work (the
+  watchdog's heartbeat): N scopes, the longest 'what' X ms"). The runtime raises it around the recovery hook at
+  session end (WM_QUERYENDSESSION, SDL_EVENT_TERMINATING); M10's large
+  synchronous loads and blocking saves are its other intended callers.
+  Nothing raises it for frames, uploads or device recreation: a hang inside
+  known long work is not declared, so the scope must stay narrow.
+- When the shutdown deadline starts (the quit drain is over) the watchdog
+  stops judging hangs (`HangDetector::Disarm`): the deadline's own dump and
+  termination 5 s later own the end of the process, and a slow teardown
+  would otherwise get a hang dump at 5 s and a deadline dump at the same
+  moment. The deadline itself is unchanged (M4 integration), as is the
+  Release builds' fast exit after the final flush.
+- Test hooks (test builds): `--hang-test after-ticks:N[:for-ms:MS]
+  [:in-driver]` appends a system, HangTest, to the end of the game's
+  Cleanup phase through a wrapped GameModule (se_runtime/src/hang_test.h),
+  which at tick N loops in 1 ms sleeps forever or for MS milliseconds, with
+  in-driver inside a DriverWaitScope; main's breadcrumb then shows tick N,
+  phase Cleanup and HangTest's system id. `--watchdog-period-ms MS` (4 to
+  60000) shortens the hang period for the headless App tests.
+
+**Why.** The spec names the waits to flag and the label, not where the
+flag lives; one atomic that main alone writes is what the design's data
+flow allows the watchdog to read. The in-driver variant of the hang hook is
+a stand-in for a real GPU or compositor stall, which a test cannot cause on
+demand; it checks the label's path from the flag to the log and the dump,
+while the call sites are covered by `pacing.Every wait of the pacer raises
+the in-driver flag` (the fake port counts waits made without it) and by
+review. A deadline that dumps and a hang rule that dumps the same stuck
+teardown would leave two dumps of one event.
+
+**Tests.** `platform.A hang in a tick is declared once and ends when main
+runs again` (headless App, 50 ms period, a 600 ms HangTest loop, with and
+without in-driver: one hang, the dump failing softly without crash
+capture, the episode's end), `platform.Known long work raises the heartbeat
+and no hang is declared` (a 500 ms stall in a frame with and without the
+heartbeat), `crash_unit.After the shutdown deadline starts no hang is
+judged`, and the desktop tests of ADR-106.
+
+## ADR-106 The session header and Play-start streams; replays from a dump; the teardown gate (2026-11-10)
+
+**Decision.**
+- Two dump-stream kinds and stream types: kind 6, the session header
+  (`crash::StreamType::kSessionHeader` 0x53450005), and kind 7, bytes
+  (`kPlayStartBytes` 0x53450006). The session header is one 512-byte
+  `SessionHeaderRecord` (se_core/dump_stream.h pins it): a seqlock stamp,
+  the session count, seed, scene hash (the replay header's hash of the
+  start bytes), math hash, CPU features, start tick, the InputFrame ring
+  index of the start tick's frame, the newest published tick and its hash,
+  the tick rate, and text fields for the module, build, platform, compiler
+  and the scene path relative to the content root. `SessionHeaderStream`
+  (se_core/session_header.h) writes it word by word with relaxed atomics
+  between an odd and an even stamp, like InputFrameRing. One instance per
+  process (`integration::DumpSessionHeader()`) is registered with the other
+  streams; the App begins it at boot step 10 from the same ReplayHeader a
+  `--record` replay gets (GameSetup gains `scene`; rampage sets it) and
+  publishes the last tick's hash after each frame's ticks.
+- `crash::UnregisterStream(type)` withdraws a stream: crashpad cannot
+  unlink a user stream, so its entry is replaced (UpdateUserDataMinidumpStream)
+  by one with no memory, which the handler skips, and kept for the type's
+  next registration; the stub releases the type. A dump in progress has
+  suspended every thread, so a withdrawal is seen whole or not at all.
+  `integration::PlayStartStream` is M10's hook: `Attach(bytes)` when Play
+  starts copies the bytes behind a kind-7 header ("play-start") and
+  registers them, `Detach()` when Play stops (or the destructor) withdraws
+  and frees them; the integration step wires it to the editor.
+- `se_replay --from-dump DUMP [--root DIR] [--hash-out FILE]` reads the
+  dump with a C++ reader of the same layout (tools/se_replay/
+  dump_session.h: the minidump directory, the session header, the ring's
+  complete frames from the session's first, main's breadcrumb in slot 0)
+  and replays the session headless with the rampage module: the scene from
+  `--root` (default the repository) must hash as the dump's did, the seed
+  and frames come from the dump. When the dump's last published tick is
+  before main's breadcrumb tick, main was inside that tick (a hang or a
+  crash in it) and the replay runs the ticks before it; otherwise the tick
+  had finished and the replay runs it too. The published hash is checked;
+  the tool prints the tick reached and the last hashes and writes them all
+  with `--hash-out`. Only rampage sessions starting at tick 1 at 120 Hz
+  replay; a session longer than the ring's 60 s cannot (its first frames
+  are gone) and says so; editor sessions with Play-start bytes are the
+  integration's. read_dump.py decodes kinds 6 and 7 (the bytes as base64
+  in `--json`).
+- The teardown gate: `tests/platform/support/test_app.cc` measures every
+  App test's SDL_AppQuit and fails the run (it returns kSlowTeardown) when
+  it took 2 s or more; the App logs "teardown took X ms" after every
+  shutdown, which the rampage hang test also gates. A teardown of 500 ms
+  or more also logs where the time went ("slow teardown: audio (7) 1081
+  ms, gpu-device (12) 105 ms, ...": the parts of 1 ms and more, in order),
+  so a failed gate names its step. The limit is wall-clock time: on this
+  machine a teardown takes 0.1 s (rampage on Vulkan with the validation
+  layers) and stays under 1 s in every test of an unloaded run, but with
+  every core taken by other processes (parallel builds) single joins and
+  the device's destruction have been seen to take over a second each, and
+  two Vulkan desktop tests under ASan once took 2.2 and 2.5 s; such a
+  failure is the machine's, and the run is repeated.
+
+**Why.** The spec's session header is "what a replay needs": the replay
+header's fields already say that for `--record` files, so the stream
+carries the same values, plus the first frame's index, because the ring is
+one per process and earlier Apps in a test process leave frames in it, and
+the newest tick hash, so a replay from a dump can prove it reached the same
+state rather than only the same tick. Freeing the Play-start bytes at Stop
+needs a withdrawal crashpad does not have; a zero-size entry is what its
+handler already skips. A C++ reader keeps se_replay free of a JSON parser
+and of Python at replay time; read_dump.py stays the oracle of the tests.
+
+**Tests.** `crash.rampage_hang` (desktop): `--hang-test after-ticks:240`
+gives one dump 5.30 s after the hang's start (at most 6 s), decoded by
+read_dump.py with no problems: the exception on the watchdog thread, the
+reason, main's breadcrumb at tick 240 in HangTest, the session header and
+the ring's 240 frames; `se_replay --from-dump` reaches tick 240 and matches
+tick 239's hash. `crash.rampage_driver_stall` (desktop): a 6.5 s stall in a
+driver wait is labelled, dumped once, ends after about 6.3 s and rampage
+quits with a teardown under 2 s. `replay_unit.*` (every platform):
+synthetic minidumps from a headless rampage session through
+ReadDumpedSession and ReplayDumpedRampage (inside and after a tick, a
+wrong hash and a changed scene, a wrapped ring, torn slots, a session not
+begun). `The session header is a kind-6 dump stream` and `A reader
+thread never takes a torn session header` (se_tests; TSan in WSL),
+`platform.The app begins the session header and publishes its ticks`,
+`platform.The Play-start bytes are a dump stream while they are attached`,
+`crash_unit.A withdrawn stream type can be registered again`,
+`minidump.read_dump` (kinds 6 and 7), and `platform.Every app test tears
+down in under 2 s`.
+
+## ADR-107 The threaded ForkJoinPool: workers from se_os, sites kept by the pool, chunks as a fault boundary (2026-11-10)
+
+**Decision.** M14's pool replaces M2's inline one behind the same API
+(`ParallelFor(ForkSite&, count, body)`, `NestedParallelFor`, the chunking
+of `ChunkCount`/`ChunkAt`), with these contracts:
+- **Threads.** se_core runs the protocol but creates no thread (ADR-029):
+  `ForkJoinPool::Config::threads` makes a `jobs::WorkerThreads`, and se_os's
+  `ForkWorkers` (se_os/fork_workers.h) starts each worker with StartThread
+  as role kForkWorker, OS name `fork-worker-<i>`, Qos::kHigh, soft affinity.
+  Placement: workers 0 .. PerformanceOnlyCount - 1 prefer main's last-level
+  cache P-cores (`WorkerCpuSet(kPerformanceOnly)`), so a PerformanceOnly
+  site uses exactly those; every other worker prefers the cores of one
+  efficiency class, the cores in order (fastest class and main's cache
+  first) past main's and the PerformanceOnly workers', wrapping when W is
+  above the cores. On a homogeneous CPU every worker prefers every core,
+  M4's `WorkerCpuSet(kAnyPhysical)`. MaxWorkers is ForkPoolSize and
+  PerformanceOnlyWorkers is PerformanceOnlyCount.
+- **W.** `Config::workers`: 0 runs every fork inline (the default, so every
+  pool M2 code builds stays inline); -1 is the WorkerThreads' W_max capped by
+  `max_workers`; N is N (at most 15, and `max_workers` when set), which may
+  exceed the machine (the tests' W = 7 on any machine). The App builds its
+  pool with -1, `max_workers = ForkPoolSize` and se_os's factory; no site is
+  enabled, so no worker starts (the boot log's "none started" stays true).
+- **No worker until a site is enabled.** The workers start when a site
+  becomes enabled: `Site()` of a site `Config::enabled_sites` names,
+  `EnableSite(name, true)`, or the first fork of a caller's own enabled
+  `ForkSite`; the startup calibration (ADR-109) runs then. A start that
+  fails leaves the pool inline (`PoolStats::start_failed`, logged once).
+- **Sites are kept by the pool.** A system declares a `ForkSiteDecl` (name,
+  grain, min_items, core class, read and write sets) in static storage and
+  calls `context.jobs.Site(decl)`, which returns the pool's `ForkSite`
+  record (enabled, the fallback window, ForkStats, the join ring), made at
+  the first call and found again by the declaration's address (then its
+  name). Systems are stateless and game modules may not keep mutable
+  statics, and the inline and threaded drivers (or an editor's Play
+  session beside the game) may run the same module at once, so the state
+  belongs to the session's pool. `Sites()`/`FindSite()` list them for the
+  profiler and schedule panels (the integration). A caller's own
+  `ForkSite` object (M2's tests, se_bench) still works; it is not listed.
+  `Config::enabled_sites` names the sites enabled at registration (`"*"`
+  for every site, tests only); shipped configurations list none.
+- **Results do not depend on W.** A fork runs inline when the site is
+  disabled, in a fallback window, below min_items, at W = 0, with fewer than
+  two participants (participants = min(W' + 1, chunks / 4), W' the workers
+  the site may use) or with more than 2^19 chunks. Either way the chunks are
+  ChunkAt(count, grain, k). Variable outputs go to `jobs::ChunkOutputs<T>`,
+  one arena per chunk, concatenated in chunk order on the owner after the
+  join. Tests may set `Config::grain_override` (every site's grain) and
+  `chunks_per_participant`; every W of a comparison uses the same values.
+- **Fault boundary.** A threaded fork runs every chunk, the caller's too,
+  through `RunChunkContained` in engine/se_core/src/fork_fault_boundary.cc,
+  which joins ADR-006's list of `// se-fault-boundary` files. The first
+  exception is kept, the chunks not yet started are skipped, the caller
+  joins, then rethrows it (`ForkStats::faults` counts it); no thread
+  unwinds while another still reads the fork. An inline fork keeps M2's
+  behaviour: the exception propagates at once, later chunks do not run.
+- **Sinks.** `AudioEvents::Push`, the World-level sink game rules write,
+  asserts not-in-fork (the structural calls already did through Reg()).
+- **Fork sites written.** The Schedule's built-in PrevTransformCopy
+  (`se.PrevTransformCopy`, grain 1024); rampage's KinematicMove, Path and
+  Boundary (grain 1024; the entities a chunk moved are its output, marked
+  Moved by the owner after the join), Broadphase (grain 1024: each
+  candidate's box, source flag and spatial-hash cells, `SpatialHash::
+  AppendCells`, sorted on the owner by `Assemble`) and Narrowphase (grain
+  256 candidates: const `SpatialHash::Query` and the overlap test, contacts
+  per chunk); and the RenderList's cull, keys and vertices
+  (`render.RenderList`, grain 1024, `BuildRenderListForked`). The spatial
+  hash's query now gathers, sorts and drops duplicates instead of stamping
+  (the same ascending, unique indices, and no mutable state, so chunks may
+  query at once). Every site is disabled in every shipped configuration.
+
+**Why.** The spec puts the pool in se_core "behind the same API" and the
+threads in se_os; an interface the pool calls keeps se_core free of thread
+creation and lets tests supply hosts with chosen efficiency classes and
+battery states. Keeping the sites in the pool is the only place a stateless
+system can find per-session state. Rethrowing after the join is what the
+design's "the first exception is rethrown on main after the join" needs:
+an exception unwinding the caller's frame while a worker reads the body
+would be a use-after-free.
+
+**Deviations.** `BuildRenderListForked` has its own name instead of a
+`BuildRenderList` overload: tests/render/no_alloc_test.cc pins the
+builder's signature with `decltype(&BuildRenderList)`. The design's
+per-chunk DebugDraw slices: there is no DebugDraw sink yet; ChunkOutputs is
+the mechanism it will use. The design's "Swept AABB against tiles",
+"Scatter", "Body pushes", "Contact radix sort" and "key sort" candidates
+have no code in rampage or the RenderList to be written as sites (no tiles,
+bodies or radix-sorted contacts; the RenderList's radix sort stays serial).
+
+## ADR-108 The wake protocol, claims and the spin (2026-11-10)
+
+**Decision.** The design's protocol (mt-design "Data Flow", the descriptor
+row), made exact:
+- The caller writes the descriptor (invoke, body, count, grain, chunks,
+  the chaos claim order, its breadcrumb) with plain stores, its full 64-bit
+  generation, the batch hint and remaining = chunks, then
+  `claim.store(pack(...), release)`. The descriptor, the claim word,
+  remaining and the error slot each start a cache line.
+- The claim word packs a 16-bit generation, the range of workers that may
+  claim (two 4-bit indices), the chunk count (20 bits) and the next index
+  (20 bits). A worker loads the word first and adds only when the
+  generation is not one it ran out of, chunks are left and its index is in
+  the range; so next passes the count by at most one batch per claimer and
+  the fields cannot overflow (forks of more than 2^19 chunks run inline;
+  a batch is at most 2^13). The range is [0, W') for a fork (a
+  PerformanceOnly site's workers, or all) and one efficiency class for a
+  calibration fork. A worker that was not woken (spinning, or a thread
+  that started late) may claim from any fork whose range holds it;
+  between its load and its add a newer fork may be published, so rarely
+  a worker outside the range takes chunks, which it then runs (correct,
+  only placement suffers).
+- Claims are `fetch_add(batch, acq_rel)`; batch = clamp(chunks /
+  (participants * 8), 1, 8192), read from a relaxed hint (any value claims
+  a valid disjoint range). After a successful claim the claimer copies the
+  descriptor when its 64-bit generation is new (the fork cannot end while
+  the claim is outstanding, so the generation it reads is the claim's),
+  runs the batch, then `remaining.fetch_sub(n, acq_rel)` as its last access;
+  the decrement that reaches 0 calls `notify_one`. The caller claims like a
+  worker, then waits with `remaining.wait()` until it reads 0 (acquire): it
+  does not spin itself.
+- Each worker has its own padded wake word. The caller wakes participants
+  - 1 workers (the lowest indices): it stores the bump's generation, keeps
+  the stamp of the oldest bump the worker has not seen (a compare-exchange
+  from 0), `fetch_add(1, release)`, then `notify_one`. A worker loads its
+  word, accounts for a new value (it takes the stamp with an exchange to 0:
+  the latency of the oldest unseen bump), claims until none are left, then
+  `wait(old)`: a bump between the load and the wait makes the wait return
+  at once, so no bump is lost. `WorkerWakes()` exposes each word and the
+  value its worker last saw (equal once every bump was seen).
+- A woken worker that ran no chunk of its fork is a missed wake; one that
+  saw its bump more than 2 ms late and still ran a chunk is a late wake.
+  Both are counted per site after the join and per pool.
+- The spin: after running chunks a worker spins (pause instructions,
+  checking its wake word and the claim word) for at most `spin_us` (20) when
+  the caller's hint says another fork is predicted, then parks. The
+  prediction is per pool site: whether the next threaded fork after its last
+  one started within spin_us (`ForkSite::followed_quickly`), so "Path, then
+  Boundary at once" is learned and the last fork of a tick is not. The hint
+  is off on battery: `WorkerThreads::OnBattery` (se_os `BatteryPowered`:
+  GetSystemPowerStatus, or a battery and no online mains in
+  /sys/class/power_supply), polled at most once a second, before the
+  fork's start stamp so that the poll is neither join time nor wake latency
+  (ADR-110).
+
+**Why.** A 24-bit generation (the first layout) left no room for the
+eligibility range, and the range is what keeps a late-starting or spinning
+worker out of a PerformanceOnly site's fork and of another class's
+calibration (both seen in the first test runs). The generation's wrap is
+harmless: it only names the fork a claimer ran out of (a wrap could make a
+worker skip one fork), and the descriptor is matched by the 64-bit
+generation. Keeping the oldest unseen bump's stamp makes a worker that slept
+through several bumps report its whole delay rather than the last bump's.
+
+## ADR-109 ForkStats, the 4x-median fallback, calibration and chaos mode (2026-11-10)
+
+**Decision.**
+- **ForkStats** per site: forks, chunks, inline, threaded, fallbacks and
+  forks run in a fallback window, missed and late wakes, faults, the last
+  and the most participants, and the join (publish to join, the pool's
+  clock) p50, p99, p99.9 over the last 2048 threaded joins and the max
+  over all. The percentiles refresh after the 32nd threaded join, every 64
+  joins and on `RefreshStats()` (a sort of the 2048, every 64 forks).
+  `PoolStats` adds the bumps, wakes, unstamped wakes, the largest wake
+  latency, the workers' chunks and the spins.
+- **Fallback.** A threaded join slower than 4x the site's cached median
+  (from the last refresh) opens a 5 s window on the pool's clock in which
+  the site runs inline (`fallback_forks`), then it retries; each window
+  counts in `fallbacks`. `fallback_factor = 0` turns the rule off (the
+  tests and benches that must stay threaded). The clock is
+  `Config::now_ns` (ProfileNowNs; a test clock in the fallback test).
+- **Calibration.** When the workers start, for each efficiency class among
+  them (fastest first) one dummy fork of 200 chunks per worker of about
+  50 us each (about 10 ms; the caller sizes the chunk from its own speed
+  first and does not claim), which only that class's workers may claim.
+  `Calibrations()` keeps each class's workers, chunks, p50 and max chunk
+  time, wall time and its speed relative to the caller's; the pool logs
+  them. Nothing schedules on them yet: using them (claim weights, which
+  class a site may use) is M16's, with the measurements on a hybrid laptop
+  (docs/gates.md).
+- **Chaos mode** (`Config::chaos_seed`; `SE_CHAOS_SEED`, decimal or 0x hex,
+  read by se_os `ChaosSeedFromEnv`, which the App and the tests' pool
+  configurations use): a seeded permutation of the claim order per fork;
+  a yield before a quarter of the claims; a delay of up to 20 us between
+  a quarter of the claims and their descriptor read, and between a quarter
+  of the batches' last write and their decrement; injected late wakes: a
+  worker waits up to 100 us after an eighth of its wakes before it claims,
+  and the caller sends a quarter of its notifies up to 100 us after the
+  bump (before its own claims, so a fork whose chunks wait for each other
+  cannot deadlock). Results never depend on it.
+
+**Why.** The design's tails (a 29.2 ms forked tick against a 0.53 ms
+median) are why stats keep p99.9 and max, and why a slow join falls back
+rather than hoping. The calibration's results are recorded because the
+only hybrid machine is not here; acting on them without measurements would
+be guesswork.
+
+**Tests** (tests/jobs, `jobs.*`, label unit, every one under TSan in
+linux-clang-tsan): exactly-once chunks and per-item writes for W = 1/3/7
+and no chaos plus the eight seeds of `testing::kChaosSeeds`; visibility of
+one fork's writes in the join and in the next fork on other threads; no
+lost wake (forks of W + 1 chunks that wait for each other, 60 per W and
+seed, and every wake word seen); exceptions (two throwing chunks, the
+pool usable after; a worker's throw reaching the caller); destroying pools
+of 7 workers parked or spinning (a 50 ms spin) joins them all; nested forks
+inline on the worker; per-chunk outputs equal the serial result for W =
+0/1/3/7 and every seed; a PerformanceOnly site uses 1 of 4 workers; the
+stats, the fallback window and its expiry; the spin after predicted forks
+only and never on battery; calibration of two classes on a test host and
+of this machine's one class. Determinism: identical per-tick hashes for W =
+0 and W = 1/3/7 under each of the eight seeds, every site enabled at grain
+2 (8 for the pile-up), on the kernel golden (600 ticks), rampage's sandbox
+golden and the effects, patrol and stress reference scenarios (900 ticks
+each under every W and seed, 3600 at W = 0), and a pile-up of 240
+colliders in one 64 px cell with polled and moving event-driven sources
+(240 ticks, thousands of contacts a tick) whose RenderLists at alpha 0.5
+equal the serial builder's; and the threaded sim driver against the inline
+one at W = 0, 1 and 3 (sim.*). Death tests (label death, the debug
+presets): `death.sink_in_fork` and `death.sink_in_worker_chunk` push an
+AudioEvent from an inline chunk and from a chunk on a worker thread, and
+both end in the not-in-fork assert (the design's "World-level sink use in
+a fork").
+
+## ADR-110 The wake stalls: a soak with stamps, load windows and a canary; they are waits for a processor (2026-11-16)
+
+**Decision.** The design's open risk ("threads woke 12-29 ms late at the
+same instant" in 5 of 29 pool runs) is measured by `se_wake_soak`
+(tests/jobs/wake_soak_main.cc) and gated by `jobs.wake_soak`:
+- **The soak.** A pool of the machine's W_max workers on se_os's
+  ForkWorkers runs 120 frames a second on a precise timer, each with four
+  back-to-back forks of 4 (W + 1) chunks of 25 us, so the first fork of a
+  frame wakes parked workers. `ForkJoinPool::Config::wake_trace` hands
+  every wake to the tool on the worker that woke: the caller's bump stamp
+  (the oldest bump the worker had not seen, taken just before the publish)
+  and the stamp at which the worker saw it, both steady_clock
+  (QueryPerformanceCounter on Windows). The tool also keeps every join's
+  duration and the machine's busy share in each 100 ms window
+  (`ReadSystemCpuTimes`: GetSystemTimes, /proc/stat).
+- **The canary.** Beside the pool runs one thread of the workers' kind
+  (kForkWorker, Qos::kHigh, the workers' cores) that shares nothing with the
+  pool: it sleeps 1 ms at a time on its own PreciseTimer and records how
+  late each wake was. Late for the canary is 1 ms over its median of the
+  run (its usual lateness is the timer's granularity, 0.52 ms here).
+- **Every wake over the bound** (`kLateWakeNs`, 2 ms) is classified:
+  *saturated* (its window 90% busy or more, or the load unreadable),
+  *canary* (the canary was late while it waited), *beside load* (its window
+  between 25% and 90% busy, the canary on time) or *unexplained* (a quiet
+  window, below 25% busy, with the canary on time). The report gives the
+  wakes' p50, p99, p99.9 and max overall, for the quiet windows and for six
+  bands of the busy share, and each stall with its stamp, worker, latency,
+  window load, canary lateness and the other stalls within 1 ms.
+- **The gate.** `jobs.wake_soak` (labels slow and soak, Release builds
+  only, 600 s, run alone) fails when a wake over 2 ms is unexplained;
+  `--strict` fails on any wake over 2 ms and is for a machine known to be
+  idle (docs/gates.md). `jobs.wake_soak_smoke` runs 2 s in every preset,
+  sanitizers included, without the bound.
+- **The battery poll is not fork time.** The once-a-second
+  `WorkerThreads::OnBattery` poll ran between a fork's start stamp and its
+  publish, so it counted in the join (where 100 us of sysfs reads could
+  pass 4x a small site's median and send the site inline for 5 s, once a
+  second) and in the wake latency. The fork's stamp is now taken after the
+  poll (`jobs.The battery poll is not counted in the join`).
+
+**Measured** (2026-11-16, Ryzen 7 7700X, 8 cores and 16 threads, Windows
+11, msvc-release, W = 7; three other agents were building and testing on
+the machine, so its load swung between a few percent and 100%; the owner
+may have been using it). 600 s, 72000 frames, 288000 threaded forks,
+1933689 wakes, none dropped; p50 0.011 ms, p99 0.48 ms, p99.9 6.9 ms, max
+799 ms; 6444 wakes over 2 ms. By the load of the wake's window:
+
+| Window busy | Windows | Wakes | p99 | p99.9 | Max | Over 2 ms |
+|---|---|---|---|---|---|---|
+| 0-10% | 41 | 13705 | 0.16 ms | 0.29 ms | 0.37 ms | 0 |
+| 10-25% | 1333 | 444790 | 0.17 ms | 0.31 ms | 1.18 ms | 0 |
+| 25-50% | 2126 | 705924 | 0.21 ms | 0.42 ms | 5.31 ms | 17 |
+| 50-75% | 233 | 75293 | 0.44 ms | 1.48 ms | 12.4 ms | 50 |
+| 75-90% | 42 | 12333 | 1.56 ms | 6.15 ms | 13.6 ms | 92 |
+| 90-100% | 2222 | 681071 | 1.84 ms | 19.9 ms | 799 ms | 6285 |
+
+Of the 6444: 6285 saturated (in 5023 of them the canary was late too), 86
+with the canary late, 73 beside other load (windows 49% to 89% busy, median
+2.6 ms, at most 12.4 ms, 52 of them with another worker stalled within
+1 ms), 0 unexplained. 827 of the stalls were of the design's 12 to 29 ms,
+351 longer, and 2098 came with another worker's within 1 ms. The canary,
+which never touches the pool, woke up to 197 ms late (p99.9 57.9 ms) in the
+same run. In the quiet windows (137 s of the run, 458495 wakes) the p99.9
+was 0.31 ms and the longest wake 1.18 ms. An earlier 600 s run the same day
+(39% busy on average, before the bands were reported) had 3011 wakes over
+2 ms: 2763 saturated, 163 with the canary late and 85 in windows 42% to 89%
+busy, none in a quieter window.
+
+A third 600 s run, `--strict`, with no build on the machine (2026-11-16;
+the owner's other programs took 17% of the CPU on average, in bursts of up
+to 78% of a 100 ms window): 2003894 wakes, none dropped; p50 0.010 ms, p99
+0.16 ms, p99.9 0.29 ms, max 2.97 ms. Six wakes were over 2 ms (2.0 to
+3.0 ms), all in windows 27% to 78% busy, three of them with the canary late
+too, none unexplained; the 1731767 wakes in windows below 25% busy took at
+most 1.93 ms. None of the design's 12 to 29 ms stalls appeared without the
+builds. `--strict` fails on the six, so the idle gate stays pending.
+
+**The explanation.** The stalls are waits for a processor, not the wake
+protocol:
+- The protocol cannot lose a bump (ADR-108; `jobs.No woken worker sleeps
+  through its bump` under TSan and the eight chaos seeds), and both stamps
+  bracket only the caller's notify, the OS making the worker runnable and
+  the worker's first instructions.
+- The workers run at the default priority (the design's HighQoS only
+  forbids throttling). A thread that becomes ready gets a processor at once
+  when one is idle; when every processor it may use runs another thread of
+  its priority, it waits in a ready queue, for as long as a scheduler
+  quantum. So a wake stalls exactly when other work holds the processors at
+  that instant, which is what the bands show: no wake over 2 ms in 458495
+  wakes while the machine was below 25% busy, 0.002% of them at 25-50%,
+  0.07% at 50-75%, 0.75% at 75-90% and 0.92% at 90% or more; several
+  workers stall at the same instant because they become ready at the same
+  instant; and a thread that only sleeps on a timer is late in the same
+  moments. A busy share over 100 ms cannot show that the processors were
+  all taken for the few milliseconds of one stall, which is why the stalls
+  beside 25-90% load are reported as such and not as explained.
+- The design's 12-29 ms fits a wait of up to a quantum (on Windows client
+  a quantum is two clock intervals, about 31 ms at the default 15.6 ms
+  interval, and longer for the foreground process); its pool runs took most
+  of the machine's cores beside whatever else ran, and its two-thread runs
+  left processors free. That part is an inference from the load dependence,
+  not a trace.
+
+**Consequences.** With the machine to itself the pool's wakes are bounded
+(1.18 ms at most over 137 s of quiet windows; a whole 600 s `--strict` run
+on an idle machine is a gate in docs/gates.md). On a machine other work
+loads, a fork's join can wait a quantum for a worker: that is what the
+4x-median fallback is for (ADR-109), what `ForkStats::late_wakes` and
+`missed_wakes` count, and what M16's per-site soak must measure before a
+site is enabled. Raising the workers' priority would let them preempt
+other processes' work; the design does not ask for it and nothing here
+decides it. Every site stays disabled.
+
+**Not done here.** A kernel trace naming the thread that held each
+processor during a stall (the design's "ETW/WPR"): `wpr.exe` is on the
+machine but recording needs an elevated prompt, which the agent does not
+have, and the Windows Performance Analyzer is not installed (docs/gates.md
+has the commands). The Tracy GUI is not installed either.
+
+**Deviation.** The spec's alternatives are "explain stalls seen" or "no
+wake over 2 ms in the soak". The soak does both in part: no wake over 2 ms
+in its quiet windows, and every stall elsewhere attributed to measured load
+(saturated, or the canary late) or reported beside it; the run was not on
+an idle machine, so the whole-run bound and the trace remain gates.
+
+## ADR-111 Dumps of the editor's Play replay with their edits; an idle App is not a hang (2026-11-16)
+
+**Decision.** The integration of M12 with M10 (docs/milestone-specs.md
+"Integration (M10a + M10b + M12 + M14)"):
+
+- **The session header follows the editor's mode.** The process has one
+  session header (ADR-106). The editor begins it again at every change:
+  at boot and at Stop with `kSessionFlagNoSession` (flags bit 1: no session
+  runs, nothing to replay), at Play with `kSessionFlagPlayStart` (bit 0),
+  the session's seed, tick rate and build, start tick 1, the dump ring's
+  head as its first frame, the hash of the Play-start bytes as its scene
+  hash and the document's name as its scene. `SessionHeaderInfo` gained
+  `flags`; the record's `flags` field was reserved (0) until now, so a
+  game's header is unchanged. The Play session's SimDriver latches its
+  InputFrames into the process's dump ring (`PlaySession::
+  AttachInputRing`), and the editor publishes the last tick's hash after
+  each frame's ticks, as the App does for a game.
+- **The Play-start stream is the session's replay file without frames.**
+  M12 registered "the Play-start bytes" (stream 0x53450006, kind 7) and
+  left their use to this integration. A hang dump must replay to the
+  hanging tick, and a Play session is its start bytes, its InputFrames and
+  its SessionLog (every edit made during Play, each against a tick): the
+  start bytes alone replay only a session nobody edited. So the stream
+  holds `PlaySession::DumpBytes()`: a replay file (se_sim/replay.h) of the
+  session's header, the Play-start bytes and the SessionLog so far, with
+  no frames and no hashes (the ring and the header carry those). The
+  editor attaches it when Play starts and again, before the frame's ticks,
+  whenever the SessionLog has gained an entry (`PlayStartStream::Attach`
+  replaces the bytes and reuses crashpad's entry; a copy of the scene's
+  bytes, tens of kilobytes, on frames with an edit), and withdraws it at
+  Stop. read_dump.py still shows the stream as bytes.
+- **se_replay --from-dump replays editor sessions.** The reader takes the
+  stream (a withdrawn one is an entry without bytes: none). For a header
+  with `kSessionFlagPlayStart` it opens the stream as a replay file,
+  writes the start bytes to `--start-scene FILE` (default
+  `DUMP.play-start.scene.json`), runs them as the scene with the
+  SessionLog applied and the ring's frames as input, to main's breadcrumb
+  tick, and checks the published hash, exactly as for a game. A header
+  with `kSessionFlagNoSession` is reported as nothing to replay; a Play
+  header without the stream is an error.
+- **Idle is not a hang.** The editor idles in Edit mode after 1 s without
+  input: SDL calls no iterate until an event arrives, so main's iterate
+  counter stands still by design, and M12's watchdog, merged unchanged,
+  declared a hang after 5 s of it. The App now raises the watchdog's
+  suspended flag when an iterate returns to SDL in Idle and drops it when
+  the next callback starts (an event or an iterate), so the wait itself is
+  excused and nothing inside a callback is: a hang in the frame after the
+  wake is declared as before. No new watchdog input: to the watchdog an
+  App that waits for events by design is what a Suspended one is. The
+  wait's start and end are logged at debug level ("idle: waiting for
+  events", "idle: the wait ended after X s").
+- **Known long work in the editor.** Opening a document and starting Play
+  (the serializer round trip into the play World) run on main inside
+  `App::KnownLongWork` scopes (ADR-105's heartbeat), as M12 intended for
+  M10's loads. Extra OS windows of ImGui's multi-viewports are presented
+  inside a `DriverWaitScope`.
+- **The flight-recorder button** of the Profiler panel asks the crash
+  handler for a dump of the process as it is (`integration::
+  RequestFaultDump`): the breadcrumbs, the log rings, the InputFrame ring,
+  the session header and, in Play, the Play-start stream.
+
+**Why.** The spec's exit for this step is "a hang in editor Play dumps and
+the editor-session replay reaches the hanging tick". Without the
+SessionLog in the dump that holds only for sessions without edits, and an
+editor's sessions are the ones with edits. Reusing the replay file format
+means the dump path and the `last-play.sereplay` path (ADR-097) read the
+same bytes with the same reader, and adds no stream type. The idle rule
+is the smallest one that keeps both milestones' contracts: M10's Idle
+stays a real `waitevent` (no timer wake-ups to feed the watchdog), and
+M12's rule "nothing but Suspended, Modal, known long work and a debugger
+excuses a hang" stays true for every callback.
+
+**Consequences.** A dump taken between an edit and the next frame's ticks
+(the edit queued, the stream not yet attached again) replays without that
+edit; the edit applies at a tick boundary, so the published hashes up to
+the dump still match. An App that is flagged idle and never woken is not
+watched: SDL's event wait is trusted, as its Suspended wait is. A second
+Play in one process begins a new session in the header (its session
+number grows) whose frames follow the earlier session's in the ring.
+
+**Checked by.** `crash.editor_play_hang` (label desktop): simple_editor
+with `--hang-test after-ticks:240` and tests/editor/scripts/
+play_hang.editor (an edit while running, one while paused, three steps),
+the dump within 6 s of the hang's start, its header (flag 1) and
+Play-start stream decoded by read_dump.py, `se_replay --from-dump`
+reaching tick 240 with tick 239's hash matching. `editor.A dump taken
+during Play replays to its tick, edits included` and `editor.A Play dump
+without its start, or from Edit mode, says so` (every platform, on a
+synthetic minidump of the real streams; the first also shows that the
+replay diverges without the SessionLog). `editor.desktop.idle_watchdog`:
+4 s of Idle at a 200 ms watchdog period (a hang would be 1 s), no hang,
+then WM_CLOSE ends the wait and the editor quits. The script verb
+`expect-dump-stream` in `editor.script.panels`.
+
+## ADR-112 The panels in the editor: one frame's contract, the World in the Viewport, parallel time (2026-11-16)
+
+**Decision.** What the integration settled between M10a's shell, M10b's
+panels and M14's pool:
+
+- **simple_editor docks the panels.** apps/editor links se_editor_panels
+  and hands `MakeDefaultPanels()` to `Editor::AddPanel`, one by one. The
+  seeded layout (a pref directory without a saved one): Hierarchy left,
+  Viewport in the centre, Log, Profiler and Schedule at the bottom,
+  Inspector, Stress generator and Scene settings right, with the shell's
+  own Play and Document panels above them. A dock node shows the tab of
+  the window that had the focus when a frame ended, so the layout's first
+  tabs (Play, Log, Inspector, Hierarchy, Viewport) are focused one a frame
+  after the seeding. M10a's Play and Document panels stay: they are the
+  transport controls and the document's state, which no M10b panel shows.
+- **Play.Faulted keeps the selection.** panel.h said that in Play.Faulted
+  both `commands` and `play_edits` are null, which left a faulted World
+  with a frozen selection: the Hierarchy could not select what the
+  Inspector should show. The context now keeps `play_edits` in
+  Play.Faulted for its `Select` only; `Submit` logs and drops the command
+  (the panels' EditSink already refuses edits when `faulted`). The World
+  stays read-only and becomes inspectable entity by entity.
+- **The World is drawn in the Viewport panel.** While a panel asks
+  EditorViewports for a target, the editor sends the World's layers into
+  that target and none into the composite, which shows the clear colour
+  behind the UI. `ExtensionFrame` gained `readback`: the target the
+  `--readback` test hooks read instead of the composite, set by the editor
+  to its first viewport, so the desktop tests still check the World's
+  pixels.
+- **Parallel time is measured by the Schedule.** The Schedule panel is to
+  show serial and parallel time per phase; EditorStats had no such number.
+  `ForkJoinPool::ThreadedJoinNs()` is the sum of every threaded fork's
+  publish-to-join time (owner data, one add per threaded join), the
+  Schedule reads it before and after each system and keeps the difference
+  as `SystemStats::last_fork_ns`, and the editor sums it by phase into
+  `EditorStats::phase_parallel_ns`. A phase's serial time is its systems'
+  time minus that. Inline forks (every site disabled, the shipped state)
+  count as serial time: parallel is 0. A context without the measurement
+  (the span empty) shows "n/a" once a site is enabled, as before.
+- **ForkStats come from the pool's records.** `Editor::FillForkStats`
+  copies `ForkJoinPool::Sites()` (name, enabled, the fallback window only
+  while it is open on the pool's clock, the ForkStats) and
+  `ActiveWorkers()` into EditorStats every frame. The records are the tick
+  owner's data; the editor ticks inline, so between ticks they are main's.
+  Sites exist once a system has used them, so the tables fill at the
+  first Play.
+- **Script verbs for the panels.** `show-panel NAME`, `expect-panel NAME`
+  (it drew in the last frame), `expect-viewport [yes|no|window]`,
+  `expect-fork-sites N` (at least N listed, none enabled, no worker) and
+  `expect-dump-stream [yes|no]`.
+- **tools/lint/run_lint.py batches its files.** clang-format and cpplint
+  got every file on one command line; with the editor's files that passed
+  Windows' 32767 characters in a longer checkout path. They now run in
+  batches of at most 24000 characters; every file is still checked and
+  the first failing batch's code is the result.
+
+**Why.** Each item is the smallest change that makes the merged parts one
+editor: the Faulted rule is what "the World stays inspectable" needs, the
+readback target keeps M10a's pixel check meaningful once the World moved
+into a panel, and the parallel time had to be measured where a system's
+time is measured to be attributable to a phase (the pool does not know
+phases; site names are not system names).
+
+**Consequences.** `Schedule::Step` reads one more counter twice per
+system. A panel that is not the visible tab of its dock node does not
+draw (ImGui's Begin returns false): M10b's stress generator spreads an
+Edit-mode press over frames inside one coalesce scope, so hiding its tab
+in the middle of a press holds the scope open until the tab shows again
+(M10b's open issue; M11's prefab work revisits the generator). The
+composite readback of an editor with a visible Viewport panel is one
+colour by design.
+
+**Checked by.** `editor.script.panels` (headless) and
+`editor.desktop.panels` (a window: `--readback` of the Viewport's target
+is not one colour, the log names the viewport); the existing
+`editor.desktop.*` and `editor.script.*` tests now run with the panels
+docked. `jobs.The Schedule tells a system's time inside threaded forks`
+(W = 0: no parallel time; W = 3: the systems' parts add up to the pool's
+total; TSan in WSL). `editor_panels.*` unchanged (60 tests).
+
+## ADR-113 Review fixes: textures held past the re-present, the overlay fits its swapchain, Play game input by the view, the open prompt, DebugDraw slices (2026-11-16)
+
+**Context.** The adversarial review of M10, M12 and M14 (findings R1 to
+R10) found defects the tests did not cover. Five of them change a
+contract between modules and are recorded here.
+
+**Decision.**
+- **A frame with an overlay holds the textures it retires (R1).** HalfRate's
+  re-present (`Renderer2D::RepresentLast`) draws the last frame's
+  SwapchainOverlay again after that frame's submit ran the retire queue.
+  ImGui's draw data was built before the frame, so a viewport resized in
+  the frame (always the case when the Viewport panel's target is created
+  again) left it naming a released texture: an assert in the editor's
+  debug wrapper, a released SDL_GPUTexture bound in Release.
+  `GpuResources::HoldRetiredTextures(bool)` makes every texture retired
+  while it is on a held entry that `RunRetireQueue` skips;
+  `ReleaseHeld()` returns them to the queue. `Renderer2D::Frame` releases
+  the last frame's held textures at its start (they go at its submit) and
+  holds this frame's when it has an overlay; device loss and teardown
+  release everything. Only textures are held (the draw data names nothing
+  else), for one frame. `ViewportTarget::RequestSize` still applies in the
+  next `Frame()`: the draw data then shows the old texture, at its old
+  content, for that one frame, which is valid now; moving the resize to the
+  editor's frame start would need the editor to drive the renderer's
+  target list, which is not worth a contract change once the texture is
+  held.
+- **The ImGui overlay fits the swapchain it is given (R2).** ImGui reads
+  the window's size at NewFrame; another process that grows the window
+  (snap and tiling tools, a display change) makes it larger than the
+  swapchain SDL still has, for a frame, and the backend's viewport then
+  exceeds the render target (SDL's debug-mode assert). `ImGuiRenderer::Draw`
+  crops: `FitDisplayToTarget` shrinks each axis of the display that does
+  not fit for that draw only (the projection keeps ImGui's pixels in place,
+  the backend clamps every scissor to the smaller framebuffer), and
+  restores it after. `RendererStats::cropped_draws` counts it.
+- **In 'Play game' the view decides where the input goes (R3).** The editor
+  handed an event to the game only when ImGui did not want it; the Viewport
+  panel is an ImGui window, so ImGui wanted the mouse over it and, with
+  keyboard navigation on, the keyboard while it had the focus: the game
+  never got a key. `EditorViewports::ReportInput(focused, hovered)` is the
+  panel's report, every frame it draws (its window has the focus, the mouse
+  is over the view); `PanelContext::play_game` tells the panel, which then
+  marks its items `ImGuiItemFlags_NoNav` so navigation does not act on the
+  game's keys. `Editor::OnEvent` still feeds ImGui every event, and in
+  'Play game' gives the game the keyboard and the gamepad while the view
+  was focused in the last UI frame, the mouse while it was hovered, and
+  every release always (a key let go after the focus moved must not stay
+  held; the InputService ignores a release of nothing held). The frame's
+  ticks latch the InputService while the view is focused or hovered.
+  Headless there is no view: the game has the input, as before. Starting
+  'Play game' focuses the reporting panel's window, so play starts with
+  the keys in the game.
+- **File > Open waits for the unsaved-changes prompt (R4).** Opening over a
+  dirty document replaced it without a word. The open now waits for a
+  modal like the quit's: Save submits the save through the lane and opens
+  once no document save is in flight (a failed save, or a change made
+  meanwhile, calls the open off); Don't Save opens at once (an autosave's
+  recovery file stays, as at a quit without saving); Cancel keeps the
+  document. A quit drops a waiting open.
+- **A stale autosave removes its recovery file (R5).** The lane does not
+  complete in submission order: an autosave submitted before a save could
+  land after it and leave a recovery file holding older content. The editor
+  keeps the revision of the last completed save since the document opened;
+  a recovery write that completes at or below it removes the file.
+- **A failed script fails the process in every build (R6).** SDL's main
+  returns the result of the callback that ended the loop, not
+  `SdlAppQuit`'s, so `App::Iterate` now returns `SDL_APP_FAILURE` at the
+  quit when the extension reports `ExitFailure()`.
+- **Commands take their start when they first apply (R7).**
+  `SetComponentCommand` reads its before value, and `PathPointCommand`
+  makes its edit again on the current path (before and after), at the
+  first `Apply`; redo reuses them. Two commands made from one World in one
+  frame are each undone to their own start, and two path inserts made from
+  one World both land.
+- **M14's per-chunk DebugDraw slices exist (R10).** ADR-107 recorded them as
+  missing for want of a DebugDraw sink. se_core/debug_draw.h adds the sink:
+  `DebugDraw`, a World-level buffer of debug primitives (lines, boxes and
+  points in world units with a colour) whose writes assert not-in-fork, and
+  `jobs::DebugDrawSlices`, one `ChunkOutputs` arena per chunk that a chunk
+  draws into through its `DebugDrawSlice` and the owner merges into the
+  sink in chunk order after the join. No system draws yet and nothing
+  renders the primitives: a viewer (the Viewport's overlays, a debug layer)
+  reads `Primitives()` when one wants them. The wake-stall soak on an idle
+  machine and the kernel trace stay open gates.md rows (ADR-110): they
+  need the owner's machine to themselves.
+
+**Why.** R1 and R2 are crashes of the editor under ordinary desktop use; R3
+leaves the spec's 'Play game' input item unmet; R4 and R5 lose or misstate
+the user's work. Each fix is the smallest that closes the defect at its
+cause: the overlay's data outlives the frame by design (RepresentLast), so
+its textures must too; the swapchain size is the one the frame acquired,
+so the overlay must fit it; the view is where the game is, so the view
+must decide.
+
+**Consequences.** A frame with an overlay keeps a resized or reloaded
+texture one frame longer. During a window grow the UI is cropped for one
+frame instead of aborting. In 'Play game' hovering the view gives the game
+the mouse (window coordinates, as rampage's InputService has them), and the
+view's toolbar takes no keyboard navigation. New script verbs: `push-key
+KEY [up]` (an SDL key event, never OS input), `expect-game-keyboard`,
+`answer-open save|discard|cancel`, `expect-open-prompt`, `wait-saves`,
+`wait-autosave`; run_editor.py gained `--expect-edges N` and
+`--expect-script-failure`; the panel test harness `SetFirstWidth`.
+
+**Checked by.** `render_desktop.*.RepresentLast's overlay outlives a
+viewport resized in the frame` and `render_desktop.*.ImGui's overlay crops
+to a swapchain smaller than its display` (both fail on the old code: the
+release log check and SDL's viewport assert), `editor.The overlay's display
+is cropped only where it does not fit`, `editor.desktop.play_game_input`
+(four edges in the session's replay; none while the Inspector has the
+focus), `editor.script.open_dirty`, `editor.script.autosave_after_save`,
+`editor.script.failure_exit_status` (each fails on the old code),
+`editor.Commands of one frame undo to their own start` and
+`editor_panels.The effect drawer's headers keep to their columns when
+narrow` (R9: the headers are cut to their columns), `jobs.DebugDraw slices
+merge in chunk order for every W` (W = 0, 1, 3, 7 and the chaos seeds;
+TSan in WSL) and `death.debug_draw_in_fork`.

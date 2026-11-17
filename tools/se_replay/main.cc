@@ -11,7 +11,32 @@
 //             [--legacy-rules v1|v2] [--root DIR] [--ticks N]
 //             [--inputs FILE] [--seed S] [--fixed-frame-dt MS]
 //             [--jitter-ms MS] [--hash-out FILE] [--projection-out FILE]
-//             [--record FILE] [--expect-golden NAME]
+//             [--record FILE] [--jobs W] [--expect-golden NAME]
+//   se_replay --from-dump DUMP [--root DIR] [--hash-out FILE]
+//             [--start-scene FILE]
+//
+// --jobs W runs the session on a threaded ForkJoinPool of W workers with
+// every fork site enabled (M14); the hashes do not depend on W, and
+// --det-crosscheck still steps its clones serially.
+//
+// --from-dump (M12) reads a crash or hang dump's session header and
+// InputFrame ring (tools/se_replay/dump_session.h, the layout read_dump.py
+// decodes) and replays the session headless up to main's breadcrumb tick:
+// the ticks before it when main was inside it (a hang or a crash in a
+// tick), through it when it had finished. The scene comes from --root
+// (default the repository), and must hash as the dump's did; the dump's
+// last published tick hash is checked. It prints the tick reached, the
+// hashes of the last ticks before it and whether the check passed;
+// --hash-out writes every tick's hash. A dump taken during the editor's
+// Play carries the session's Play-start bytes and SessionLog (ADR-111):
+// the bytes are written to --start-scene FILE (default DUMP.play-start.
+// scene.json) and run as the scene, with the log's edits applied; a dump
+// from Edit mode has nothing to replay.
+//
+// With --inputs, the replay's SessionLog is applied (an editor Play
+// session's edits and markers, M10a), and --start-scene FILE writes the
+// replay's start bytes to FILE and runs them as the scene: an editor Play
+// session starts from the document as its Play serialized it.
 //
 // --module rampage also takes --edges-out FILE: with --inputs, every recorded
 // edge as a line "tick action down|up stamp_ns order source" (sources as
@@ -50,6 +75,7 @@
 #include <fstream>
 #include <iterator>
 #include <optional>
+#include <span>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -60,15 +86,21 @@
 #include "game_rampage/projection.h"
 #include "rampage/support/rampage_session.h"
 #include "rampage/support/seinput.h"
+#include "se_core/breadcrumb.h"
 #include "se_core/core_components.h"
+#include "se_core/dump_stream.h"
 #include "se_core/fp.h"
 #include "se_core/guid.h"
 #include "se_core/input_frame.h"
+#include "se_core/jobs.h"
+#include "se_core/sim_clock.h"
 #include "se_core/thread_role.h"
 #include "se_core/types.h"
 #include "se_core/world.h"
+#include "se_replay/dump_session.h"
 #include "se_sim/game_state.h"
 #include "se_sim/replay.h"
+#include "support/fork_config.h"
 #include "support/golden.h"
 #include "support/kernel_session.h"
 #include "support/kernel_test_module.h"
@@ -94,9 +126,11 @@ struct Args {
   std::string projection_out;
   std::string record;
   std::string edges_out;
+  std::string start_scene;
   std::uint32_t det_crosscheck = 0;
   int jobs = 0;
   std::string expect_golden;
+  std::string from_dump;
 };
 
 void Usage() {
@@ -111,7 +145,10 @@ void Usage() {
                "[--record FILE]\n"
                "                 [--det-crosscheck K] [--jobs W] "
                "[--expect-golden NAME]\n"
-               "                 [--edges-out FILE]\n");
+               "                 [--edges-out FILE] [--start-scene FILE]\n"
+               "       se_replay --from-dump DUMP [--root DIR] "
+               "[--hash-out FILE]\n"
+               "                 [--start-scene FILE]\n");
 }
 
 std::optional<Args> Parse(int argc, char** argv) {
@@ -153,12 +190,16 @@ std::optional<Args> Parse(int argc, char** argv) {
       args.record = value;
     } else if (flag == "--edges-out") {
       args.edges_out = value;
+    } else if (flag == "--start-scene") {
+      args.start_scene = value;
     } else if (flag == "--det-crosscheck") {
       args.det_crosscheck = static_cast<std::uint32_t>(std::stoul(value));
     } else if (flag == "--jobs") {
       args.jobs = std::stoi(value);
     } else if (flag == "--expect-golden") {
       args.expect_golden = value;
+    } else if (flag == "--from-dump") {
+      args.from_dump = value;
     } else {
       std::fprintf(stderr, "se_replay: unknown flag %s\n", argv[i - 1]);
       return std::nullopt;
@@ -221,6 +262,14 @@ std::optional<std::vector<std::byte>> SeinputAsReplay(const std::string& path) {
   for (const InputFrame& frame : *frames) recorder.Record(frame);
   recorder.RecordSession(SessionLog());
   return recorder.Finish();
+}
+
+// The session's ForkJoinPool: inline without --jobs; with --jobs W, W
+// workers and every fork site enabled at its own grain (M14; SE_CHAOS_SEED
+// turns the pool's chaos mode on). The hashes are the same either way.
+jobs::ForkJoinPool::Config PoolFor(const Args& args) {
+  if (args.jobs <= 0) return {};
+  return testing::ForkTestConfig(args.jobs);
 }
 
 // Writes the per-tick hashes, then checks the hashes a replay recorded and
@@ -294,6 +343,7 @@ int RunRampage(const Args& args) SE_REQUIRES(g_main) SE_EXCLUDES(g_sim_owner) {
   }
   options.seed = args.seed;
   options.record = !args.record.empty();
+  options.pool = PoolFor(args);
   if (args.frame_dt_ms > 0.0) {
     options.hz = 1000.0 / args.frame_dt_ms;
     options.jitter_sec = args.jitter_ms / 1000.0;
@@ -328,6 +378,19 @@ int RunRampage(const Args& args) SE_REQUIRES(g_main) SE_EXCLUDES(g_sim_owner) {
       input_ticks = reader->Frames().size();
       options.input = &*reader;
       if (reader->Header().seed != 0) options.seed = reader->Header().seed;
+      const std::span<const std::byte> session = reader->SessionBytes();
+      options.session.assign(session.begin(), session.end());
+      if (!args.start_scene.empty()) {
+        // An editor Play session: the scene is what Play serialized.
+        const std::span<const std::byte> start = reader->StartBytes();
+        if (!WriteFile(args.start_scene,
+                       std::vector<std::byte>(start.begin(), start.end()))) {
+          std::fprintf(stderr, "se_replay: cannot write %s\n",
+                       args.start_scene.c_str());
+          return 2;
+        }
+        options.scene.path = args.start_scene;
+      }
     }
   }
   if (!args.edges_out.empty()) {
@@ -381,7 +444,115 @@ int RunRampage(const Args& args) SE_REQUIRES(g_main) SE_EXCLUDES(g_sim_owner) {
   return status;
 }
 
+// --from-dump: the session of a crash or hang dump, replayed headless.
+int RunFromDump(const Args& args) SE_REQUIRES(g_main) SE_EXCLUDES(g_sim_owner) {
+  const std::optional<std::vector<std::byte>> bytes = ReadFile(args.from_dump);
+  if (!bytes) {
+    std::fprintf(stderr, "se_replay: cannot read %s\n", args.from_dump.c_str());
+    return 2;
+  }
+  auto session = replay::ReadDumpedSession(*bytes);
+  if (!session) {
+    std::fprintf(stderr, "se_replay: %s: %s\n", args.from_dump.c_str(),
+                 session.error().message.c_str());
+    return 2;
+  }
+  const SessionHeaderRecord& header = session->header;
+  const auto text = [](const char* field, std::size_t size) {
+    std::string out(field, size);
+    out.resize(out.find('\0') == std::string::npos ? size : out.find('\0'));
+    return out;
+  };
+  std::fputs(
+      std::format(
+          "se_replay: dump of session {} of '{}': scene {}, seed {}, {} Hz, "
+          "from tick {}, built by {} ({}, {}); {} frames in the ring; "
+          "main's breadcrumb {}\n",
+          header.session, text(header.module, sizeof(header.module)),
+          text(header.scene, sizeof(header.scene)), header.seed,
+          header.tick_rate, header.start_tick,
+          text(header.build, sizeof(header.build)),
+          text(header.platform, sizeof(header.platform)),
+          text(header.compiler, sizeof(header.compiler)),
+          session->frames.size(),
+          session->main_live
+              ? std::format("tick {}, phase {}, system {}, chunk {}",
+                            session->main.tick, session->main.phase,
+                            session->main.system, session->main.chunk)
+              : std::string("(main had no live slot)"))
+          .c_str(),
+      stdout);
+  if (MakeReplayHeader({}, 0, kDefaultTickRate).math_hash != header.math_hash) {
+    std::fputs(
+        "se_replay: warning: the dump's math self-test hash differs from "
+        "this build's\n",
+        stderr);
+  }
+  const std::string root =
+      args.root.empty() ? testing::RampageRepoRoot() : args.root;
+  // An editor Play session starts from the dump's Play-start bytes, written
+  // next to the dump unless --start-scene names a file.
+  const bool editor_play = (header.flags & kSessionFlagPlayStart) != 0;
+  const std::string start_scene =
+      !editor_play ? std::string()
+                   : (args.start_scene.empty()
+                          ? args.from_dump + ".play-start.scene.json"
+                          : args.start_scene);
+  if (editor_play) {
+    std::fputs(std::format("se_replay: an editor Play session: its Play-start "
+                           "stream ({} bytes) goes to {}\n",
+                           session->play_start.size(), start_scene)
+                   .c_str(),
+               stdout);
+  }
+  const replay::FromDumpResult result =
+      replay::ReplayDumpedRampage(*session, root, start_scene);
+  if (result.hashes.empty() && !result.error.empty()) {
+    std::fprintf(stderr, "se_replay: --from-dump: %s\n", result.error.c_str());
+    return 2;
+  }
+  if (!args.hash_out.empty()) {
+    std::ofstream out(args.hash_out, std::ios::trunc);
+    for (std::size_t i = 0; i < result.hashes.size(); ++i) {
+      out << std::format("{} {:016x}\n", header.start_tick + i,
+                         result.hashes[i]);
+    }
+  }
+  const std::size_t shown = std::min<std::size_t>(result.hashes.size(), 8);
+  for (std::size_t i = result.hashes.size() - shown; i < result.hashes.size();
+       ++i) {
+    std::fputs(std::format("se_replay:   tick {} hash {:016x}\n",
+                           header.start_tick + i, result.hashes[i])
+                   .c_str(),
+               stdout);
+  }
+  std::fputs(
+      std::format("se_replay: replayed ticks {} to {}; reached tick {} (main's "
+                  "breadcrumb), {}\n",
+                  header.start_tick, result.last_tick, result.breadcrumb_tick,
+                  result.inside_tick ? "inside which main stopped"
+                                     : "which had finished")
+          .c_str(),
+      stdout);
+  if (!result.error.empty()) {
+    std::fprintf(stderr, "se_replay: --from-dump: %s\n", result.error.c_str());
+    return 1;
+  }
+  if (result.checked_tick > 0) {
+    std::fputs(
+        std::format("se_replay: tick {}'s hash {:016x} matches the "
+                    "dump\n",
+                    result.checked_tick, result.hashes[result.checked_tick - 1])
+            .c_str(),
+        stdout);
+  } else {
+    std::fputs("se_replay: the dump published no tick hash to check\n", stdout);
+  }
+  return 0;
+}
+
 int Run(const Args& args) SE_REQUIRES(g_main) SE_EXCLUDES(g_sim_owner) {
+  if (!args.from_dump.empty()) return RunFromDump(args);
   if (args.module == "rampage") return RunRampage(args);
   if (args.module != "kernel_test") {
     std::fprintf(stderr, "se_replay: unknown module '%s'\n",
@@ -405,14 +576,8 @@ int Run(const Args& args) SE_REQUIRES(g_main) SE_EXCLUDES(g_sim_owner) {
                  "replay carries its own session log\n");
     return 2;
   }
-  if (args.jobs > 0) {
-    std::fprintf(stderr,
-                 "se_replay: --jobs %d accepted; the threaded pool arrives in "
-                 "M14, so forks run inline\n",
-                 args.jobs);
-  }
-
   testing::KernelSessionOptions options;
+  options.pool = PoolFor(args);
   options.seed = args.seed;
   options.edits_path = args.edits;
   options.det_crosscheck = args.det_crosscheck;

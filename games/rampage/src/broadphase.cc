@@ -9,6 +9,7 @@
 #include <span>
 #include <vector>
 
+#include "se_core/jobs.h"
 #include "se_core/types.h"
 
 namespace se::rampage {
@@ -81,56 +82,74 @@ SpatialHash::CellRange SpatialHash::RangeOf(const Aabb& box) const noexcept {
   return range;
 }
 
+void SpatialHash::AppendCells(const Aabb& box, std::uint32_t index,
+                              std::vector<Entry>& entries,
+                              std::vector<std::uint32_t>& oversized) const {
+  const CellRange range = RangeOf(box);
+  if (range.oversized) {
+    oversized.push_back(index);
+    return;
+  }
+  for (std::int64_t x = range.x0; x <= range.x1; ++x) {
+    for (std::int64_t y = range.y0; y <= range.y1; ++y) {
+      entries.push_back(Entry{KeyOf(x, y), index});
+    }
+  }
+}
+
+// (key, index) pairs are unique, so the order is total and never depends on
+// the order the entries were appended in.
+void SpatialHash::SortEntries() {
+  std::sort(entries_.begin(), entries_.end(),
+            [](const Entry& a, const Entry& b) {
+              return a.key != b.key ? a.key < b.key : a.index < b.index;
+            });
+}
+
 void SpatialHash::Build(std::span<const Aabb> boxes) {
   entries_.clear();
   oversized_.clear();
   count_ = static_cast<std::uint32_t>(boxes.size());
   for (std::uint32_t i = 0; i < count_; ++i) {
-    const CellRange range = RangeOf(boxes[i]);
-    if (range.oversized) {
-      oversized_.push_back(i);
-      continue;
-    }
-    for (std::int64_t x = range.x0; x <= range.x1; ++x) {
-      for (std::int64_t y = range.y0; y <= range.y1; ++y) {
-        entries_.push_back(Entry{KeyOf(x, y), i});
-      }
-    }
+    AppendCells(boxes[i], i, entries_, oversized_);
   }
-  std::sort(entries_.begin(), entries_.end(),
-            [](const Entry& a, const Entry& b) {
-              return a.key != b.key ? a.key < b.key : a.index < b.index;
-            });
-  if (stamp_.size() < count_) stamp_.resize(count_, 0);
+  SortEntries();
 }
 
-void SpatialHash::Query(const Aabb& box, std::vector<std::uint32_t>& out) {
+void SpatialHash::Assemble(std::uint32_t count,
+                           const jobs::ChunkOutputs<Entry>& entries,
+                           const jobs::ChunkOutputs<std::uint32_t>& oversized) {
+  entries_.clear();
+  oversized_.clear();
+  count_ = count;
+  entries.AppendTo(entries_);
+  oversized.AppendTo(oversized_);
+  SortEntries();
+}
+
+void SpatialHash::Query(const Aabb& box,
+                        std::vector<std::uint32_t>& out) const {
   out.clear();
   const CellRange range = RangeOf(box);
   if (range.oversized) {
     for (std::uint32_t i = 0; i < count_; ++i) out.push_back(i);
     return;
   }
-  if (++generation_ == 0) {
-    std::fill(stamp_.begin(), stamp_.end(), 0);
-    generation_ = 1;
-  }
-  const auto add = [this, &out](std::uint32_t index) {
-    if (stamp_[index] == generation_) return;
-    stamp_[index] = generation_;
-    out.push_back(index);
-  };
   for (std::int64_t x = range.x0; x <= range.x1; ++x) {
     for (std::int64_t y = range.y0; y <= range.y1; ++y) {
       const std::uint64_t key = KeyOf(x, y);
       auto it = std::lower_bound(
           entries_.begin(), entries_.end(), key,
           [](const Entry& entry, std::uint64_t k) { return entry.key < k; });
-      for (; it != entries_.end() && it->key == key; ++it) add(it->index);
+      for (; it != entries_.end() && it->key == key; ++it) {
+        out.push_back(it->index);
+      }
     }
   }
-  for (const std::uint32_t index : oversized_) add(index);
+  out.insert(out.end(), oversized_.begin(), oversized_.end());
+  // Ascending, each once (a box in several of the cells comes up in each).
   std::sort(out.begin(), out.end());
+  out.erase(std::unique(out.begin(), out.end()), out.end());
 }
 
 }  // namespace se::rampage

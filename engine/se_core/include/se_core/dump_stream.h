@@ -44,6 +44,33 @@
 //                          once it is complete
 //     8  InputFrame frame  (its layout is pinned below)
 //
+//   SessionHeaderRecord  kind 6 (M12), one record, 512 bytes: what a replay
+//   of the session needs (se_core/session_header.h)
+//     0  u64 stamp         seqlock: odd while the record is rewritten
+//     8  u64 session       sessions begun in this process, from 1
+//    16  u64 seed
+//    24  u64 scene_hash    the replay header's hash of the start bytes
+//    32  u64 math_hash     dm::SelfTestHash() of the build
+//    40  u64 cpu_features  fp::CpuFeatureBits()
+//    48  u64 start_tick    the session's first tick
+//    56  u64 first_frame   the InputFrame ring index of start_tick's frame
+//    64  u64 last_tick     the newest tick whose hash is last_hash (0: none)
+//    72  u64 last_hash     GameStateStack::Hash().Folded() after last_tick
+//    80  u32 tick_rate
+//    84  u32 flags         kSessionFlag* bits: 1 the session is an editor
+//                          Play and its start is the kind-7 stream; 2 no
+//                          session runs (the editor in Edit mode)
+//    88  char module[40]   the game module, NUL-padded
+//   128  char build[64]    the replay header's build name
+//   192  char platform[32]
+//   224  char compiler[64]
+//   288  char scene[224]   the scene file, relative to the content root
+//
+//   kind 7 (M12): bytes, record_size 1 and capacity the byte count: while
+//   the editor's Play runs, the session's replay file without frames
+//   (se_sim/replay.h: the header, the Play-start bytes and the SessionLog
+//   so far; ADR-111).
+//
 // The structs are plain data so the layout can be pinned with static_assert.
 // Fields that change while other threads (or the dump writer) read them are
 // accessed through std::atomic_ref (AtomicLoad, AtomicStore, the name
@@ -77,6 +104,8 @@ enum class DumpStreamKind : std::uint16_t {
   kInputFrameRing = 3,
   kSessionLogTail = 4,
   kFlightRecorder = 5,
+  kSessionHeader = 6,
+  kBytes = 7,
 };
 
 struct DumpStreamHeader {
@@ -128,6 +157,39 @@ struct LogRecord {
 struct InputFrameSlot {
   std::uint64_t stamp = 0;
   InputFrame frame;
+};
+
+// SessionHeaderRecord::flags.
+// An editor Play session: the scene is not a file, the session starts from
+// the Play-start stream (kind 7) and applies its SessionLog.
+inline constexpr std::uint32_t kSessionFlagPlayStart = 1U << 0;
+// No session runs (the editor in Edit mode): nothing to replay.
+inline constexpr std::uint32_t kSessionFlagNoSession = 1U << 1;
+
+inline constexpr std::size_t kSessionModuleSize = 40;
+inline constexpr std::size_t kSessionBuildSize = 64;
+inline constexpr std::size_t kSessionPlatformSize = 32;
+inline constexpr std::size_t kSessionCompilerSize = 64;
+inline constexpr std::size_t kSessionSceneSize = 224;
+
+struct SessionHeaderRecord {
+  std::uint64_t stamp = 0;
+  std::uint64_t session = 0;
+  std::uint64_t seed = 0;
+  std::uint64_t scene_hash = 0;
+  std::uint64_t math_hash = 0;
+  std::uint64_t cpu_features = 0;
+  std::uint64_t start_tick = 0;
+  std::uint64_t first_frame = 0;
+  std::uint64_t last_tick = 0;
+  std::uint64_t last_hash = 0;
+  std::uint32_t tick_rate = 0;
+  std::uint32_t flags = 0;
+  char module[kSessionModuleSize] = {};
+  char build[kSessionBuildSize] = {};
+  char platform[kSessionPlatformSize] = {};
+  char compiler[kSessionCompilerSize] = {};
+  char scene[kSessionSceneSize] = {};
 };
 
 // Pinned layouts: tools/minidump/read_dump.py decodes them without the build.
@@ -194,6 +256,28 @@ static_assert(std::is_standard_layout_v<InputFrameSlot>);
 static_assert(sizeof(InputFrameSlot) == 968);
 static_assert(offsetof(InputFrameSlot, stamp) == 0);
 static_assert(offsetof(InputFrameSlot, frame) == 8);
+
+static_assert(std::is_standard_layout_v<SessionHeaderRecord>);
+static_assert(std::is_trivially_copyable_v<SessionHeaderRecord>);
+static_assert(sizeof(SessionHeaderRecord) == 512);
+static_assert(alignof(SessionHeaderRecord) == 8);
+static_assert(offsetof(SessionHeaderRecord, stamp) == 0);
+static_assert(offsetof(SessionHeaderRecord, session) == 8);
+static_assert(offsetof(SessionHeaderRecord, seed) == 16);
+static_assert(offsetof(SessionHeaderRecord, scene_hash) == 24);
+static_assert(offsetof(SessionHeaderRecord, math_hash) == 32);
+static_assert(offsetof(SessionHeaderRecord, cpu_features) == 40);
+static_assert(offsetof(SessionHeaderRecord, start_tick) == 48);
+static_assert(offsetof(SessionHeaderRecord, first_frame) == 56);
+static_assert(offsetof(SessionHeaderRecord, last_tick) == 64);
+static_assert(offsetof(SessionHeaderRecord, last_hash) == 72);
+static_assert(offsetof(SessionHeaderRecord, tick_rate) == 80);
+static_assert(offsetof(SessionHeaderRecord, flags) == 84);
+static_assert(offsetof(SessionHeaderRecord, module) == 88);
+static_assert(offsetof(SessionHeaderRecord, build) == 128);
+static_assert(offsetof(SessionHeaderRecord, platform) == 192);
+static_assert(offsetof(SessionHeaderRecord, compiler) == 224);
+static_assert(offsetof(SessionHeaderRecord, scene) == 288);
 
 static_assert(std::atomic_ref<std::uint64_t>::is_always_lock_free);
 static_assert(std::atomic_ref<std::uint8_t>::is_always_lock_free);

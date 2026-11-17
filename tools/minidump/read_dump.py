@@ -24,6 +24,12 @@ does not fit its index (a stale or torn slot inside the ring, a sequence
 number out of order) is listed under "problems".
   kind 4  the SessionLog tail and kind 5 the flight recorder: listed, not
           decoded (their record formats come with later milestones)
+  kind 6  the session header (M12): module, scene and its hash, seed, tick
+          rate, build, start tick, the ring index of its first frame and
+          the newest published tick hash; its seqlock stamp is odd while
+          main rewrites it (marked, not a problem)
+  kind 7  bytes (M12: the editor's Play-start bytes while Play runs): their
+          size, FNV-1a 64 hash and, in --json, base64
 
 It is both a diagnostic tool and the oracle of the crash tests. Python 3
 standard library only; it never needs the build.
@@ -41,6 +47,7 @@ minidump.
 """
 
 import argparse
+import base64
 import json
 import pathlib
 import struct
@@ -94,6 +101,8 @@ SE_STREAM_TYPES = {
     0x53450002: ("input frames", 3),
     0x53450003: ("session log tail", 4),
     0x53450004: ("flight recorder", 5),
+    0x53450005: ("session header", 6),
+    0x53450006: ("play-start bytes", 7),
 }
 
 DUMP_STREAM_MAGIC = 0x31304553  # "SE01"
@@ -105,6 +114,8 @@ KIND_NAMES = {
     3: "input frames",
     4: "session log tail",
     5: "flight recorder",
+    6: "session header",
+    7: "bytes",
 }
 
 # se::ThreadRole, se::Phase and se::LogLevel, in declaration order.
@@ -128,6 +139,13 @@ INPUT_MAX_ACTIONS = 64
 INPUT_MAX_AXES = 8
 INPUT_MAX_EDGES = 32
 INPUT_EDGE_SIZE = 24
+# SessionHeaderRecord (se_core/dump_stream.h pins these offsets).
+SESSION_RECORD_SIZE = 512
+SESSION_TEXT_FIELDS = (("module", 88, 40), ("build", 128, 64),
+                       ("platform", 192, 32), ("compiler", 224, 64),
+                       ("scene", 288, 224))
+FNV_OFFSET = 0xCBF29CE484222325
+FNV_PRIME = 0x100000001B3
 
 
 class DumpError(Exception):
@@ -535,6 +553,66 @@ def decode_input_ring(data, header, out, problems, label):
         out.append(record)
 
 
+def decode_session_header(data, header, out, problems, label):
+    if header["record_size"] < SESSION_RECORD_SIZE:
+        problems.append(f"{label}: session header records of "
+                        f"{header['record_size']} bytes, expected "
+                        f"{SESSION_RECORD_SIZE}")
+        return
+    if header["head"] == 0:
+        out.append({"index": 0, "begun": False})
+        return
+    offset = DUMP_STREAM_HEADER_SIZE
+    (stamp, session, seed, scene_hash, math_hash, cpu_features, start_tick,
+     first_frame, last_tick, last_hash, tick_rate,
+     flags) = struct.unpack_from("<10Q2I", data, offset)
+    record = {
+        "index": 0,
+        "begun": True,
+        "stamp": stamp,
+        # Main was rewriting the record when the dump was taken.
+        "torn": stamp % 2 == 1,
+        "session": session,
+        "seed": seed,
+        "scene_hash": f"{scene_hash:016x}",
+        "math_hash": f"{math_hash:016x}",
+        "cpu_features": f"{cpu_features:#x}",
+        "start_tick": start_tick,
+        "first_frame": first_frame,
+        "last_tick": last_tick,
+        "last_hash": f"{last_hash:016x}",
+        "tick_rate": tick_rate,
+        "flags": flags,
+    }
+    for name, field_offset, size in SESSION_TEXT_FIELDS:
+        record[name] = c_string(data[offset + field_offset:
+                                     offset + field_offset + size])
+    out.append(record)
+
+
+def fnv1a64(raw):
+    value = FNV_OFFSET
+    for byte in raw:
+        value = ((value ^ byte) * FNV_PRIME) & 0xFFFFFFFFFFFFFFFF
+    return value
+
+
+def decode_bytes(data, header, out, problems, label):
+    if header["record_size"] != 1:
+        problems.append(f"{label}: a byte stream with records of "
+                        f"{header['record_size']} bytes")
+        return
+    size = min(header["head"], header["capacity"])
+    raw = data[DUMP_STREAM_HEADER_SIZE:DUMP_STREAM_HEADER_SIZE + size]
+    out.append({
+        "index": 0,
+        "size": len(raw),
+        "fnv1a64": f"{fnv1a64(raw):016x}",
+        "base64": base64.b64encode(raw).decode("ascii"),
+        "preview": raw[:64].decode("utf-8", "replace"),
+    })
+
+
 def decode_raw(data, header, out):
     for index, slot in ring_order(header):
         offset = DUMP_STREAM_HEADER_SIZE + slot * header["record_size"]
@@ -604,6 +682,11 @@ def decode_se_stream(stream_type, data, problems):
             decode_log_ring(data, result, result["records"], problems, label)
     elif kind == 3:
         decode_input_ring(data, result, result["records"], problems, label)
+    elif kind == 6:
+        decode_session_header(data, result, result["records"], problems,
+                              label)
+    elif kind == 7:
+        decode_bytes(data, result, result["records"], problems, label)
     else:
         result["decoded"] = False
         decode_raw(data, result, result["records"])
@@ -746,6 +829,21 @@ def format_record(stream, record):
                 f"{record['stamp']} tick {frame['tick']} held "
                 f"{frame['held']} edges {frame['edge_count']} axes0 "
                 f"{frame['axes'][0]:g}")
+    if kind == 6:
+        if not record["begun"]:
+            return "no session begun"
+        torn = " (TORN: being rewritten)" if record["torn"] else ""
+        return (f"session {record['session']} of {record['module']!r}: scene "
+                f"{record['scene']!r} (hash {record['scene_hash']}), seed "
+                f"{record['seed']}, {record['tick_rate']} Hz, from tick "
+                f"{record['start_tick']} (ring frame "
+                f"{record['first_frame']}), last tick {record['last_tick']} "
+                f"hash {record['last_hash']}; build {record['build']!r}, "
+                f"{record['platform']}, {record['compiler']}, math "
+                f"{record['math_hash']}{torn}")
+    if kind == 7:
+        return (f"{record['size']} bytes, fnv1a64 {record['fnv1a64']}: "
+                f"{record['preview']!r}")
     return f"[{record['index']}] {record['bytes'][:64]}"
 
 

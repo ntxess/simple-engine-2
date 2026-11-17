@@ -13,9 +13,9 @@
 //   1. opens the World's MutationGate and advances its SimClock;
 //   2. runs the phases Input, Intent, Movement, Collision, Effects, GameRules
 //      and Cleanup in order, the systems of a phase in registration order;
-//      the built-in PrevTransformCopy runs at the head of Movement, the
-//      built-in Cleanup (drain destroys, FinalizeSpawns, record the hash) at
-//      the end of Cleanup;
+//      the built-in PrevTransformCopy (a fork site) runs at the head of
+//      Movement, the built-in Cleanup (drain destroys, FinalizeSpawns,
+//      record the hash) at the end of Cleanup;
 //   3. sets the thread's breadcrumb (tick, phase, system) as it goes and
 //      times every system into a 1024-entry ring.
 
@@ -53,6 +53,11 @@ inline constexpr int kPhaseCount = 7;
 
 [[nodiscard]] std::string_view PhaseName(Phase phase) noexcept;
 
+// The built-in PrevTransformCopy's fork site ("se.PrevTransformCopy", grain
+// 1024: reads Transform, writes PrevTransform; M14). Disabled unless the
+// pool enables it.
+[[nodiscard]] const jobs::ForkSiteDecl& PrevTransformCopySite();
+
 // What a system sees besides the World.
 struct TickContext {
   const InputFrame& input;
@@ -81,8 +86,12 @@ struct SystemStats {
   std::uint64_t runs = 0;
   std::uint32_t last_ns = 0;
   std::uint32_t max_ns = 0;
+  // Of the last run, the time inside threaded forks (publish to join, the
+  // pool's ThreadedJoinNs): the run's parallel part. 0 while its fork
+  // sites run inline (every site ships disabled).
+  std::uint32_t last_fork_ns = 0;
 
-  void Record(std::uint64_t ns) noexcept;
+  void Record(std::uint64_t ns, std::uint64_t fork_ns = 0) noexcept;
   // Nearest-rank percentile of the ring; 0 when empty.
   [[nodiscard]] std::uint32_t PercentileNs(double p) const;
 };

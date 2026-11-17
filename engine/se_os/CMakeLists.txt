@@ -1,6 +1,7 @@
 # se_os: the headless OS layer that threads need on every platform (ADR-029):
 # StartThread and RoleScope (OS thread names, QoS, CPU sets), the CPU
-# topology, the unbiased clock, the precise timer of the sim thread's
+# topology, the fork pool's worker threads (ForkWorkers, M14), the unbiased
+# clock, the precise timer of the sim thread's
 # PacedClock (M17a), debugger detection and the executable's directory. It
 # may include <windows.h> and POSIX headers, but never SDL, so the SDL-free
 # WSL sanitizer builds have it too. It depends on se_core alone
@@ -11,6 +12,7 @@ se_add_module(se_os KIND STATIC
   SOURCES
     src/cpu_topology.cc
     src/debugger.cc
+    src/fork_workers.cc
     src/precise_wait.cc
     src/process.cc
     src/thread.cc
