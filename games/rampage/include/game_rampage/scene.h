@@ -35,6 +35,14 @@
 // as its TextureKeyOf key, the names going to the World's TextureNames. An
 // entity loaded as moved (a legacy scenario's "moving" entities) is saved
 // with "Moved": {}, which marks it moved for its first tick (ADR-028).
+//
+// M11: the loader records an entity's "prefab" as its PrefabInstance. The
+// writer has two modes: kFlatten (M3's form, every component whole) and
+// kPrefabs, which writes an instance as its "prefab" and the "overrides"
+// that give it back on load (ADR-115). A prefab opened as a document is a
+// World with one root entity (PrefabRootGuid) and saves back in its file's
+// own form; instances are rebased on a prefab change by applying their
+// overrides over the new text (ADR-116).
 
 #ifndef GAME_RAMPAGE_SCENE_H_
 #define GAME_RAMPAGE_SCENE_H_

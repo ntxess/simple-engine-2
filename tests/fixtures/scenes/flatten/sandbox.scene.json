@@ -1,0 +1,1424 @@
+{
+  "format": "se-scene-v1",
+  "name": "sandbox",
+  "settings": {
+    "bounds": {
+      "w": 1920,
+      "h": 1080
+    },
+    "seed": 1,
+    "event_watchdog_ms": 36000
+  },
+  "entities": [
+    {
+      "guid": "5a4db0c5-0000-4000-8000-000000000000",
+      "name": "player",
+      "components": {
+        "Transform": {
+          "pos": {
+            "x": 200,
+            "y": 200
+          },
+          "rot": 0,
+          "scale": {
+            "x": 1,
+            "y": 1
+          },
+          "teleport_tick": 0
+        },
+        "Team": {
+          "id": "friendly"
+        },
+        "Stats": {
+          "HP": 100
+        },
+        "EffectSource": {
+          "effects": [
+            {
+              "kind": "instant",
+              "stat": "HP",
+              "value": -10,
+              "duration_ms": 0,
+              "interval_ms": 0
+            },
+            {
+              "kind": "over_time",
+              "stat": "HP",
+              "value": -1,
+              "duration_ms": 5000,
+              "interval_ms": 1000
+            },
+            {
+              "kind": "temp_timed",
+              "stat": "HP",
+              "value": -10,
+              "duration_ms": 5000,
+              "interval_ms": 0
+            }
+          ],
+          "polled": true,
+          "cooldown_ms": 1000,
+          "ready_on_start": true
+        },
+        "PairCooldowns": {
+          "pairs": []
+        },
+        "ActiveEffects": {
+          "effects": []
+        },
+        "Collider": {
+          "half_extents": {
+            "x": 24,
+            "y": 24
+          },
+          "role": "body",
+          "layer": 1,
+          "mask": 4294967295
+        },
+        "KinematicBody": {
+          "velocity": {
+            "x": 0,
+            "y": 0
+          }
+        },
+        "MoveIntent": {
+          "dir": {
+            "x": 0,
+            "y": 0
+          }
+        },
+        "PlayerControl": {
+          "player": 0,
+          "speed": 120
+        },
+        "SpriteRenderer": {
+          "texture": "player",
+          "region": {
+            "x": 0,
+            "y": 0,
+            "w": 48,
+            "h": 48
+          },
+          "origin": {
+            "x": 24,
+            "y": 24
+          },
+          "tint": {
+            "r": 255,
+            "g": 255,
+            "b": 255,
+            "a": 255
+          },
+          "layer": 0,
+          "z": 0,
+          "flip_x": false,
+          "flip_y": false
+        }
+      }
+    },
+    {
+      "guid": "5a4db0c5-0000-4000-8000-000000000001",
+      "name": "enemy 1",
+      "components": {
+        "Transform": {
+          "pos": {
+            "x": 1499,
+            "y": 345
+          },
+          "rot": 0,
+          "scale": {
+            "x": 1,
+            "y": 1
+          },
+          "teleport_tick": 0
+        },
+        "Team": {
+          "id": "enemy"
+        },
+        "Stats": {
+          "Speed": 500,
+          "HP": 100
+        },
+        "ActiveEffects": {
+          "effects": []
+        },
+        "Collider": {
+          "half_extents": {
+            "x": 24,
+            "y": 24
+          },
+          "role": "body",
+          "layer": 1,
+          "mask": 4294967295
+        },
+        "Path": {
+          "points": [
+            {
+              "x": 1499,
+              "y": 345
+            },
+            {
+              "x": 107,
+              "y": 252
+            },
+            {
+              "x": 394,
+              "y": 482
+            },
+            {
+              "x": 468,
+              "y": 1038
+            },
+            {
+              "x": 970,
+              "y": 388
+            }
+          ],
+          "loop": true,
+          "segment": 0,
+          "u": 0,
+          "done": false
+        },
+        "SpriteRenderer": {
+          "texture": "player",
+          "region": {
+            "x": 0,
+            "y": 0,
+            "w": 48,
+            "h": 48
+          },
+          "origin": {
+            "x": 24,
+            "y": 24
+          },
+          "tint": {
+            "r": 255,
+            "g": 255,
+            "b": 255,
+            "a": 255
+          },
+          "layer": 0,
+          "z": 0,
+          "flip_x": false,
+          "flip_y": false
+        }
+      }
+    },
+    {
+      "guid": "5a4db0c5-0000-4000-8000-000000000002",
+      "name": "enemy 2",
+      "components": {
+        "Transform": {
+          "pos": {
+            "x": 1648,
+            "y": 374
+          },
+          "rot": 0,
+          "scale": {
+            "x": 1,
+            "y": 1
+          },
+          "teleport_tick": 0
+        },
+        "Team": {
+          "id": "enemy"
+        },
+        "Stats": {
+          "Speed": 500,
+          "HP": 100
+        },
+        "ActiveEffects": {
+          "effects": []
+        },
+        "Collider": {
+          "half_extents": {
+            "x": 24,
+            "y": 24
+          },
+          "role": "body",
+          "layer": 1,
+          "mask": 4294967295
+        },
+        "Path": {
+          "points": [
+            {
+              "x": 1648,
+              "y": 374
+            },
+            {
+              "x": 1665,
+              "y": 97
+            },
+            {
+              "x": 1672,
+              "y": 587
+            },
+            {
+              "x": 263,
+              "y": 47
+            }
+          ],
+          "loop": true,
+          "segment": 0,
+          "u": 0,
+          "done": false
+        },
+        "SpriteRenderer": {
+          "texture": "player",
+          "region": {
+            "x": 0,
+            "y": 0,
+            "w": 48,
+            "h": 48
+          },
+          "origin": {
+            "x": 24,
+            "y": 24
+          },
+          "tint": {
+            "r": 255,
+            "g": 255,
+            "b": 255,
+            "a": 255
+          },
+          "layer": 0,
+          "z": 0,
+          "flip_x": false,
+          "flip_y": false
+        }
+      }
+    },
+    {
+      "guid": "5a4db0c5-0000-4000-8000-000000000003",
+      "name": "enemy 3",
+      "components": {
+        "Transform": {
+          "pos": {
+            "x": 1177,
+            "y": 261
+          },
+          "rot": 0,
+          "scale": {
+            "x": 1,
+            "y": 1
+          },
+          "teleport_tick": 0
+        },
+        "Team": {
+          "id": "enemy"
+        },
+        "Stats": {
+          "Speed": 500,
+          "HP": 100
+        },
+        "ActiveEffects": {
+          "effects": []
+        },
+        "Collider": {
+          "half_extents": {
+            "x": 24,
+            "y": 24
+          },
+          "role": "body",
+          "layer": 1,
+          "mask": 4294967295
+        },
+        "Path": {
+          "points": [
+            {
+              "x": 1177,
+              "y": 261
+            },
+            {
+              "x": 1436,
+              "y": 236
+            },
+            {
+              "x": 565,
+              "y": 101
+            }
+          ],
+          "loop": true,
+          "segment": 0,
+          "u": 0,
+          "done": false
+        },
+        "SpriteRenderer": {
+          "texture": "player",
+          "region": {
+            "x": 0,
+            "y": 0,
+            "w": 48,
+            "h": 48
+          },
+          "origin": {
+            "x": 24,
+            "y": 24
+          },
+          "tint": {
+            "r": 255,
+            "g": 255,
+            "b": 255,
+            "a": 255
+          },
+          "layer": 0,
+          "z": 0,
+          "flip_x": false,
+          "flip_y": false
+        }
+      }
+    },
+    {
+      "guid": "5a4db0c5-0000-4000-8000-000000000004",
+      "name": "enemy 4",
+      "components": {
+        "Transform": {
+          "pos": {
+            "x": 1554,
+            "y": 658
+          },
+          "rot": 0,
+          "scale": {
+            "x": 1,
+            "y": 1
+          },
+          "teleport_tick": 0
+        },
+        "Team": {
+          "id": "enemy"
+        },
+        "Stats": {
+          "Speed": 500,
+          "HP": 100
+        },
+        "ActiveEffects": {
+          "effects": []
+        },
+        "Collider": {
+          "half_extents": {
+            "x": 24,
+            "y": 24
+          },
+          "role": "body",
+          "layer": 1,
+          "mask": 4294967295
+        },
+        "Path": {
+          "points": [
+            {
+              "x": 1554,
+              "y": 658
+            },
+            {
+              "x": 317,
+              "y": 765
+            },
+            {
+              "x": 1162,
+              "y": 695
+            },
+            {
+              "x": 1906,
+              "y": 426
+            }
+          ],
+          "loop": true,
+          "segment": 0,
+          "u": 0,
+          "done": false
+        },
+        "SpriteRenderer": {
+          "texture": "player",
+          "region": {
+            "x": 0,
+            "y": 0,
+            "w": 48,
+            "h": 48
+          },
+          "origin": {
+            "x": 24,
+            "y": 24
+          },
+          "tint": {
+            "r": 255,
+            "g": 255,
+            "b": 255,
+            "a": 255
+          },
+          "layer": 0,
+          "z": 0,
+          "flip_x": false,
+          "flip_y": false
+        }
+      }
+    },
+    {
+      "guid": "5a4db0c5-0000-4000-8000-000000000005",
+      "name": "enemy 5",
+      "components": {
+        "Transform": {
+          "pos": {
+            "x": 1760,
+            "y": 375
+          },
+          "rot": 0,
+          "scale": {
+            "x": 1,
+            "y": 1
+          },
+          "teleport_tick": 0
+        },
+        "Team": {
+          "id": "enemy"
+        },
+        "Stats": {
+          "Speed": 500,
+          "HP": 100
+        },
+        "ActiveEffects": {
+          "effects": []
+        },
+        "Collider": {
+          "half_extents": {
+            "x": 24,
+            "y": 24
+          },
+          "role": "body",
+          "layer": 1,
+          "mask": 4294967295
+        },
+        "Path": {
+          "points": [
+            {
+              "x": 1760,
+              "y": 375
+            },
+            {
+              "x": 3,
+              "y": 216
+            },
+            {
+              "x": 231,
+              "y": 981
+            },
+            {
+              "x": 55,
+              "y": 324
+            },
+            {
+              "x": 532,
+              "y": 767
+            }
+          ],
+          "loop": true,
+          "segment": 0,
+          "u": 0,
+          "done": false
+        },
+        "SpriteRenderer": {
+          "texture": "player",
+          "region": {
+            "x": 0,
+            "y": 0,
+            "w": 48,
+            "h": 48
+          },
+          "origin": {
+            "x": 24,
+            "y": 24
+          },
+          "tint": {
+            "r": 255,
+            "g": 255,
+            "b": 255,
+            "a": 255
+          },
+          "layer": 0,
+          "z": 0,
+          "flip_x": false,
+          "flip_y": false
+        }
+      }
+    },
+    {
+      "guid": "5a4db0c5-0000-4000-8000-000000000006",
+      "name": "enemy 6",
+      "components": {
+        "Transform": {
+          "pos": {
+            "x": 1590,
+            "y": 691
+          },
+          "rot": 0,
+          "scale": {
+            "x": 1,
+            "y": 1
+          },
+          "teleport_tick": 0
+        },
+        "Team": {
+          "id": "enemy"
+        },
+        "Stats": {
+          "Speed": 500,
+          "HP": 100
+        },
+        "ActiveEffects": {
+          "effects": []
+        },
+        "Collider": {
+          "half_extents": {
+            "x": 24,
+            "y": 24
+          },
+          "role": "body",
+          "layer": 1,
+          "mask": 4294967295
+        },
+        "Path": {
+          "points": [
+            {
+              "x": 1590,
+              "y": 691
+            },
+            {
+              "x": 1774,
+              "y": 303
+            }
+          ],
+          "loop": true,
+          "segment": 0,
+          "u": 0,
+          "done": false
+        },
+        "SpriteRenderer": {
+          "texture": "player",
+          "region": {
+            "x": 0,
+            "y": 0,
+            "w": 48,
+            "h": 48
+          },
+          "origin": {
+            "x": 24,
+            "y": 24
+          },
+          "tint": {
+            "r": 255,
+            "g": 255,
+            "b": 255,
+            "a": 255
+          },
+          "layer": 0,
+          "z": 0,
+          "flip_x": false,
+          "flip_y": false
+        }
+      }
+    },
+    {
+      "guid": "5a4db0c5-0000-4000-8000-000000000007",
+      "name": "enemy 7",
+      "components": {
+        "Transform": {
+          "pos": {
+            "x": 760,
+            "y": 468
+          },
+          "rot": 0,
+          "scale": {
+            "x": 1,
+            "y": 1
+          },
+          "teleport_tick": 0
+        },
+        "Team": {
+          "id": "enemy"
+        },
+        "Stats": {
+          "Speed": 500,
+          "HP": 100
+        },
+        "ActiveEffects": {
+          "effects": []
+        },
+        "Collider": {
+          "half_extents": {
+            "x": 24,
+            "y": 24
+          },
+          "role": "body",
+          "layer": 1,
+          "mask": 4294967295
+        },
+        "Path": {
+          "points": [
+            {
+              "x": 760,
+              "y": 468
+            },
+            {
+              "x": 1871,
+              "y": 256
+            },
+            {
+              "x": 725,
+              "y": 148
+            }
+          ],
+          "loop": true,
+          "segment": 0,
+          "u": 0,
+          "done": false
+        },
+        "SpriteRenderer": {
+          "texture": "player",
+          "region": {
+            "x": 0,
+            "y": 0,
+            "w": 48,
+            "h": 48
+          },
+          "origin": {
+            "x": 24,
+            "y": 24
+          },
+          "tint": {
+            "r": 255,
+            "g": 255,
+            "b": 255,
+            "a": 255
+          },
+          "layer": 0,
+          "z": 0,
+          "flip_x": false,
+          "flip_y": false
+        }
+      }
+    },
+    {
+      "guid": "5a4db0c5-0000-4000-8000-000000000008",
+      "name": "enemy 8",
+      "components": {
+        "Transform": {
+          "pos": {
+            "x": 395,
+            "y": 166
+          },
+          "rot": 0,
+          "scale": {
+            "x": 1,
+            "y": 1
+          },
+          "teleport_tick": 0
+        },
+        "Team": {
+          "id": "enemy"
+        },
+        "Stats": {
+          "Speed": 500,
+          "HP": 100
+        },
+        "ActiveEffects": {
+          "effects": []
+        },
+        "Collider": {
+          "half_extents": {
+            "x": 24,
+            "y": 24
+          },
+          "role": "body",
+          "layer": 1,
+          "mask": 4294967295
+        },
+        "Path": {
+          "points": [
+            {
+              "x": 395,
+              "y": 166
+            },
+            {
+              "x": 373,
+              "y": 68
+            },
+            {
+              "x": 721,
+              "y": 372
+            },
+            {
+              "x": 1084,
+              "y": 704
+            },
+            {
+              "x": 513,
+              "y": 284
+            }
+          ],
+          "loop": true,
+          "segment": 0,
+          "u": 0,
+          "done": false
+        },
+        "SpriteRenderer": {
+          "texture": "player",
+          "region": {
+            "x": 0,
+            "y": 0,
+            "w": 48,
+            "h": 48
+          },
+          "origin": {
+            "x": 24,
+            "y": 24
+          },
+          "tint": {
+            "r": 255,
+            "g": 255,
+            "b": 255,
+            "a": 255
+          },
+          "layer": 0,
+          "z": 0,
+          "flip_x": false,
+          "flip_y": false
+        }
+      }
+    },
+    {
+      "guid": "5a4db0c5-0000-4000-8000-000000000009",
+      "name": "enemy 9",
+      "components": {
+        "Transform": {
+          "pos": {
+            "x": 296,
+            "y": 657
+          },
+          "rot": 0,
+          "scale": {
+            "x": 1,
+            "y": 1
+          },
+          "teleport_tick": 0
+        },
+        "Team": {
+          "id": "enemy"
+        },
+        "Stats": {
+          "Speed": 500,
+          "HP": 100
+        },
+        "ActiveEffects": {
+          "effects": []
+        },
+        "Collider": {
+          "half_extents": {
+            "x": 24,
+            "y": 24
+          },
+          "role": "body",
+          "layer": 1,
+          "mask": 4294967295
+        },
+        "Path": {
+          "points": [
+            {
+              "x": 296,
+              "y": 657
+            },
+            {
+              "x": 834,
+              "y": 847
+            },
+            {
+              "x": 1231,
+              "y": 718
+            },
+            {
+              "x": 1603,
+              "y": 268
+            }
+          ],
+          "loop": true,
+          "segment": 0,
+          "u": 0,
+          "done": false
+        },
+        "SpriteRenderer": {
+          "texture": "player",
+          "region": {
+            "x": 0,
+            "y": 0,
+            "w": 48,
+            "h": 48
+          },
+          "origin": {
+            "x": 24,
+            "y": 24
+          },
+          "tint": {
+            "r": 255,
+            "g": 255,
+            "b": 255,
+            "a": 255
+          },
+          "layer": 0,
+          "z": 0,
+          "flip_x": false,
+          "flip_y": false
+        }
+      }
+    },
+    {
+      "guid": "5a4db0c5-0000-4000-8000-00000000000a",
+      "name": "enemy 10",
+      "components": {
+        "Transform": {
+          "pos": {
+            "x": 1902,
+            "y": 182
+          },
+          "rot": 0,
+          "scale": {
+            "x": 1,
+            "y": 1
+          },
+          "teleport_tick": 0
+        },
+        "Team": {
+          "id": "enemy"
+        },
+        "Stats": {
+          "Speed": 500,
+          "HP": 100
+        },
+        "ActiveEffects": {
+          "effects": []
+        },
+        "Collider": {
+          "half_extents": {
+            "x": 24,
+            "y": 24
+          },
+          "role": "body",
+          "layer": 1,
+          "mask": 4294967295
+        },
+        "Path": {
+          "points": [
+            {
+              "x": 1902,
+              "y": 182
+            },
+            {
+              "x": 1563,
+              "y": 525
+            }
+          ],
+          "loop": true,
+          "segment": 0,
+          "u": 0,
+          "done": false
+        },
+        "SpriteRenderer": {
+          "texture": "player",
+          "region": {
+            "x": 0,
+            "y": 0,
+            "w": 48,
+            "h": 48
+          },
+          "origin": {
+            "x": 24,
+            "y": 24
+          },
+          "tint": {
+            "r": 255,
+            "g": 255,
+            "b": 255,
+            "a": 255
+          },
+          "layer": 0,
+          "z": 0,
+          "flip_x": false,
+          "flip_y": false
+        }
+      }
+    },
+    {
+      "guid": "5a4db0c5-0000-4000-8000-00000000000b",
+      "name": "enemy 11",
+      "components": {
+        "Transform": {
+          "pos": {
+            "x": 824,
+            "y": 488
+          },
+          "rot": 0,
+          "scale": {
+            "x": 1,
+            "y": 1
+          },
+          "teleport_tick": 0
+        },
+        "Team": {
+          "id": "enemy"
+        },
+        "Stats": {
+          "Speed": 500,
+          "HP": 100
+        },
+        "ActiveEffects": {
+          "effects": []
+        },
+        "Collider": {
+          "half_extents": {
+            "x": 24,
+            "y": 24
+          },
+          "role": "body",
+          "layer": 1,
+          "mask": 4294967295
+        },
+        "Path": {
+          "points": [
+            {
+              "x": 824,
+              "y": 488
+            }
+          ],
+          "loop": true,
+          "segment": 0,
+          "u": 0,
+          "done": false
+        },
+        "SpriteRenderer": {
+          "texture": "player",
+          "region": {
+            "x": 0,
+            "y": 0,
+            "w": 48,
+            "h": 48
+          },
+          "origin": {
+            "x": 24,
+            "y": 24
+          },
+          "tint": {
+            "r": 255,
+            "g": 255,
+            "b": 255,
+            "a": 255
+          },
+          "layer": 0,
+          "z": 0,
+          "flip_x": false,
+          "flip_y": false
+        }
+      }
+    },
+    {
+      "guid": "5a4db0c5-0000-4000-8000-00000000000c",
+      "name": "enemy 12",
+      "components": {
+        "Transform": {
+          "pos": {
+            "x": 1411,
+            "y": 797
+          },
+          "rot": 0,
+          "scale": {
+            "x": 1,
+            "y": 1
+          },
+          "teleport_tick": 0
+        },
+        "Team": {
+          "id": "enemy"
+        },
+        "Stats": {
+          "Speed": 500,
+          "HP": 100
+        },
+        "ActiveEffects": {
+          "effects": []
+        },
+        "Collider": {
+          "half_extents": {
+            "x": 24,
+            "y": 24
+          },
+          "role": "body",
+          "layer": 1,
+          "mask": 4294967295
+        },
+        "Path": {
+          "points": [
+            {
+              "x": 1411,
+              "y": 797
+            },
+            {
+              "x": 1170,
+              "y": 74
+            }
+          ],
+          "loop": true,
+          "segment": 0,
+          "u": 0,
+          "done": false
+        },
+        "SpriteRenderer": {
+          "texture": "player",
+          "region": {
+            "x": 0,
+            "y": 0,
+            "w": 48,
+            "h": 48
+          },
+          "origin": {
+            "x": 24,
+            "y": 24
+          },
+          "tint": {
+            "r": 255,
+            "g": 255,
+            "b": 255,
+            "a": 255
+          },
+          "layer": 0,
+          "z": 0,
+          "flip_x": false,
+          "flip_y": false
+        }
+      }
+    },
+    {
+      "guid": "5a4db0c5-0000-4000-8000-00000000000d",
+      "name": "enemy 13",
+      "components": {
+        "Transform": {
+          "pos": {
+            "x": 387,
+            "y": 591
+          },
+          "rot": 0,
+          "scale": {
+            "x": 1,
+            "y": 1
+          },
+          "teleport_tick": 0
+        },
+        "Team": {
+          "id": "enemy"
+        },
+        "Stats": {
+          "Speed": 500,
+          "HP": 100
+        },
+        "ActiveEffects": {
+          "effects": []
+        },
+        "Collider": {
+          "half_extents": {
+            "x": 24,
+            "y": 24
+          },
+          "role": "body",
+          "layer": 1,
+          "mask": 4294967295
+        },
+        "Path": {
+          "points": [
+            {
+              "x": 387,
+              "y": 591
+            },
+            {
+              "x": 1570,
+              "y": 11
+            },
+            {
+              "x": 1047,
+              "y": 888
+            }
+          ],
+          "loop": true,
+          "segment": 0,
+          "u": 0,
+          "done": false
+        },
+        "SpriteRenderer": {
+          "texture": "player",
+          "region": {
+            "x": 0,
+            "y": 0,
+            "w": 48,
+            "h": 48
+          },
+          "origin": {
+            "x": 24,
+            "y": 24
+          },
+          "tint": {
+            "r": 255,
+            "g": 255,
+            "b": 255,
+            "a": 255
+          },
+          "layer": 0,
+          "z": 0,
+          "flip_x": false,
+          "flip_y": false
+        }
+      }
+    },
+    {
+      "guid": "5a4db0c5-0000-4000-8000-00000000000e",
+      "name": "enemy 14",
+      "components": {
+        "Transform": {
+          "pos": {
+            "x": 1645,
+            "y": 271
+          },
+          "rot": 0,
+          "scale": {
+            "x": 1,
+            "y": 1
+          },
+          "teleport_tick": 0
+        },
+        "Team": {
+          "id": "enemy"
+        },
+        "Stats": {
+          "Speed": 500,
+          "HP": 100
+        },
+        "ActiveEffects": {
+          "effects": []
+        },
+        "Collider": {
+          "half_extents": {
+            "x": 24,
+            "y": 24
+          },
+          "role": "body",
+          "layer": 1,
+          "mask": 4294967295
+        },
+        "Path": {
+          "points": [
+            {
+              "x": 1645,
+              "y": 271
+            },
+            {
+              "x": 453,
+              "y": 650
+            },
+            {
+              "x": 1289,
+              "y": 444
+            },
+            {
+              "x": 1600,
+              "y": 520
+            },
+            {
+              "x": 1691,
+              "y": 167
+            }
+          ],
+          "loop": true,
+          "segment": 0,
+          "u": 0,
+          "done": false
+        },
+        "SpriteRenderer": {
+          "texture": "player",
+          "region": {
+            "x": 0,
+            "y": 0,
+            "w": 48,
+            "h": 48
+          },
+          "origin": {
+            "x": 24,
+            "y": 24
+          },
+          "tint": {
+            "r": 255,
+            "g": 255,
+            "b": 255,
+            "a": 255
+          },
+          "layer": 0,
+          "z": 0,
+          "flip_x": false,
+          "flip_y": false
+        }
+      }
+    },
+    {
+      "guid": "5a4db0c5-0000-4000-8000-00000000000f",
+      "name": "enemy 15",
+      "components": {
+        "Transform": {
+          "pos": {
+            "x": 818,
+            "y": 372
+          },
+          "rot": 0,
+          "scale": {
+            "x": 1,
+            "y": 1
+          },
+          "teleport_tick": 0
+        },
+        "Team": {
+          "id": "enemy"
+        },
+        "Stats": {
+          "Speed": 500,
+          "HP": 100
+        },
+        "ActiveEffects": {
+          "effects": []
+        },
+        "Collider": {
+          "half_extents": {
+            "x": 24,
+            "y": 24
+          },
+          "role": "body",
+          "layer": 1,
+          "mask": 4294967295
+        },
+        "Path": {
+          "points": [
+            {
+              "x": 818,
+              "y": 372
+            },
+            {
+              "x": 1738,
+              "y": 799
+            }
+          ],
+          "loop": true,
+          "segment": 0,
+          "u": 0,
+          "done": false
+        },
+        "SpriteRenderer": {
+          "texture": "player",
+          "region": {
+            "x": 0,
+            "y": 0,
+            "w": 48,
+            "h": 48
+          },
+          "origin": {
+            "x": 24,
+            "y": 24
+          },
+          "tint": {
+            "r": 255,
+            "g": 255,
+            "b": 255,
+            "a": 255
+          },
+          "layer": 0,
+          "z": 0,
+          "flip_x": false,
+          "flip_y": false
+        }
+      }
+    },
+    {
+      "guid": "5a4db0c5-0000-4000-8000-000000000010",
+      "name": "enemy 16",
+      "components": {
+        "Transform": {
+          "pos": {
+            "x": 1537,
+            "y": 194
+          },
+          "rot": 0,
+          "scale": {
+            "x": 1,
+            "y": 1
+          },
+          "teleport_tick": 0
+        },
+        "Team": {
+          "id": "enemy"
+        },
+        "Stats": {
+          "Speed": 500,
+          "HP": 100
+        },
+        "ActiveEffects": {
+          "effects": []
+        },
+        "Collider": {
+          "half_extents": {
+            "x": 24,
+            "y": 24
+          },
+          "role": "body",
+          "layer": 1,
+          "mask": 4294967295
+        },
+        "Path": {
+          "points": [
+            {
+              "x": 1537,
+              "y": 194
+            },
+            {
+              "x": 1095,
+              "y": 1043
+            },
+            {
+              "x": 1904,
+              "y": 790
+            },
+            {
+              "x": 1268,
+              "y": 171
+            }
+          ],
+          "loop": true,
+          "segment": 0,
+          "u": 0,
+          "done": false
+        },
+        "SpriteRenderer": {
+          "texture": "player",
+          "region": {
+            "x": 0,
+            "y": 0,
+            "w": 48,
+            "h": 48
+          },
+          "origin": {
+            "x": 24,
+            "y": 24
+          },
+          "tint": {
+            "r": 255,
+            "g": 255,
+            "b": 255,
+            "a": 255
+          },
+          "layer": 0,
+          "z": 0,
+          "flip_x": false,
+          "flip_y": false
+        }
+      }
+    }
+  ]
+}

@@ -20,6 +20,7 @@ se_add_module(se_editor_panel_tests KIND EXECUTABLE
     overlays_test.cc
     panels_test.cc
     picking_test.cc
+    prefab_panels_test.cc
     profiler_series_test.cc
     stress_generator_test.cc
     viewport_math_test.cc

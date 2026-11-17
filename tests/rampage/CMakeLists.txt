@@ -51,6 +51,7 @@ se_add_module(se_rampage_tests KIND EXECUTABLE
     json_test.cc
     legacy_scenario_test.cc
     path_test.cc
+    prefab_test.cc
     projection_test.cc
     scene_test.cc
     serialization_test.cc

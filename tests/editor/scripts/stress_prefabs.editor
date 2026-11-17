@@ -1,0 +1,19 @@
+# The stress generator in Edit mode (M11b, headless): a press of 20 is one
+# command group applied in its frame (one undo step), its spawns are
+# instances of the enemy prefab, and the saved scene writes them as the
+# prefab plus their overrides. Runs on a copy of the content
+# (--content-copy).
+expect-entities document 17
+stress-press 20
+wait-frames 1
+expect-entities document 37
+expect-undo-label Generate 20 enemies
+undo
+expect-entities document 17
+expect-hash document initial
+expect-content-hash document initial
+redo
+expect-entities document 37
+save
+wait-saves
+quit discard

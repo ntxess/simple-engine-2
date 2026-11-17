@@ -1,0 +1,19 @@
+{
+  "format": "se-scene-v1",
+  "name": "nested_member",
+  "settings": {"bounds": {"w": 1920, "h": 1080}, "seed": 11, "event_watchdog_ms": 36000},
+  "entities": [
+    {"guid": "11a00000-0000-4000-8000-000000000201", "name": "small enemy",
+     "prefab": "prefabs/enemy.prefab.json",
+     "overrides": {"SpriteRenderer": {"region": {"w": 32, "h": 32}, "origin": {"x": 16, "y": 16}},
+                   "Collider": {"half_extents": {"y": 16}},
+                   "Path": {"points": [{"x": 50, "y": 60}, {"x": 500, "y": 60}], "loop": false}}},
+    {"guid": "11a00000-0000-4000-8000-000000000202", "name": "placed enemy",
+     "prefab": "prefabs/enemy.prefab.json",
+     "overrides": {"Transform": {"pos": {"y": 300}, "rot": 1.5},
+                   "Path": {"points": [{"x": 800, "y": 800}, {"x": 900, "y": 820}]}}},
+    {"guid": "11a00000-0000-4000-8000-000000000203", "name": "moved player",
+     "prefab": "prefabs/player.prefab.json",
+     "overrides": {"Transform": {"pos": {"x": 960}}}}
+  ]
+}

@@ -2,6 +2,7 @@
 
 #include "se_editor/commands.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <entt/entity/registry.hpp>
@@ -393,7 +394,29 @@ CreateEntityCommand::CreateEntityCommand(Guid target,
     : target_(target), components_(std::move(components)) {}
 
 std::expected<void, Error> CreateEntityCommand::Apply(World& world) {
-  return CreateWith(world, target_, components_);
+  if (!spawned_.empty()) {
+    // A redo: the spawn record the first Apply got.
+    std::vector<ComponentJson> components = components_;
+    components.push_back(ComponentJson{"Spawned", spawned_});
+    return CreateWith(world, target_, components);
+  }
+  if (auto created = CreateWith(world, target_, components_); !created) {
+    return created;
+  }
+  const bool given = std::any_of(
+      components_.begin(), components_.end(),
+      [](const ComponentJson& c) { return c.component == "Spawned"; });
+  if (!given) {
+    auto entity = FindEntity(world, target_);
+    const ComponentInfo* info = world.Registry().FindByName("Spawned");
+    if (entity && info != nullptr && info->write_json != nullptr &&
+        HasComponent(world, *info, *entity)) {
+      if (auto json = info->write_json(world.CReg(), *entity)) {
+        spawned_ = std::move(*json);
+      }
+    }
+  }
+  return {};
 }
 
 std::expected<void, Error> CreateEntityCommand::Revert(World& world) {

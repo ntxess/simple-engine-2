@@ -81,5 +81,54 @@ TEST_CASE("RFC 7386 merge patches", "[rampage][json]") {
           R"({"a":{"bb":{}}})");
 }
 
+// The patch MergeDiff gives, written compactly, or "none".
+std::string Diff(std::string_view from, std::string_view to) {
+  auto f = Parse(from);
+  auto t = Parse(to);
+  REQUIRE(f.has_value());
+  REQUIRE(t.has_value());
+  const auto patch = MergeDiff(*f, *t);
+  if (!patch) return "none";
+  // Applying it gives |to| back.
+  Value applied = *f;
+  MergePatch(applied, *patch);
+  CHECK(Equal(applied, *t));
+  return Write(*patch);
+}
+
+TEST_CASE("JSON values compare by content", "[rampage][json]") {
+  const auto equal = [](std::string_view a, std::string_view b) {
+    auto x = Parse(a);
+    auto y = Parse(b);
+    REQUIRE(x.has_value());
+    REQUIRE(y.has_value());
+    return Equal(*x, *y);
+  };
+  CHECK(equal("1", "1.0"));
+  CHECK(equal("-0", "0"));
+  CHECK(equal(R"({"a":1,"b":[true,null]})", R"({"b":[true,null],"a":1e0})"));
+  CHECK_FALSE(equal("1", "\"1\""));
+  CHECK_FALSE(equal("[1,2]", "[2,1]"));
+  CHECK_FALSE(equal(R"({"a":1})", R"({"a":1,"b":2})"));
+  CHECK_FALSE(equal(R"({"a":1,"c":2})", R"({"a":1,"b":2})"));
+  CHECK_FALSE(equal("null", "false"));
+}
+
+TEST_CASE("Merge diffs turn one value into another", "[rampage][json]") {
+  REQUIRE(Diff(R"({"a":1})", R"({"a":1.0})") == "none");
+  REQUIRE(Diff(R"({"a":"b"})", R"({"a":"c"})") == R"({"a":"c"})");
+  REQUIRE(Diff(R"({"a":"b"})", R"({"a":"b","b":"c"})") == R"({"b":"c"})");
+  REQUIRE(Diff(R"({"a":"b","b":"c"})", R"({"b":"c"})") == R"({"a":null})");
+  // Objects member by member, arrays and scalars whole.
+  REQUIRE(Diff(R"({"a":{"b":"c","d":1}})", R"({"a":{"b":"d","d":1}})") ==
+          R"({"a":{"b":"d"}})");
+  REQUIRE(Diff(R"({"a":[1,2,3]})", R"({"a":[1,2,4]})") == R"({"a":[1,2,4]})");
+  REQUIRE(Diff(R"({"a":["b"]})", R"({"a":{"c":1}})") == R"({"a":{"c":1}})");
+  REQUIRE(Diff(R"({"a":{"c":1}})", R"({"a":5})") == R"({"a":5})");
+  REQUIRE(Diff("[1]", R"({"a":1})") == R"({"a":1})");
+  REQUIRE(Diff(R"({"a":1})", "[1]") == "[1]");
+  REQUIRE(Diff("null", R"({"a":{"b":2}})") == R"({"a":{"b":2}})");
+}
+
 }  // namespace
 }  // namespace se::rampage::json

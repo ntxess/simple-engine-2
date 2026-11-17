@@ -166,6 +166,23 @@ void InspectorPanel::DrawEntity(const PanelContext& context, EditSink& sink,
     }
     sink.Submit(std::move(*command));
   };
+  // Components of the prefab this instance removed.
+  if (baseline != nullptr) {
+    for (const std::string& removed : overridden_) {
+      const ComponentInfo* info = world.Registry().FindByName(removed);
+      if (info == nullptr || HasComponent(world, entity, *info)) continue;
+      ImGui::PushID(removed.c_str());
+      ImGui::TextColored({1.0F, 0.75F, 0.3F, 1.0F}, "%s: removed [override]",
+                         removed.c_str());
+      ProbeItem("inspector.override." + removed);
+      ImGui::SameLine();
+      ImGui::BeginDisabled(!sink.CanEdit());
+      if (ImGui::SmallButton("Revert to prefab")) revert(removed);
+      ProbeItem("inspector.revert." + removed);
+      ImGui::EndDisabled();
+      ImGui::PopID();
+    }
+  }
 
   DrawTarget target;
   target.world = &world;
@@ -229,24 +246,6 @@ void InspectorPanel::DrawEntity(const PanelContext& context, EditSink& sink,
       DrawComponent(target, info);
     }
     ImGui::PopID();
-  }
-
-  // Components of the prefab this instance removed.
-  if (baseline != nullptr) {
-    for (const std::string& removed : overridden_) {
-      const ComponentInfo* info = world.Registry().FindByName(removed);
-      if (info == nullptr || HasComponent(world, entity, *info)) continue;
-      ImGui::PushID(removed.c_str());
-      ImGui::TextColored({1.0F, 0.75F, 0.3F, 1.0F}, "%s: removed [override]",
-                         removed.c_str());
-      ProbeItem("inspector.override." + removed);
-      ImGui::SameLine();
-      ImGui::BeginDisabled(!sink.CanEdit());
-      if (ImGui::SmallButton("Revert to prefab")) revert(removed);
-      ProbeItem("inspector.revert." + removed);
-      ImGui::EndDisabled();
-      ImGui::PopID();
-    }
   }
 
   if (!others.empty() &&

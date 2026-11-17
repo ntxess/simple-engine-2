@@ -1,0 +1,20 @@
+# Prefabs in a window (M11b, label desktop): the prefab script's steps,
+# then the enemy prefab's sprite region changes and is saved, and the
+# sandbox's enemies are drawn with it. run_editor.py reads the Viewport
+# back before (frame 60) and after (frame 450) and the two differ. Runs on
+# a copy of the content (--content-copy).
+wait-frames 100
+expect-viewport window
+open assets/prefabs/enemy.prefab.json
+expect-active enemy
+set root SpriteRenderer {"texture":748274432,"region":{"x":0,"y":0,"w":24,"h":24},"origin":{"x":12,"y":12}}
+wait-frames 1
+save
+wait-saves
+wait-frames 2
+activate sandbox
+expect-undo-label Prefab changed: prefabs/enemy.prefab.json
+expect-override 5a4db0c5-0000-4000-8000-000000000001 SpriteRenderer no
+wait-frames 500
+expect-viewport window
+quit discard

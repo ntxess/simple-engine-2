@@ -1,0 +1,18 @@
+{
+  "format": "se-scene-v1",
+  "name": "no_prefab",
+  "settings": {"bounds": {"w": 1600, "h": 900}, "seed": 2, "event_watchdog_ms": 36000},
+  "entities": [
+    {"guid": "11a00000-0000-4000-8000-000000000401", "name": "wall",
+     "components": {"Transform": {"pos": {"x": 800, "y": 450}, "scale": {"x": 4, "y": 1}},
+                    "Collider": {"half_extents": {"x": 96, "y": 24}, "role": "body"},
+                    "Team": {"id": "unaffiliated"}}},
+    {"guid": "11a00000-0000-4000-8000-000000000402",
+     "components": {"Transform": {"pos": {"x": 100, "y": 100}},
+                    "Stats": {"HP": 10},
+                    "Path": {"points": [{"x": 100, "y": 100}, {"x": 200, "y": 100}], "loop": true}}},
+    {"guid": "11a00000-0000-4000-8000-000000000403", "name": "enemy beside the wall",
+     "prefab": "prefabs/enemy.prefab.json",
+     "overrides": {"Path": {"points": [{"x": 700, "y": 400}, {"x": 900, "y": 400}]}}}
+  ]
+}

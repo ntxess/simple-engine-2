@@ -1,0 +1,18 @@
+{
+  "format": "se-scene-v1",
+  "name": "stats_by_name",
+  "settings": {"bounds": {"w": 1920, "h": 1080}, "seed": 5, "event_watchdog_ms": 36000},
+  "entities": [
+    {"guid": "11a00000-0000-4000-8000-000000000301", "name": "armoured player",
+     "prefab": "prefabs/player.prefab.json",
+     "overrides": {"Stats": {"Armor": 5, "Luck": 2}}},
+    {"guid": "11a00000-0000-4000-8000-000000000302", "name": "slow enemy",
+     "prefab": "prefabs/enemy.prefab.json",
+     "overrides": {"Stats": {"Speed": 120, "Mana": 40},
+                   "Path": {"points": [{"x": 1500, "y": 200}, {"x": 1200, "y": 900}]}}},
+    {"guid": "11a00000-0000-4000-8000-000000000303", "name": "no speed",
+     "prefab": "prefabs/enemy.prefab.json",
+     "overrides": {"Stats": {"Speed": null},
+                   "Path": {"points": [{"x": 10, "y": 20}]}}}
+  ]
+}

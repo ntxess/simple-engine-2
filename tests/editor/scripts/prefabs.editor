@@ -1,0 +1,57 @@
+# Prefabs in the editor (M11b, headless and in a window): the sandbox and
+# the enemy prefab open together; the prefab's HP changes and it is saved;
+# the sandbox's enemies follow in one undo step, an instance's override
+# survives; undo, redo; the sandbox saves with only prefab references and
+# overrides. Runs on a copy of the content (--content-copy).
+expect-documents 1
+expect-active sandbox
+expect-prefab 5a4db0c5-0000-4000-8000-000000000001 prefabs/enemy.prefab.json
+expect-override 5a4db0c5-0000-4000-8000-000000000001 Path yes
+expect-override 5a4db0c5-0000-4000-8000-000000000001 Stats no
+# Enemy 2 overrides its Speed (by name, through the drawer's group).
+stat-name 5a4db0c5-0000-4000-8000-000000000002 Speed 42
+wait-frames 1
+expect-override 5a4db0c5-0000-4000-8000-000000000002 Stats yes
+expect-dirty yes
+# The prefab, as a second document: its one root entity.
+open assets/prefabs/enemy.prefab.json
+expect-documents 2
+expect-active enemy
+expect-entities document 1
+expect-prefab root none
+stat-name root HP 250
+wait-frames 1
+expect-dirty yes
+save
+wait-saves
+wait-frames 2
+expect-dirty no
+# The save rebased the sandbox at once: its enemies follow (their Stats
+# equal the saved prefab's), enemy 2's Speed override survives.
+activate sandbox
+expect-undo-label Prefab changed: prefabs/enemy.prefab.json
+expect-override 5a4db0c5-0000-4000-8000-000000000001 Stats no
+expect-override 5a4db0c5-0000-4000-8000-000000000003 Stats no
+expect-override 5a4db0c5-0000-4000-8000-000000000002 Stats yes
+expect-override 5a4db0c5-0000-4000-8000-000000000001 Path yes
+# Undo: the enemies hold the old prefab's HP again (they differ from the
+# file's prefab); redo follows it again.
+undo
+expect-override 5a4db0c5-0000-4000-8000-000000000001 Stats yes
+redo
+expect-override 5a4db0c5-0000-4000-8000-000000000001 Stats no
+# A removed component: saved as null, kept removed.
+remove 5a4db0c5-0000-4000-8000-000000000004 Collider
+wait-frames 1
+expect-component 5a4db0c5-0000-4000-8000-000000000004 Collider none
+expect-override 5a4db0c5-0000-4000-8000-000000000004 Collider yes
+# Revert to prefab brings it back; undo removes it again.
+revert-to-prefab 5a4db0c5-0000-4000-8000-000000000004 Collider
+wait-frames 1
+expect-component 5a4db0c5-0000-4000-8000-000000000004 Collider
+expect-override 5a4db0c5-0000-4000-8000-000000000004 Collider no
+undo
+expect-component 5a4db0c5-0000-4000-8000-000000000004 Collider none
+save
+wait-saves
+quit discard

@@ -68,10 +68,54 @@ namespace se::testing {
     // Flattened (kFlatten): the Play-start bytes, faults, the content hash.
     return rampage::SaveScene(world, name);
   };
-  // M11a's writer (kPrefabs), prefab documents, the baseline and the
-  // rebase are stubs until its next commits: they are filled then
-  // (save_scene_file, load_prefab, save_prefab, prefab_baseline,
-  // rebase_instances). Saves write the flattened scene meanwhile.
+  game.save_scene_file = [](const World& world, std::string_view name,
+                            const std::string& asset_root) {
+    // With prefab references (kPrefabs): Save, Save As, autosave, recovery.
+    rampage::SceneWriteOptions options;
+    options.mode = rampage::SceneWriteMode::kPrefabs;
+    options.asset_root = asset_root;
+    return rampage::SaveScene(world, name, options);
+  };
+  game.load_prefab =
+      [](World& world, std::string_view text, const std::string& ref,
+         const std::string& asset_root) -> std::expected<void, Error> {
+    AssertMainThread();
+    const InlineOwnerScope owner(OnMainThread());
+    rampage::SceneLoadOptions options;
+    options.asset_root = asset_root;
+    auto loaded = rampage::LoadPrefabDocument(world, text, ref, options);
+    if (!loaded) return std::unexpected(std::move(loaded.error()));
+    return {};
+  };
+  game.save_prefab = [](const World& world, const std::string& ref,
+                        std::string_view name) {
+    return rampage::SavePrefabDocument(world, ref, name);
+  };
+  game.prefab_baseline = [](const World& world, Guid guid,
+                            const std::string& asset_root)
+      -> std::expected<editor::EntityJson, Error> {
+    rampage::SceneLoadOptions options;
+    options.asset_root = asset_root;
+    auto baseline = rampage::PrefabBaseline(world, guid, options);
+    if (!baseline) return std::unexpected(std::move(baseline.error()));
+    return ToEntityJson(std::move(*baseline));
+  };
+  game.rebase_instances =
+      [](const World& world, std::string_view ref, std::string_view old_text,
+         std::string_view new_text, const std::string& asset_root)
+      -> std::expected<std::vector<editor::EntityJson>, Error> {
+    rampage::SceneLoadOptions options;
+    options.asset_root = asset_root;
+    auto rebased =
+        rampage::RebasePrefabInstances(world, ref, old_text, new_text, options);
+    if (!rebased) return std::unexpected(std::move(rebased.error()));
+    std::vector<editor::EntityJson> out;
+    out.reserve(rebased->size());
+    for (rampage::EntityComponentsJson& entity : *rebased) {
+      out.push_back(ToEntityJson(std::move(entity)));
+    }
+    return out;
+  };
   game.removed_with = [](std::string_view component) {
     std::vector<std::string> out;
     for (const std::string_view derived : rampage::RemovedWith(component)) {
