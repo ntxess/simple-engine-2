@@ -32,6 +32,7 @@
 #include "se_core/world.h"
 #include "se_platform/fs.h"
 #include "se_runtime/app.h"
+#include "se_runtime/app_config.h"
 #include "se_runtime/asset_runtime.h"
 #include "se_runtime/quit.h"
 #include "se_sim/content_bundle.h"
@@ -197,6 +198,9 @@ testing::ModuleSessionResult Replay(const ReplayReader& reader)
 
 TEST_CASE("The start state is created once its texts are resident",
           "[content]") {
+  // The slow disk is --fs-faults, a test hook Release builds lack; without
+  // it the title's text may land before the first frame.
+  if (!kRuntimeTestHooks) SKIP("--fs-faults needs the runtime's test hooks");
   struct Frame {
     std::size_t depth = 0;
     Tick next_tick = 0;

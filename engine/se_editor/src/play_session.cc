@@ -22,8 +22,11 @@
 #include "se_core/schedule.h"
 #include "se_core/thread_role.h"
 #include "se_core/world.h"
+#include "se_platform/fs.h"
 #include "se_render_core/render_list.h"
 #include "se_sim/audio_events.h"
+#include "se_sim/content_bundle.h"
+#include "se_sim/content_source.h"
 #include "se_sim/game_module.h"
 #include "se_sim/game_state.h"
 #include "se_sim/replay.h"
@@ -61,6 +64,29 @@ std::string_view TextOf(const std::vector<std::byte>& bytes) {
 }
 
 }  // namespace
+
+class PlaySession::RecordingContent final : public ContentSource {
+ public:
+  RecordingContent(const ContentSource& inner, std::string_view start_state)
+      : inner_(&inner) {
+    bundle_.SetStartState(start_state);
+  }
+
+  [[nodiscard]] std::expected<std::string_view, Error> Text(
+      std::string_view path) const override {
+    auto text = inner_->Text(path);
+    // Keyed as se_replay is given it: the normalised path.
+    if (text) bundle_.Add(fs::Normalize(path), *text);
+    return text;
+  }
+
+  [[nodiscard]] const ContentBundle& Bundle() const noexcept { return bundle_; }
+
+ private:
+  const ContentSource* inner_;
+  // Text() is const (ContentSource); the bundle is what it served.
+  mutable ContentBundle bundle_;
+};
 
 std::string_view PlayStateName(PlayState state) noexcept {
   switch (state) {
@@ -137,8 +163,12 @@ std::expected<std::unique_ptr<PlaySession>, Error> PlaySession::Start(
     const std::string_view game_start = instance.Module().game_start_state;
     if (!game_start.empty()) first = game_start;
     // The runtime's rules (M13): texts from the content source, every push
-    // through the content gate.
-    env.content = content;
+    // through the content gate; what the states read is kept for the
+    // session's replay and dump (a content bundle).
+    if (content != nullptr) {
+      s.recording_ = std::make_unique<RecordingContent>(*content, first);
+      env.content = s.recording_.get();
+    }
     s.states_ = std::make_unique<GameStateStack>(instance.Factory(), env);
     s.states_->SetContentGate(content_gate);
   }
@@ -341,15 +371,30 @@ ReplayHeader PlaySession::Header() const {
   return MakeReplayHeader(start_.bytes, start_.seed, start_.tick_rate);
 }
 
+std::vector<std::byte> PlaySession::SessionStartBytes() const {
+  if (!recording_ || recording_->Bundle().Empty()) return start_.bytes;
+  return recording_->Bundle().Write();
+}
+
+std::size_t PlaySession::LogEntries() const noexcept {
+  const std::size_t texts =
+      recording_ ? recording_->Bundle().Texts().size() : 0;
+  return log_.Applied().size() + log_.PendingCount() + texts;
+}
+
 std::vector<std::byte> PlaySession::DumpBytes() const {
+  const std::vector<std::byte> start = SessionStartBytes();
   ReplayRecorder file;
-  file.Begin(Header(), start_.bytes);
+  file.Begin(MakeReplayHeader(start, start_.seed, start_.tick_rate), start);
   file.RecordSession(log_);
   return file.Finish();
 }
 
 std::vector<std::byte> PlaySession::FinishReplay() {
   if (!recorder_.Active()) return {};
+  if (recording_ && !recording_->Bundle().Empty()) {
+    recorder_.SetStart(recording_->Bundle().Write());
+  }
   recorder_.RecordSession(log_);
   return recorder_.Finish();
 }

@@ -301,6 +301,12 @@ def main():
                 cmd = [args.replay, "--module", "rampage", "--inputs",
                        str(replay), "--start-scene",
                        str(workdir / "start.scene.json")]
+                # 'Play game' (ADR-129): the replay starts from a content
+                # bundle, whose Gameplay scene is the editor's Play-start
+                # file under the pref directory.
+                play_game = pref / "play-game.scene.json"
+                if play_game.exists():
+                    cmd += ["--scene", play_game.resolve().as_posix()]
                 if args.expect_edges is not None:
                     cmd += ["--edges-out", str(edges)]
                 code, output = run(cmd, args.timeout, env)

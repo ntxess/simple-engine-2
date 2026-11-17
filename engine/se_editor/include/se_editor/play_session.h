@@ -228,7 +228,12 @@ class PlaySession {
   [[nodiscard]] std::uint64_t DocumentHash() const noexcept {
     return start_.document_hash;
   }
-  // The replay so far (header, the Play-start bytes, every tick's frame
+  // What the session's replay and dump start from: the Play-start bytes,
+  // or for 'Play game' whose states read texts, the content bundle of every
+  // text they read (its start state the game's), so se_replay runs the
+  // game's states from it (ADR-129).
+  [[nodiscard]] std::vector<std::byte> SessionStartBytes() const;
+  // The replay so far (header, the start bytes, every tick's frame
   // and hash, the SessionLog). Ends the recording: call once, at Stop or
   // at the fault.
   [[nodiscard]] std::vector<std::byte> FinishReplay();
@@ -248,13 +253,15 @@ class PlaySession {
   // replay file without frames (the header, the Play-start bytes and the
   // SessionLog so far).
   [[nodiscard]] std::vector<std::byte> DumpBytes() const;
-  // Grows with every SessionLog entry (edits and markers): DumpBytes()
-  // changed.
-  [[nodiscard]] std::size_t LogEntries() const noexcept {
-    return log_.Applied().size() + log_.PendingCount();
-  }
+  // Grows with every SessionLog entry (edits and markers) and every text
+  // 'Play game' read: DumpBytes() changed.
+  [[nodiscard]] std::size_t LogEntries() const noexcept;
 
  private:
+  // 'Play game': the content source its states read through, which keeps
+  // every text it served in a content bundle.
+  class RecordingContent;
+
   PlaySession(ModuleInstance& instance, jobs::ForkJoinPool& pool,
               PlayStart start);
   void Marker(SessionOp op) SE_REQUIRES(g_main) SE_EXCLUDES(g_sim_owner);
@@ -269,6 +276,7 @@ class PlaySession {
   SimDriver driver_;
   SessionLog log_;
   ReplayRecorder recorder_;
+  std::unique_ptr<RecordingContent> recording_;
   PlayFault fault_;
   // Whether the play World steps (its state's SimRunning); false while
   // Paused or Faulted, so SessionLog entries apply at once.

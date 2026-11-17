@@ -96,7 +96,10 @@ if(NOT CMAKE_BUILD_TYPE STREQUAL "Release" AND TARGET simple_editor)
   _se_editor_script(play_session_replays play_session
     --replay $<TARGET_FILE:se_replay>)
   # 'Play game': the module's own stack on the Play-start bytes.
-  _se_editor_script(play_game play_game --expect "play game: started")
+  # 'Play game' from the Title through the content gate; its replay starts
+  # from the content bundle of the texts its states read (ADR-129).
+  _se_editor_script(play_game play_game --expect "play game: started"
+    --replay $<TARGET_FILE:se_replay>)
   _se_editor_script(tick_fault tick_fault --expect-fault-files
     --expect "Play.Faulted: tick fault")
   _se_editor_script(render_fault render_fault --expect-fault-files

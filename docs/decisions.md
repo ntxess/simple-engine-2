@@ -5171,6 +5171,10 @@ with a session log is shown on rampage itself.
   session stream (a bundle of the sandbox and its prefabs), and se_replay
   --from-dump replays it, the pause included, to the dump's hash.
   crash.runtime_dump_with_session_log keeps running on content_probe.
+- **Release.** `runtime.The start state is created once its texts are
+  resident` (M13a) passed `--fs-faults`, a test hook Release builds
+  reject at boot; the integration's msvc-release run found it. It now
+  skips in builds without kRuntimeTestHooks.
 
 **Why.** Booting the real App (lane, gate, AssetRuntime as the content
 source) is the only way the comparison covers what the runtime does; a
@@ -5235,11 +5239,16 @@ in rampage.
 
 **Consequences.**
 - Play game's replay (<pref>sessions/last-play.sereplay) and its dump
-  stream keep the Play-start bytes as their start bytes (no content
-  bundle), so se_replay replays a Play game session as the sandbox state on
-  them, which matches the live session only if it never left the Gameplay.
-  A bundle would have to name the Gameplay scene, which lives under <pref>,
-  not under the content root. Open for M17b or later.
+  stream start from a content bundle: the session's states read through a
+  recording ContentSource over the AssetRuntime, which keeps every text it
+  served (keyed by its normalised path; start_state the game's), and
+  PlaySession::SessionStartBytes gives that bundle once a text was read
+  (ReplayRecorder::SetStart at Stop). The Gameplay scene's key is the
+  Play-start file's absolute path under <pref>, so se_replay needs it as
+  `--scene` (run_editor.py passes it when <pref>play-game.scene.json
+  exists); se_replay also writes `--edges-out` for bundle replays now. The
+  session header written when Play game starts still hashes the Play-start
+  bytes, so a Play game dump's `--from-dump` replay is not covered; open.
 - The App's text swap listener (StartGame) logs the editor's text swaps
   into the App's own unused SessionLog; a Play game session does not see
   them (gameplay texts are frozen during Play, so none happens inside a
@@ -5249,7 +5258,8 @@ in rampage.
 
 **Checked by.** `editor.script.play_game` (the Title waits at the gate,
 "play game: 'title' waits at the content gate", then Gameplay from the
-Play-start bytes), `editor.script.play_game_input`,
+Play-start bytes; se_replay reproduces the session from its bundle),
+`editor.desktop.play_game_input` (its four edges from the bundle replay),
 `editor.desktop.play_session`, `editor.Play-start bytes stay flattened`.
 
 ## ADR-130 The editor's quit durability test: one file held, documents checked against their files (2026-11-17)

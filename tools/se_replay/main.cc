@@ -527,6 +527,11 @@ int RunRampage(const Args& args) SE_REQUIRES(g_main) SE_EXCLUDES(g_sim_owner) {
           flow.gameplay_scene = args.scene;
           rampage::SetFlowConfig(std::move(flow));
         }
+        if (!args.edges_out.empty() && !WriteEdges(args.edges_out, *reader)) {
+          std::fprintf(stderr, "se_replay: cannot write %s\n",
+                       args.edges_out.c_str());
+          return 2;
+        }
         return RunStates(args, rampage::RampageModule(), nullptr);
       }
       input_ticks = reader->Frames().size();
