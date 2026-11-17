@@ -4729,6 +4729,11 @@ flattened text's, is the same.
 **Why.** The editor applies a frame's commands after ImGui::Render, so a
 press of n creates costs one frame of n creates; measured below.
 
+**Measured** (2026-11-17, msvc-dev, CPU load 11% from other processes):
+`editor_panels.A 1000-enemy press applies in one frame` applied the
+press's 1000 creates in 2.20 to 4.09 ms over five runs (median 2.47 ms),
+far below the 250 ms bound and well inside one frame at 60 Hz.
+
 **Checked by.** `editor_panels.The stress generator's press is one command
 group in its frame` (the tab hidden in the next frames leaves nothing
 open), `editor_panels.A 1000-enemy press applies in one frame` (label slow;
