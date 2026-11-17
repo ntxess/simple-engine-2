@@ -1,4 +1,4 @@
-# Milestone specs: M1 to M10, M12, M14 and M17a
+# Milestone specs: M1 to M14 and M17
 
 Detailed specs for the first milestones after M0. The milestone table and the
 exit criteria are in docs/implementation-plan.md; the design is in
@@ -1946,3 +1946,1228 @@ ADRs 107-110.
 - The full matrix (-Milestone -Legacy, which includes -Desktop, plus
   wsl:linux-clang-debug and msvc-unpatched-dev).
 - ADRs 111 and on.
+
+## M11 Save/load, prefabs, hot reload, component removal (CF d)
+
+Design sources: docs/design/costfree-end-state.md "Scenes, content and game
+flow" (scenes, prefab instances with overrides), "Serialization,
+reflection and config" (one RFC 7386 merge patch per component, arrays
+replaced whole, no nested prefabs, versioned formats, atomic writes),
+"Editor" (documents for scenes and prefabs, every change a command, "Hot
+reload polls file timestamps. Save writes the same files rampage loads"),
+"Tests, determinism and CI" (load-save-load equality for every scene
+fixture, prefab overrides, undo then redo is the identity, the editor and
+the runtime load a scene into identical Worlds), "Kept From Todays Code"
+(cd906a37b: component removal restored as a real registry command; the
+stress generator); docs/design/mt-design.md "Editor" (documents, edits,
+resource-releasing commands at the next frame start, gameplay assets frozen
+in Play) and "Audio And Assets" (hot reload); ADR-095 to ADR-103, ADR-112.
+
+What exists: the scene loader already reads prefab references and
+"overrides" (games/rampage/src/scene.cc CreateEntity), but SaveScene
+flattens every entity, so the editor's Save (EditDocument::Serialize ->
+EditorGame::save_scene) writes the sandbox back without its prefabs; the
+World keeps no record of which prefab an entity came from. M10a's
+RemoveComponentCommand already removes a component (ledger row "Component
+removal in the inspector", open M11); what is missing is what a removal
+means for prefab instances and saved files, and the components it must
+take with it. The editor holds one document (Editor::document_). M11
+closes the M10/M12/M14 review carry-overs:
+
+- a stat name typed in the Stats or effect drawers lives in
+  StatDrawer::typed_names_ (se_editor_panels), not in the World's
+  StatNames, so SaveScene writes that stat in registry form and the name is
+  lost (ADR-100); the name must reach the document through a command and
+  the file through the writer;
+- the stress generator keeps one coalesce scope open across frames in
+  Edit mode (ADR-102); a hidden dock tab leaves it open (its Draw does not
+  run), and a document change mid-press sends the remaining batches to the
+  new document (ADR-112, Consequences).
+
+M11 runs as two tracks that meet in the scene contract below: M11a (the
+formats: game_rampage's scene writer, prefab documents, the prefab link)
+and M11b (the editor: several documents, prefab-aware commands and
+panels, hot reload into documents, the carry-overs).
+
+### The scene contract (between M11a and M11b)
+
+Written by M11a first and committed early; M11b copies the declarations
+verbatim onto its branch until the merge.
+
+`engine/se_core/include/se_core/core_components.h` (M11a, additive):
+
+```cpp
+// The prefab an entity is an instance of: its reference relative to the
+// asset root ("prefabs/enemy.prefab.json"). Registered "PrefabInstance",
+// kSerialized | kEditorVisible, not kHashed: linking or unlinking an
+// entity changes no tick result and no golden. The scene writer writes it
+// as the entity's "prefab", never under "components"; the loader sets it
+// and nothing else may (it is reserved like IdComponent, Name, Spawned).
+struct PrefabInstance {
+  std::string prefab;
+};
+```
+
+`games/rampage/include/game_rampage/scene.h` (M11a, additive; the
+existing LoadScene and the SaveScene default keep their behaviour):
+
+```cpp
+enum class SceneWriteMode : std::uint8_t {
+  // Every entity's components whole (M3's SaveScene): the Play-start
+  // bytes, fault files and dumps, which must load without prefab files.
+  kFlatten,
+  // Prefab instances as "prefab" plus "overrides" (one RFC 7386 merge
+  // patch per component against what loading the bare instance gives;
+  // null removes a member, or the component), other entities as
+  // "components": Save, Save As, autosave and recovery files.
+  kPrefabs,
+};
+
+struct SceneWriteOptions {
+  SceneWriteMode mode = SceneWriteMode::kFlatten;
+  // kPrefabs: prefab references resolve here, or through |resolver|.
+  std::string asset_root;
+  PrefabResolver resolver;
+};
+
+[[nodiscard]] std::expected<std::string, Error> SaveScene(
+    const World& world, std::string_view name,
+    const SceneWriteOptions& options = {});
+
+// SceneLoadOptions gains (additive):
+//   // Called once per prefab the load read, with its text (the editor
+//   // keeps them: a later change of the file is rebased against them).
+//   std::function<void(std::string_view ref, std::string_view text)>
+//       on_prefab;
+
+// Prefab documents: a prefab opened in the editor is a World with one
+// entity whose Guid is PrefabRootGuid(ref) (a fixed hash of the
+// reference, so a prefab document hashes the same everywhere).
+[[nodiscard]] Guid PrefabRootGuid(std::string_view ref) noexcept;
+std::expected<SceneSummary, Error> LoadPrefabDocument(
+    World& world, std::string_view text, std::string_view ref,
+    const SceneLoadOptions& options) SE_REQUIRES(g_sim_owner);
+// The root entity as se-prefab-v1 (its name, its components in the
+// scene form: stats and textures by name).
+[[nodiscard]] std::expected<std::string, Error> SavePrefabDocument(
+    const World& world, std::string_view ref, std::string_view name);
+
+// One entity's components in the registry's JSON form, by registered
+// name, in registration order.
+struct EntityComponentsJson {
+  Guid guid;
+  std::vector<std::pair<std::string, std::string>> components;
+};
+
+// What a bare instance of the entity's prefab loads to (the writer's
+// baseline, and the Inspector's "Revert to prefab").
+[[nodiscard]] std::expected<EntityComponentsJson, Error> PrefabBaseline(
+    const World& world, Guid guid, const SceneLoadOptions& options);
+
+// Every instance of |ref| in |world| as it loads once the prefab's text
+// changes from |old_text| to |new_text|: each instance's overrides,
+// taken against the old text, applied over the new one. Instances whose
+// result equals what they hold are left out.
+[[nodiscard]] std::expected<std::vector<EntityComponentsJson>, Error>
+RebasePrefabInstances(const World& world, std::string_view ref,
+                      std::string_view old_text, std::string_view new_text,
+                      const SceneLoadOptions& options);
+
+// The components removing |component| takes with it (those FinishLoad
+// derives from it: PathCache with Path; ActiveEffects with Stats;
+// PairCooldowns with EffectSource), and whether it may be removed at all
+// (IdComponent, Name, Spawned, PrefabInstance and Transform may not).
+[[nodiscard]] std::span<const std::string_view> RemovedWith(
+    std::string_view component) noexcept;
+[[nodiscard]] bool Removable(std::string_view component) noexcept;
+```
+
+`engine/se_editor/include/se_editor/editor_game.h` (M11b, additive; the
+editor executable fills the new members from the functions above):
+
+```cpp
+struct EntityJson {
+  Guid guid;
+  std::vector<ComponentJson> components;
+};
+
+struct EditorGame {
+  // ... M10a's members; load_scene gains a callback for the prefab texts
+  // it read:
+  std::function<std::expected<void, Error>(
+      World& world, std::string_view text, const std::string& asset_root,
+      const std::function<void(std::string_view ref,
+                               std::string_view text)>& on_prefab)>
+      load_scene;
+  // save_scene stays the flattened form (the Play-start bytes, faults).
+  // Save, Save As, autosave and recovery: with prefab references.
+  std::function<std::expected<std::string, Error>(
+      const World& world, std::string_view name,
+      const std::string& asset_root)>
+      save_scene_file;
+  std::function<std::expected<void, Error>(
+      World& world, std::string_view text, const std::string& ref,
+      const std::string& asset_root)>
+      load_prefab;
+  std::function<std::expected<std::string, Error>(
+      const World& world, const std::string& ref, std::string_view name)>
+      save_prefab;
+  std::function<std::expected<EntityJson, Error>(
+      const World& world, Guid guid, const std::string& asset_root)>
+      prefab_baseline;
+  std::function<std::expected<std::vector<EntityJson>, Error>(
+      const World& world, std::string_view ref, std::string_view old_text,
+      std::string_view new_text, const std::string& asset_root)>
+      rebase_instances;
+  std::function<std::vector<std::string>(std::string_view component)>
+      removed_with;
+  std::function<bool(std::string_view component)> removable;
+};
+```
+
+### M11a: the formats (games/rampage, engine/se_core)
+
+- `PrefabInstance` in se_core's core components (above), registered after
+  DestroyRequest. Not hashed, so determinism_kernel, determinism_rampage,
+  the reference comparisons and every golden are unchanged (a test runs
+  them; nothing is re-baselined). The serialization round trip "for every
+  registered component" covers it without a new case.
+- The loader (scene.cc CreateEntity) adds PrefabInstance{ref} to every
+  entity with a "prefab" and reports each prefab text it read through
+  SceneLoadOptions::on_prefab; "PrefabInstance" joins the reserved names
+  (a scene may not set it under "components").
+- The writer, kPrefabs mode, per entity in spawn order:
+  - no PrefabInstance: "components" whole, as kFlatten writes them;
+  - an instance: "prefab" and "overrides" computed in two passes so that
+    a load of the written entity gives exactly the entity:
+    1. the scene form of each component (stats and textures by name,
+       StatIdsToNames and TextureKeyToName as today) against the
+       prefab's component: equal: nothing; absent from the prefab: the
+       whole value (as a merge patch it adds the component); absent from
+       the entity: `null`; otherwise the RFC 7386 diff (objects member by
+       member, arrays and scalars whole, a member the entity lacks as
+       null). Components FinishLoad derives (PathCache, ActiveEffects,
+       PairCooldowns, MoveIntent, ActionBuffer, Moved) and Transform are
+       left out of this pass;
+    2. the entity with pass 1's overrides is loaded into a scratch World
+       (the loader, R12 and FinishLoad included); each component still
+       different from the entity's (Transform, a derived one with state)
+       is written as its diff against the scratch entity's. So
+       sandbox.scene.json, whose enemies have only Path overrides and
+       start at their first point by R12, saves with only Path overrides.
+  - "name" as today; Spawned is not written (the load records it).
+- kFlatten mode is today's output exactly (a test compares it with the
+  M3 writer's on every fixture), so the Play-start bytes, the editor's
+  recovery bytes before M11 and se_replay's start scenes keep their form.
+- Prefab documents: LoadPrefabDocument creates the root entity
+  (PrefabRootGuid(ref)) with the prefab's components, settings defaults
+  in the ctx (ApplySceneSettings with the default bounds), FinishLoad;
+  SavePrefabDocument writes se-prefab-v1 with the root's components in
+  scene form, the derived ones left out (the same rule as pass 1).
+- PrefabBaseline and RebasePrefabInstances are built on the same pieces
+  (load a bare instance into a scratch World; overrides = the writer's two
+  passes against the old text; apply them over the new text). The rebase
+  of an instance whose overrides remove a component the new prefab no
+  longer has keeps it removed; one that overrides a member the new prefab
+  renamed keeps the override (it becomes an added member): merge patches
+  are applied as written, never interpreted.
+- NameTable gains `Remove(id)` (stats.cc), for the editor's undo of a
+  name it added (M11b).
+- RemovedWith and Removable: the table above, written once beside
+  FinishLoad so the two never disagree (a test checks that every component
+  FinishLoad adds is listed under the component it derives from).
+- Tests (tests/rampage, label unit, everywhere):
+  - `scene.Load, save and load again give identical Worlds for every
+    scene fixture` (kFlatten and kPrefabs; the sandbox scene, the two
+    prefabs, tests/fixtures/scenes/*.scene.json written for M11: an
+    instance with a removed component, one with an added component, one
+    overriding a nested member, one with stats added by name, an entity
+    without a prefab, a Camera2D, a SpriteRenderer tint): equal Hash,
+    equal Digests, equal kFlatten text of the two Worlds;
+  - `scene.The sandbox scene saves back to its own content`: kPrefabs
+    output parsed as JSON equals assets/scenes/sandbox.scene.json parsed
+    (only Path overrides; no Transform, no derived component);
+  - `scene.Overrides survive a prefab change`: an instance overriding
+    Stats.Speed and its Path; the prefab's HP and Speed change; the
+    rebase gives the new HP and the overridden Speed and Path;
+  - `scene.A removed prefab component saves as null and stays removed`
+    (also across a rebase);
+  - `scene.Flatten mode writes what M3's writer wrote` (byte equality on
+    every fixture);
+  - `scene.A prefab document saves back to its file` (both prefabs,
+    parsed JSON equality) and `scene.A prefab root's Guid is fixed`;
+  - `scene.Every component FinishLoad adds is removed with its source`;
+  - the determinism and reference suites unchanged (the existing tests,
+    no re-baselining: PrefabInstance is not hashed).
+
+ADRs 114-116.
+
+### M11b: the editor (engine/se_editor, engine/se_editor/panels, apps/editor)
+
+**Documents.**
+- `se_editor/documents.h`: `DocumentSet` holds every open EditDocument
+  and the active one; each document has a kind (kScene, kPrefab), an id
+  that is never reused, its own undo stack, selection, dirty flag,
+  autosave timer and recovery file (M10a's per-document parts move into
+  it). File > Open adds a document (or activates the one already open on
+  that path); File > Close closes the active one (the M10a open prompt
+  becomes the close prompt: Save, Don't Save, Cancel); a strip of
+  document tabs in the Document panel switches the active one; Save All.
+  Play plays the active scene document (Play is disabled on a prefab
+  document); while a Play session exists the set is frozen: no open,
+  close or switch (the panels show the play World anyway).
+- The quit prompt lists every dirty document (Save All, Don't Save,
+  Cancel); Save All submits each document's save as a Durable lane job;
+  one failure keeps that document dirty, shows its error and cancels the
+  quit; the others are saved (M10a's rule per document).
+- `EditDocument::ContentHash()`: the hash of the document's kFlatten text
+  (EditorGame::save_scene). The World hash covers kHashed components only,
+  so SpriteRenderer, Camera2D, IdComponent, PrefabInstance and the ctx
+  name tables are invisible to it; undo, redo and Stop's check use both.
+  Stop asserts that both are unchanged.
+- Saves use save_scene_file (kPrefabs) or save_prefab; autosave and
+  recovery files keep the prefab references (se-recovery-v1 gains the
+  document's kind; v1 files read as scenes, no migration needed since the
+  field defaults). The Play-start bytes, fault files and dump streams stay
+  flattened (save_scene): a replay or a dump must never depend on prefab
+  files that may change after it was written.
+- Opening a prefab document: load_prefab; its hierarchy is its one root
+  entity; Save writes the prefab file; the Inspector edits it like any
+  entity (commands; undo).
+
+**Commands and the carry-overs.**
+- A queued command records the id of the document it was submitted for
+  (`Queued::document`); the frame's apply step applies it to that
+  document, and drops it (logged) when that document was closed. A change
+  of the active document never redirects an edit.
+- A coalesce scope belongs to the document and to the panel that opened
+  it (the shell knows the panel being drawn, Editor::drawing_panel_):
+  the shell ends the scope at the frame's apply step when that panel did
+  not draw in the frame (its tab hidden, its window closed), when the
+  document is closed or deactivated, and at Play. Ending it is logged.
+  This closes the hidden-tab case for every panel (the gizmo's drag too).
+- The stress generator in Edit mode submits a press as one CommandGroup
+  of create-entity commands in the frame of the press: no scope spans
+  frames (ADR-102 amended; Play keeps its spread over ticks through the
+  SessionLog). The spawns are prefab instances: each carries
+  PrefabInstance{"prefabs/enemy.prefab.json"} and the full components (as
+  M10b's spec built them), so a saved scene writes each spawn as the
+  prefab plus its Path and, where R12 does not place it, Transform. A
+  bench row records the cost of one 1000-spawn press in msvc-dev
+  (`editor_panels.A 1000-enemy press applies in one frame`, label slow;
+  the time is logged, the test fails above 250 ms).
+- Stat names: `StatNameCommand` (se_editor_panels/stat_name_command.h,
+  CommandKind::kGame, a new enumerator for commands a game-aware module
+  defines): Apply records the name in the document World's StatNames
+  under the kEditorCommand gate (it remembers whether the name was new);
+  Revert removes a name it added (NameTable::Remove); ToSession gives no
+  entries (stat ids are name hashes, so the play World needs no name; the
+  Play-start bytes carry the names in the scene's own form). The Stats and
+  effect drawers submit a new stat as a CommandGroup {StatNameCommand,
+  SetComponentCommand}: one undo step. typed_names_ goes; StatName() reads
+  the World's StatNames only.
+- Removal: the Inspector's remove submits a CommandGroup of
+  RemoveComponentCommands for the component and every component
+  `removed_with` names that the entity holds (undo restores all of them);
+  a component `removable` refuses has no close button (and the script's
+  `remove` fails on it with the reason). On a prefab instance the saved
+  file then holds `"<component>": null` in the overrides (M11a); the
+  ledger row "Component removal in the inspector" closes as ported.
+- "Revert to prefab" (Inspector, per component of an instance): a
+  set-component command to the baseline's value (an add when the instance
+  had removed it, a remove when the prefab lacks it); the Inspector marks
+  the components that differ from the baseline (computed once per frame
+  for the selected entity only).
+
+**Hot reload into documents.**
+- Each open document watches its own file and the prefab files its load
+  reported (BackgroundLane::Watch with an editor tag; the completions
+  reach the editor through AssetRuntime's foreign handler, M10a). A
+  change is read on the lane (an Urgent read job) and compared by content
+  with the text the document holds; equal content is ignored.
+- A prefab that changed: every open scene document holding instances of
+  it gets one undo step "Prefab changed: <ref>": a CommandGroup of the
+  set, add and remove commands that turn each instance into
+  rebase_instances' result. The document's recorded prefab text becomes
+  the new one (not part of undo: after an undo the instance differs from
+  the file's prefab, which the next save writes as overrides, which is
+  what the user then has). Saving a prefab document rebases the other open
+  documents at once from the save's completion (the scan's later report of
+  the same content is a no-op).
+- The document's own file changed by another program: a clean document is
+  reloaded (logged; its undo stack starts again); a dirty one gets a
+  prompt (Reload, Keep mine); Keep mine leaves the document dirty so the
+  next save wins.
+- During Play these wait for Stop (M10a's freeze of gameplay assets; the
+  watch completions are kept and handled at Stop, in order).
+
+**Panels.**
+- Hierarchy: a prefab column (the reference's file name, "-" for none) and
+  a marker on instances with overrides.
+- Inspector: per-component override markers, Revert to prefab, removal as
+  above; the prefab document's root shows no prefab column.
+- Viewport, Log, Profiler, Schedule and Scene settings are unchanged.
+
+**apps/editor**: fills the new EditorGame members from M11a's functions;
+`--scene FILE` may name a prefab (kind by its "format").
+
+**Script verbs** (editor_script.h): `open FILE` (adds or activates),
+`activate NAME|INDEX`, `close [save|discard|cancel]`, `save-all`,
+`expect-documents N`, `expect-content-hash document V|initial|play-start`,
+`revert-to-prefab GUID COMPONENT`, `expect-prefab GUID REF|none`,
+`expect-override GUID COMPONENT [yes|no]`, `stat-name GUID NAME VALUE`
+(adds a stat by name through the drawer's command group),
+`expect-stat-name NAME [yes|no]`, `write-file FILE TEXT` (writes a file
+through se::fs from the script: an external change for the hot-reload
+tests; never a user's file), `wait-reload`, `answer-reload reload|keep`.
+
+**Tests (M11b):**
+- headless (everywhere): `editor.Undo then redo is the identity on the
+  document hash and content hash` for every command kind including
+  StatNameCommand, the removal groups, Revert to prefab and a prefab
+  rebase (each also through `undo` x N then `redo` x N over a mixed
+  sequence of 50 commands); `editor.Commands apply to the document they
+  were made for`; `editor.A coalesce scope ends when its panel stops
+  drawing`; `editor.A stat typed in the Stats drawer is saved by name`
+  (save, reopen, the name is in StatNames and the file has the named
+  form); `editor.Removing a component removes what derives from it`;
+  `editor.A saved prefab updates its instances in an open scene`;
+  `editor.A prefab changed on disk is one undo step per document`;
+  `editor.A changed document file reloads when clean and asks when
+  dirty`; `editor.Play-start bytes stay flattened`; recovery files with
+  prefab references round-trip;
+- editor_panels (headless ImGui): the drawers' new-stat path submits the
+  group; the Hierarchy's prefab column; the Inspector's override markers
+  and revert; the stress generator's one-frame press with the tab hidden
+  in the next frame (nothing is left open) and `editor_panels.A
+  1000-enemy press applies in one frame` (slow);
+- scripts (headless, run_editor.py): `editor.script.prefabs` (open the
+  sandbox and the enemy prefab, change the prefab's HP, save it, the
+  sandbox's enemies follow, an instance's override survives, undo, redo,
+  save the sandbox, its file has only overrides), `editor.script.documents`
+  (three documents, switch, close with the prompt), `editor.script.
+  hot_reload` (write-file on a prefab and on the document), `editor.
+  script.stat_names`, `editor.script.stress_prefabs` (a press in Edit
+  mode, save, the file's spawns are prefab instances);
+- desktop (unfocused window, scripts only): `editor.desktop.prefabs` (the
+  prefab script in a window; the Viewport's readback changes after the
+  prefab's texture region change).
+
+ADRs 117-121.
+
+### Exit (M11)
+
+- Undo followed by redo is the identity on the document hash and on its
+  content hash, for every command kind, the prefab rebase included.
+- Prefab overrides: an instance keeps its overrides across a prefab change,
+  a removed component stays removed and saves as null, and the sandbox
+  saves back to its own content.
+- The editor and the runtime load identical Worlds from every scene
+  fixture (equal Hash, Digests and flattened text; the test is in the
+  integration, which has both loaders on one branch).
+- A stat name typed in the editor is saved; no coalesce scope outlives its
+  panel's frame or its document.
+- Prefab documents, several documents and hot reload into documents work
+  in a window (a gates.md row: the owner checks a screenshot).
+
+## M13 rampage runtime (CF e)
+
+Design sources: docs/design/costfree-end-state.md "Scenes, content and
+game flow" (Title, Gameplay, Pause and GameOver states that own Worlds and
+request transitions; the deferred pushdown semantics; "the editor is never
+a scene"), "Runtime and main loop", "Assets and content pipeline", "Kept
+From Todays Code" (the SceneManager semantics; the MainMenu's wallpaper);
+docs/design/mt-design.md "Lifecycle" (QuitPending, Faulted in the game
+build, the Shutdown Order), "Audio And Assets" (a World never steps
+before its assets are resident; bounded lane steps; hot reload),
+"Determinism And Debugging" (GameState transitions at tick boundaries,
+red team C6; what determines the simulation), "Tests And Tooling" (quit
+durability, shutdown stress); docs/design/dedicated-driver.md "Lifecycle"
+(the runtime pushes its own Pause on focus loss; Loading waits for its
+scope); ADR-079, ADR-081, ADR-089, ADR-092.
+
+What exists: rampage runs one state, "sandbox", which loads its scene in
+OnEnter with LoadSceneFile, a synchronous std::ifstream read on main
+inside a tick boundary (games/rampage/src/module.cc), so neither M9's "a
+World never steps before its scope is resident" nor the lane's bounded
+reads cover scenes and prefabs; the AssetRegistry's Prefab and SceneChunk
+stores have no caller. The module's start state is "sandbox", which the
+editor's Play (ADR-097), se_replay and every rampage golden depend on.
+GameStates cannot read input or content; systems request transitions
+with RequestGameState. The ledger's open row "Escape replaces the
+Sandbox with MainMenu" is M13's.
+
+M13 runs as two tracks that meet in the content contract below: M13a (the
+engine: content through the lane, the stack's content gate, the runtime's
+start state, focus-loss and empty-stack rules, replays and dumps of
+multi-state sessions, the quit and shutdown tests) and M13b (the game:
+rampage's four states, its flow rules, their scenes and the executable).
+
+### The content contract (between M13a and M13b)
+
+Written by M13a first and committed early; M13b copies it verbatim.
+
+`engine/se_sim/include/se_sim/content_source.h` (new):
+
+```cpp
+// The files a GameState builds its Worlds from (scenes, prefabs), by path
+// relative to the content root. The runtime's source is the AssetRuntime's
+// text assets: a state is created only once its files are loaded and its
+// assets resident (the stack's content gate), so Text() never touches a
+// disk on the owner thread. Tools and tests read synchronously.
+class ContentSource {
+ public:
+  virtual ~ContentSource() = default;
+  // The text of |path|; an Error when it is not loaded or does not exist.
+  [[nodiscard]] virtual std::expected<std::string_view, Error> Text(
+      std::string_view path) const = 0;
+};
+
+// Reads through |read| on first use and keeps the text (se_replay, tests).
+// A content bundle (content_bundle.h) is the other source tools use.
+class CachedContentSource final : public ContentSource {
+ public:
+  using Reader =
+      std::function<std::expected<std::string, Error>(std::string_view)>;
+  explicit CachedContentSource(Reader read);
+  [[nodiscard]] std::expected<std::string_view, Error> Text(
+      std::string_view path) const override;
+
+ private:
+  Reader read_;
+  mutable std::map<std::string, std::string, std::less<>> texts_;
+};
+```
+
+`engine/se_sim/include/se_sim/game_state.h` and `game_module.h`
+(additive):
+
+```cpp
+struct StateEnv {
+  // ... M2's members
+  // Where the state's Worlds come from; null: the state reads nothing
+  // (M2's tests) or reads files itself (the sandbox state before M13).
+  const ContentSource* content = nullptr;
+};
+
+// Asked before a push or replace creates its state (owner thread, at a
+// tick boundary).
+class StateContentGate {
+ public:
+  virtual ~StateContentGate() = default;
+  // Whether the state |state_id| may be created now: its files loaded and
+  // its assets resident.
+  [[nodiscard]] virtual bool Ready(std::string_view state_id)
+      SE_REQUIRES(g_sim_owner) = 0;
+};
+
+class GameStateStack {
+ public:
+  // ... M2's members
+  // A push or replace whose state |gate| does not report ready stays
+  // queued, with every command behind it (FIFO); ApplyPending returns and
+  // Waiting() names the state until a later boundary applies it. A null
+  // gate (replays, tests) applies at once, so the same commands apply
+  // before the same tick either way.
+  void SetContentGate(StateContentGate* gate) noexcept;
+  // The state the queued push or replace at the front waits for (World
+  // requests collected first); empty when nothing waits.
+  [[nodiscard]] std::string_view Waiting() const noexcept;
+};
+
+struct GameModule {
+  // ... M2's members
+  // The state a player's session starts in (rampage: "title"); the
+  // runtime and the editor's 'Play game' start here. start_state stays
+  // the one-World state editor Play, se_replay and the goldens use.
+  std::string_view game_start_state;
+};
+```
+
+`engine/se_runtime/include/se_runtime/app.h` GameSetup and
+`asset_runtime.h` StateAssets (additive):
+
+```cpp
+struct StateAssets {
+  // ... M9's members
+  // Files loaded as text through the lane before the state is created,
+  // relative to the content root, and every file text_dependencies names
+  // for them.
+  std::vector<std::string> texts;
+};
+
+struct GameSetup {
+  // ... M5-M10's members
+  // The state the App pushes at boot (empty: the module's
+  // game_start_state, else its start_state).
+  std::string start_state;
+  // The files a loaded text needs too (rampage: a scene's prefabs), by
+  // path relative to the content root.
+  std::function<std::vector<std::string>(std::string_view path,
+                                         std::string_view text)>
+      text_dependencies;
+  // Focus lost while a session runs: the GameState command the game wants
+  // (rampage: push "pause" when "gameplay" is on top), queued in the
+  // SessionLog against the next tick, so a replay pauses where the live
+  // session did.
+  std::function<std::optional<StateCommand>(std::string_view top_state)>
+      on_focus_lost;
+};
+```
+
+### M13a: the engine (engine/se_sim, engine/se_runtime, engine/se_assets, tools/se_replay)
+
+- se_assets: a Text store (`TextAsset`, `RequestText(scope, path)`,
+  `Text(handle)` returning the file's bytes as a shared immutable string)
+  read on the lane in steps of at most 1 MB like every read, watched by
+  the hot-reload scan, under SetGameplayFrozen's freeze like prefabs. The
+  Prefab and SceneChunk stores stay as they are, without a consumer
+  until M19's importer (decision 6 below; a ledger row records it).
+- AssetRuntime is the StateContentGate and the runtime's ContentSource:
+  - Ready(state) creates the waiting state's AssetScope the first time it
+    is asked (StateAssets of the state: textures, sounds, texts and the
+    texts' dependencies found as they land), and answers true once every
+    entry is resident or failed; HoldTicks holds while Waiting() is not
+    empty, as it holds for a scope that is not resident (no tick runs, the
+    hold is logged), so asset timing changes no tick;
+  - Text(path) serves the loaded texts of the scopes on the stack (and of
+    the waiting one);
+  - a text file changed while a state that read it runs: the running
+    Worlds are not touched (gameplay content never changes under a running
+    World in the runtime); the new text serves the next state that loads
+    it, and that state's entry is logged in the SessionLog as kAssetSwap
+    with the content hash before the command that creates it (logged: "a
+    changed text applies to the next state that loads it").
+- The App: pushes GameSetup::start_state (else game_start_state, else
+  start_state) at boot step 10 with the gate set; StateEnv::content is the
+  AssetRuntime. After a frame's ticks, an empty stack starts the
+  two-phase quit (logged "the game ended: no state left"). Focus loss
+  (the lifecycle's FocusLost, M5) while ticks run calls on_focus_lost and
+  enqueues the command as a kGameStateCommand SessionLog entry against
+  the next tick. A failed load of a state's text is a boot or state error:
+  the state is not created, the error is logged with its path, line and
+  column, and the game takes the fault path (game build: dump, message
+  box, quit).
+- Replays and dumps of multi-state sessions:
+  - `se_sim/content_bundle.h`: `se-content-bundle-v1`, a JSON object
+    {format, texts: [{path, hash, text}]}: every text a session's states
+    loaded, each version once; `ContentBundleSource` serves it (a path's
+    newest version, or the one a kAssetSwap entry names by hash).
+  - The App's `--record` replay takes the bundle as its start bytes when
+    the session ran more than its start scene (otherwise the scene file,
+    as today, so existing replays and goldens are unchanged): the
+    recorder's start bytes are set at shutdown, before the Durable save.
+  - The runtime's dumps carry the SessionLog: the App registers ADR-111's
+    stream (the session's replay file without frames: header, start
+    bytes, SessionLog) and attaches it again before a frame's ticks when
+    the log gained an entry (the editor's rule; until M13 the runtime's
+    log was always empty).
+  - se_replay: start bytes that are a bundle run through a
+    ContentBundleSource from `--start-state` (default the module's
+    game_start_state); `--from-dump` does the same for a runtime dump
+    whose stream holds a bundle.
+- The quit and shutdown tests the design lists, runtime side (the
+  editor's N-documents case is in the integration, which has M11b's
+  document set):
+  - `platform.quit_durability.replay_throttled` (ADR-089's test extended):
+    `--record` on a throttled disk (`--durable-save-test`'s injector, 3 s):
+    QuitPending until the rename, the file complete and equal to the
+    recorder's bytes, the log's "quit waits for 1 Durable lane job";
+  - `platform.quit_durability.deadline_after_drain`: a Durable drain of
+    7 s (injector), then the teardown: the watchdog's 5 s shutdown deadline
+    did not fire (no dump, the log says the deadline started after the
+    drain), teardown under 2 s after the drain;
+  - `platform.quit_durability.failed_durable_save`: a rename refused past
+    2 s (the injector's sharing violation): the game build logs the failure
+    and quits (decision 5 below); the editor keeps M10a's cancel;
+  - `platform.shutdown_stress` (label slow; msvc-dev, msvc-asan,
+    linux-clang-asan and linux-clang-tsan): 100 headless rampage runs
+    (`--headless --audio none --fixed-frame-dt 8.3333`) from seeded
+    frames 1-600, quitting by `--frames`, by an SDL_EVENT_QUIT pushed with
+    SDL_PushEvent and by SDL_EVENT_TERMINATING; every run exits 0, logs
+    "teardown took" under 2 s, and reports no engine thread left
+    (`--expect-no-threads`, test builds: ThreadRegistry counts none
+    before SDL_AppQuit returns).
+- Tests (everywhere, TSan in WSL where threads are involved):
+  `sim.A push waits at the content gate and applies before the same tick`
+  (per-tick hashes equal with a gate that holds for 0, 1 and 7 frames and
+  without one); `sim.Commands behind a waiting push keep their order`;
+  `sim.A content bundle replays a multi-state session`;
+  `assets.Text assets load in bounded steps and hot-reload`;
+  `runtime.The start state is created once its texts are resident`
+  (headless App: the log line, no tick before it); `runtime.A changed
+  scene applies to the next state that loads it` (kAssetSwap logged, the
+  running World's hash unchanged); `runtime.Focus loss is a logged state
+  command` (an SDL window focus event pushed with SDL_PushEvent; the
+  replay pauses at the same tick); `runtime.An empty stack quits the
+  game`; `crash.rampage_dump_with_session_log` (a dump after a focus-loss
+  pause replays to its tick with se_replay --from-dump).
+
+ADRs 122-124.
+
+### M13b: the game (games/rampage, assets/scenes)
+
+- States (games/rampage/src/flow_states.cc; ids in game_rampage/flow.h):
+  - "title" (game_start_state): the Title World from
+    assets/scenes/title.scene.json: the legacy MainMenu's wallpaper (the
+    "bg" texture over the arena, app/scene/MainMenu.cpp), nothing else
+    until M19's text and UI;
+  - "gameplay": the Sandbox World from the configured scene (by default
+    assets/scenes/sandbox.scene.json), loaded through StateEnv::content
+    (LoadScene with a resolver over the same source, so prefabs come from
+    the loaded texts);
+  - "pause": an overlay World over the paused Gameplay
+    (assets/scenes/pause.scene.json: the wallpaper tinted to a dark,
+    half-transparent veil); its World steps, the Gameplay below does not
+    (push pauses the top), and both draw (RenderSources: bottom at alpha
+    1);
+  - "game_over": assets/scenes/game_over.scene.json (the wallpaper
+    tinted red);
+  - "sandbox" stays exactly as it is (the module's start_state: editor
+    Play, se_replay, every golden), except that it reads through
+    StateEnv::content when the environment gives one.
+- `FlowSystem` (the last system of GameRules; reads the tick's
+  InputFrame): it acts only in a World whose ctx holds a `FlowContext`
+  with a role (the four states put one there; the sandbox state does
+  not), so every existing golden and reference comparison is unchanged
+  (the tests run them). The rules, one transition per tick at most, all
+  applying at the next tick boundary:
+  - Title: Enter replaces it with "gameplay"; Exit pops it (the stack is
+    empty: the game ends, M13a);
+  - Gameplay: Exit pushes "pause"; no PlayerControl entity left alive
+    (destroyed, or carrying DestroyRequest, the legacy HP <= 0 rule)
+    replaces it with "game_over";
+  - Pause: Exit pops it (Gameplay resumes); Jump pops it and replaces
+    Gameplay with "title" (two commands, FIFO);
+  - GameOver: Enter replaces it with "gameplay" (a fresh World from the
+    scene); Exit replaces it with "title".
+  The ledger row "Escape replaces the Sandbox with MainMenu" closes as
+  re-specified: Escape opens Pause; Pause's Jump returns to the Title (the
+  legacy MainMenu); written into docs/rules/gameplay-rules.md as a
+  declared rule.
+- `game_rampage/content.h`: `SceneDependencies(path, text, asset_dir)` (a
+  scene's prefab references as content-root paths), what the executable
+  gives GameSetup::text_dependencies.
+- games/rampage/app/main.cc: start state "title"; state_assets per state
+  (each state's scene as a text, the textures it draws, the sounds of the
+  table); text_dependencies; on_focus_lost (push "pause" over
+  "gameplay"); `--scene FILE` sets the Gameplay scene; `--start-state ID`
+  (default "title") lets tests start in "gameplay" or "sandbox".
+- The window title shows the top state's id (it shows the tick and the
+  lifecycle state today).
+- Tests (tests/rampage everywhere; desktop on this machine):
+  - `rampage.flow.*` (headless, a GameStateStack with the module and a
+    CachedContentSource): each rule above from synthetic InputFrames;
+    one transition per tick; GameOver on the player's destroy request;
+    Pause's two-command return; the sandbox state's World has no
+    FlowContext;
+  - `determinism_rampage_flow` (label determinism; goldens per platform
+    and compiler, tests/golden/*/determinism_rampage_flow.txt): a
+    recorded session (tests/fixtures/flow/flow.seinput, written by a
+    checked-in generator through StampedInput) from Title through
+    Gameplay, Pause, Gameplay, the player's death on
+    tests/fixtures/flow/doomed.scene.json (the player at HP 10 on an
+    enemy's path), GameOver, a retry and back to the Title, under 30, 60,
+    144 and 160 Hz synthetic clocks and FMA3 on and off: identical
+    per-tick hashes, including the transition ticks;
+  - `rampage.headless_flow` (the executable headless, `--push-key` at
+    frames: Enter, Escape, Escape, then the doomed scene's death, Exit):
+    the log's state sequence and the replay (`--record`) reproduced by
+    se_replay from its bundle;
+  - `rampage.desktop.flow` (an unfocused window, the same push-keys,
+    `--readback` in each state: Title, Pause and GameOver images differ
+    from Gameplay's and from each other; no real input);
+  - `rampage.frames_300` and the M4/M12 crash tests keep their meaning
+    with `--start-state sandbox` (their tick counts and hashes are the
+    sandbox's), and `rampage.frames_300` runs once more from "title"
+    (every state's scene now loads through the lane).
+
+ADRs 125-127.
+
+### Exit (M13)
+
+- rampage plays the Sandbox from files: Title, Gameplay, Pause and
+  GameOver load their scenes and prefabs through the background lane, no
+  World steps before its content is resident, and a recorded session
+  through every state replays headless to the same per-tick hashes under
+  30/60/144/160 Hz clocks.
+- No ImGui in rampage (the link-graph check, unchanged).
+- Quit durability: the runtime tests above, and the editor's
+  N-documents test in the integration (M11b's document set), pass;
+  shutdown stress passes under ASan and TSan.
+- Playing it with a keyboard and a gamepad is a gates.md row (a person).
+
+## Integration (M11a + M11b + M13a + M13b)
+
+- `editor.The editor and the runtime load identical Worlds` (headless,
+  every scene fixture and the sandbox): EditDocument::Open against the
+  "gameplay" state's World from a headless App boot of rampage on the
+  same file (through the lane and the gate): equal Hash, Digests and
+  flattened text, equal StatNames and TextureNames. Then the reverse
+  direction: a scene the editor saved (kPrefabs) plays in rampage from the
+  saved file (`rampage.plays_an_editor_saved_scene`: the stress script
+  saves a scene with spawned prefab instances; rampage `--start-state
+  gameplay --scene` it; its first 600 tick hashes equal se_replay's on
+  the editor's Play-start bytes of the same document).
+- The editor reads documents and Play game's content through the
+  AssetRuntime's texts where M13a made them available; 'Play game' starts
+  at game_start_state ("title") with the Gameplay scene pointed at the
+  Play-start bytes (EditorGame::set_play_game_scene, now the gameplay
+  state's scene), and its states load through the gate like the
+  runtime's.
+- The design's quit durability test, editor side:
+  `editor.script.quit_durability` (three dirty documents, a scene and two
+  prefabs, on a throttled disk): QuitPending until all three are renamed
+  into place, the bytes on disk equal each document's Serialize, one save
+  failed by the injector keeps its document dirty, shows its error and
+  cancels the quit while the other two are saved; a second quit with no
+  failure exits; the shutdown deadline starts after the drain.
+- rampage's sounds play on its flow's rules unchanged (the audio tests).
+- docs: README (the editor's documents and prefabs, rampage's states and
+  keys, the content bundle), the ledger (component removal ported; the
+  Escape row re-specified; the MainMenu wallpaper and the GameData
+  serializer stubs recorded), gates.md rows.
+- The full matrix (-Milestone -Legacy, which includes -Desktop, plus
+  wsl:linux-clang-debug and msvc-unpatched-dev).
+- ADRs 128-130.
+
+## M17b Dedicated sim driver, integrated (design build step 13, part 2)
+
+Design sources: docs/design/dedicated-driver.md (all of it: "Threads",
+"Frame Timeline", "Data Flow", "Snapshot And Interpolation",
+"Synchronization", "Lifecycle" and its shutdown order, "Failure
+Handling", "Editor", "Input And Latency", "Assets Audio And Physics",
+"Determinism And Debugging", "Changes To Cost Free End State");
+docs/design/mt-design.md build step 13 ("an editor mirror for the Play
+panels; inline stays the default wherever it holds the frame rate") and
+"Editor" ("Escalation cost: a dedicated simulation thread would need a
+Play-mode mirror for these panels"); ADR-083 to ADR-086 (M17a), ADR-097,
+ADR-099, ADR-106, ADR-107, ADR-111, ADR-112.
+
+What exists: M17a's SimThread, PacedClock, InputFolder, SnapshotChannel,
+the World-to-slot fill and SnapshotRenderSource, proved headless (the
+threaded hashes equal the inline ones at W = 0, 1 and 3 on every golden,
+ADR-083, M14). The App accepts only `--sim-driver inline`
+(app_config.cc). Everything the App does around a tick is written for
+the inline driver on main: the TickGate (AssetRuntime, main only), the
+AssetRuntime's scopes that follow the GameStateStack it reads on main,
+the AudioBridge draining World audio events, the session header's last
+hash, the dump's InputFrame ring and SessionLog stream, and in the editor
+the PlaySession, the panels' const World, FillStats and FillForkStats
+(ForkJoinPool::Sites() and the Schedule's SystemStats are the tick owner's
+data, read on main because the editor ticks inline, ADR-112). The
+watchdog counts main's iterates only, so a sim thread stuck in a system
+would never be declared a hang.
+
+M17b runs as two tracks that meet in the threaded host contract below:
+M17b.1 (the threaded driver in the App, for rampage and every App) and
+M17b.2 (the editor's Play on the sim thread and its mirror).
+
+### The threaded host contract (between M17b.1 and M17b.2)
+
+Written by M17b.1 first and committed early; M17b.2 copies it verbatim.
+
+`engine/se_core/include/se_core/snapshot.h` (additive):
+
+```cpp
+inline constexpr std::size_t kMaxTickSystems = 64;
+inline constexpr std::size_t kMaxTickForkSites = 32;
+
+// One system's cost in the tick, copied out of the Schedule's ring on the
+// sim thread.
+struct TickSystemCost {
+  std::uint32_t system = 0;   // the Schedule's index
+  std::uint32_t ns = 0;
+  std::uint32_t fork_ns = 0;  // inside threaded forks (ADR-112)
+};
+
+// One fork site's record as the pool kept it (the fields of the editor's
+// ForkSiteStats), copied at most every 100 ms.
+struct ForkSiteCopy {
+  std::array<char, 48> name{};
+  bool enabled = false;
+  std::uint64_t inline_until_ns = 0;
+  jobs::ForkStats stats;  // trivially copyable (asserted)
+};
+
+// The tick's costs, for profilers: copied out of the slot, never pointed
+// into. Part of the render part (every published slot).
+struct TickStats {
+  std::uint32_t systems = 0;
+  std::array<TickSystemCost, kMaxTickSystems> cost{};
+  Tick sites_tick = 0;  // when |site| was copied (0: never)
+  std::uint32_t sites = 0;
+  std::uint32_t active_workers = 0;
+  std::array<ForkSiteCopy, kMaxTickForkSites> site{};
+};
+
+// The GameStateStack after a tick that changed it (the platform's asset
+// scopes follow it).
+struct StackChange {
+  std::uint32_t revision = 0;
+  std::vector<std::string> states;  // bottom to top
+};
+
+// Snapshot gains `TickStats stats;`. ReliableDeltas gains
+// `std::vector<StackChange> stack_changes;` and
+// `std::vector<std::string> content_waiting;` (a queued push waits for
+// that state's content: Waiting(), M13a).
+```
+
+`engine/se_sim/include/se_sim/sim_thread.h` (additive):
+
+```cpp
+enum class SimOp : std::uint8_t {
+  // ... M17a's ops
+  // Destroy the session on the sim thread and go idle (the editor's Stop;
+  // Quit still ends the thread).
+  kStopSession,
+  // A state's texts (content), then its residency: the session's gate
+  // reports the state ready once both arrived.
+  kStateContent,
+  kStateResident,
+  // Focus lost while running: the session asks GameSetup::on_focus_lost
+  // with its top state and logs the command (M13a's rule, on the sim).
+  kFocusLost,
+  // The display period is a whole multiple of dt: the wake phase target.
+  kSetWakePhase,
+};
+
+struct SimCommand {
+  // ... M17a's members
+  // kStateContent, kStateResident: the state id.
+  std::string state_id;
+  // kStateContent: the texts, immutable from now on.
+  std::shared_ptr<const ContentBundle> content;
+  // kSetWakePhase.
+  std::int64_t phase_ns = 0;
+  // kStartGame: what the factory builds (the editor's Play-start bytes);
+  // empty for a game's start.
+  std::vector<std::byte> start_bytes;
+};
+
+class SimSession {
+ public:
+  // ... M17a's members
+  // Before each tick: true holds this tick and the rest of the burst (the
+  // threaded TickGate: a state waiting for content, a scope not resident).
+  [[nodiscard]] virtual bool HoldTick(Tick /*next*/) { return false; }
+  // Ops M17a's thread does not handle (kStateContent, kStateResident,
+  // kFocusLost, the editor's): applied at the tick boundary, in order.
+  virtual void OnCommand(SimCommand& /*command*/) {}
+  // After a slot was filled (the editor makes its mirror here).
+  virtual void AfterPublish(const Snapshot& /*slot*/) {}
+  // A tick threw: the session's last look before it is destroyed on the
+  // sim thread (the editor freezes its mirror). Must not throw; the
+  // editor's own boundary contains what it calls.
+  virtual void OnFault() noexcept {}
+};
+```
+
+`engine/se_runtime/include/se_runtime/threaded_host.h` (new): the platform
+side both the App and the editor drive.
+
+```cpp
+// What one iterate received from the sim (reliable sections applied in
+// tick order).
+class SimReceiver {
+ public:
+  virtual ~SimReceiver() = default;
+  virtual void OnTickRecord(const TickRecord& record) = 0;
+  virtual void OnAudioCue(const AudioCue& cue, std::uint64_t anchor_ns) = 0;
+  virtual void OnSessionEvent(const SessionEvent& event) = 0;
+  virtual void OnStackChange(const StackChange& change) = 0;
+  virtual void OnContentWaiting(std::string_view state_id) = 0;
+  virtual void OnScopeRelease(const ScopeRelease& release) = 0;
+  virtual void OnEndedReplay(std::span<const std::byte> replay) = 0;
+};
+
+struct ThreadedHostConfig {
+  SimSessionFactory factory;
+  PacedClockConfig clock;
+  // Test builds: the sim's deadlines advance with the App's frame clock
+  // (--sim-clock frame), so threaded tests are as repeatable as inline
+  // ones under --fixed-frame-dt.
+  bool frame_clock = false;
+};
+
+class ThreadedHost {
+ public:
+  [[nodiscard]] static std::expected<std::unique_ptr<ThreadedHost>, Error>
+  Start(ThreadedHostConfig config) SE_REQUIRES(g_main);
+  ~ThreadedHost();  // Stop()
+
+  // Main, at iterate start: every published slot into the render source,
+  // its reliable section to |receiver| in tick order.
+  void Receive(SimReceiver& receiver) SE_REQUIRES(g_main);
+  // The slots received so far; Pick(frame_ns) gives the frame's pair and
+  // alpha (M17a's SnapshotRenderSource).
+  [[nodiscard]] SnapshotRenderSource& Render() noexcept;
+  // The newest slot's TickStats (null before the first).
+  [[nodiscard]] const TickStats* LatestStats() const noexcept;
+  [[nodiscard]] bool Send(SimCommand command) SE_REQUIRES(g_main);
+  [[nodiscard]] InputEventRing& Input() noexcept;
+  [[nodiscard]] std::uint32_t AckedSeq() const noexcept;
+  [[nodiscard]] const FaultBox& Fault() const noexcept;
+  // --sim-clock frame: advance the sim's clock to |frame_ns| (main).
+  void AdvanceTo(std::uint64_t frame_ns) SE_REQUIRES(g_main);
+  // The design's shutdown steps 1-4: stop routing input, Quit, keep
+  // pumping (waits of at most 5 ms) until the thread finished, drain and
+  // return every slot. The App's 5 s deadline covers it.
+  void Stop() noexcept;
+};
+```
+
+### M17b.1: the threaded driver in the App (engine/se_runtime, engine/se_sim, engine/se_core, engine/se_crash, tools/se_replay)
+
+- `--sim-driver inline|threaded` (AppConfig; default inline, and an
+  unknown value is a boot Error naming the choices). Threaded on a machine
+  with fewer than 3 physical cores still runs threaded (an explicit
+  request) and logs that the design recommends inline there. Test builds:
+  `--sim-clock frame`.
+- `GameSimSession` (se_runtime/game_sim_session.h): the game's SimSession:
+  the GameStateStack, SimDriver (the game's Schedule and pool: the pool's
+  owner thread is now the sim thread, which ADR-107's "owner thread only"
+  allows; its workers start there when a site is enabled), SessionLog,
+  ReplayRecorder, a `SnapshotAudioSink` (World audio events become the
+  slot's AudioCues), FillRender through AppendRenderView per drawn World
+  with GameSetup::camera (a pure function of a const World, run on the sim
+  thread), TickStats after each tick, the content gate (a
+  StateContentGate fed by kStateContent and kStateResident; Ready answers
+  from them; HoldTick holds while the stack waits or the top's scope is
+  not resident) and StateEnv::content (the bundles the platform sent:
+  immutable shared data, the design's ScopeLoaded).
+- The App in threaded mode: no FixedStepper ticks; each iterate receives
+  (SimReceiver: tick records to the session header's last hash and the
+  frame report, audio cues to `AudioBridge::Schedule(cue, anchor_ns)` at
+  anchor + D, stack changes to the AssetRuntime, which now follows a
+  StackChange list instead of reading the stack, content waits to the
+  AssetRuntime's scopes, whose texts and residency go back as
+  kStateContent and kStateResident; scope releases free GPU objects only
+  after every slot with a tick below release_tick is returned and the
+  retire queue's fence passed), picks the pair at the frame start and
+  builds the layers with BuildSnapshotRenderList (M17a), then presents
+  through the FramePacer as before. `InputRouter` (se_runtime/
+  input_router.h): InputService's mapping without its latch: one press and
+  one release per physical input (ADR-086) into the InputEvent ring,
+  stamped on the engine's monotonic clock at pump time; focus loss sends
+  ReleaseAll and kFocusLost; a heartbeat each iterate; a full ring
+  coalesces axes and counts drops. The lifecycle: Suspended sends Suspend
+  and the restore Resume (the sim re-bases); Modal keeps the sim ticking
+  (the reason the design builds it); the display period sets the wake
+  phase when it is a whole multiple of dt.
+- Dumps and replays: RunTick writes the dump's InputFrame ring on the sim
+  thread (its only writer). ADR-111's Play-start / SessionLog stream
+  becomes a single-writer, write-ahead stream the session owns
+  (`integration::SessionLogStream`): the sim appends an entry's bytes and
+  release-stores the committed length before the entry applies, the
+  record keeps the seqlock form of the InputFrame ring, and read_dump.py
+  and se_replay's reader take the committed part. So no applied entry is
+  ever missing from a dump; an entry queued and not yet applied can be,
+  and a replay to the dump's tick never needs it (ADR-111's consequence,
+  which the threaded driver would otherwise make a divergence: the sim
+  applies an edit and runs on before main attaches the stream again).
+  The inline driver uses the same stream (one format).
+- The watchdog (se_crash): a second progress source, the sim's tick
+  counter, armed while a session runs and is not paused, suspended,
+  holding or stopping; 5 consecutive 1 s periods without a tick declare a
+  hang ("hang N: the sim made no progress for X s at tick T"), with the
+  sim thread's breadcrumb; one dump per episode; main's rule unchanged.
+  `--hang-test` in threaded mode loops on the sim thread.
+- Shutdown order: the design's steps 1-4 (ThreadedHost::Stop) run before
+  shutdown step 5; the Worlds are destroyed on the sim thread (its
+  session's end); the trace (ADR-088) names "sim". The 5 s shutdown
+  deadline starts after the Durable drain, as before, and covers the
+  join.
+- se_replay `--sim-driver threaded`: the session runs on a SimThread with
+  a ManualClock (auto-advance) and recorded frames (RecordedFrame), with
+  `--jobs W` as before.
+- The thread-safety analysis: every platform-side function of the
+  threaded path is SE_EXCLUDES(g_sim_owner); clangcl-dev's
+  -Werror=thread-safety covers them. (Editor documents keep their
+  InlineOwnerScope on main: the capability is per thread, the owner
+  assert per World.)
+- Tests (everywhere; TSan in WSL headless, SDL's dummy video):
+  - `determinism.threaded.*`: se_replay `--sim-driver threaded` against
+    the committed goldens (determinism_kernel, determinism_rampage,
+    determinism_rampage_flow, the three reference scenarios over 3600
+    ticks, an editor session replay) at `--jobs 0`, `1` and `3`: every
+    per-tick hash equal to the golden;
+  - `runtime.threaded.*` (headless App, `--sim-clock frame
+    --fixed-frame-dt 8.3333`): boot, Title to Gameplay with --push-key,
+    Pause, GameOver, quit; the `--record` replay replayed inline by
+    se_replay gives the recorded hashes; Suspend and Resume re-base (no
+    catch-up); a state waiting for content holds the sim (no tick before
+    residency); focus loss pauses through the sim; scope releases free
+    GPU objects only after their slots return (a counting fake); AppInit
+    failure at every step with the threaded driver is clean (msvc-asan);
+  - property tests (label unit, TSan in WSL, seeded, thousands of runs):
+    the content handoff (kStateContent then kStateResident in any order
+    relative to ticks: the push applies before the same tick as inline),
+    the write-ahead SessionLog stream (a reader at random points sees a
+    committed prefix of whole entries, never a torn one), TickStats
+    copies (complete per slot), and M17a's SnapshotChannel properties
+    re-run with the App's consumer pattern (Receive each iterate, keep 3);
+  - `crash.rampage_hang_threaded` (desktop): `--sim-driver threaded
+    --hang-test after-ticks:240`: a dump within 6 s naming the sim, its
+    breadcrumb at tick 240, se_replay --from-dump reaching tick 240;
+  - `platform.shutdown_stress.threaded` (slow; msvc-asan, linux-clang-asan,
+    linux-clang-tsan): M13a's 100 runs with `--sim-driver threaded`;
+  - `rampage.desktop.threaded` (an unfocused window, 600 frames: the
+    readback shows the sprites; the log shows the sim's ticks and no
+    dropped publishes at idle);
+  - `runtime.The inline driver is the default`.
+- Bench (msvc-release): `bench.threaded_platform_frame_10k` (the
+  platform's frame CPU from Receive to the layers at 10k sprites: the
+  design's "platform frame CPU at 144 Hz" gate; threshold the measured p95
+  with 2x headroom) beside M17a's bench.snapshot_publish_10k.
+
+ADRs 131-135.
+
+### M17b.2: the editor's Play on the sim thread (engine/se_editor, engine/se_editor/panels, apps/editor)
+
+- Edit mode is unchanged in both drivers: documents are main's Worlds
+  (dedicated-driver.md "Editor": documents on the platform, the sim
+  owns only Play-session Worlds; no World is ever shared).
+- `PlaySession` splits into its core (the stack, driver, log and
+  recorder, built and destroyed on the thread that owns them) and two
+  hosts: inline (M10a's, unchanged) and threaded (`ThreadedPlay`): Play
+  sends StartGame with the Play-start bytes in `start_bytes` and a factory
+  that builds the core on the sim thread; Pause, Resume and Step{1} are
+  SimCommands; Stop is kStopSession (the sim destroys the play World on
+  its thread, the slot's ended replay becomes last-play.sereplay; the
+  document's hash and content hash are unchanged by structure and still
+  asserted); edits (PlayEdits) become kApplySessionEntry commands;
+  'Play game' starts the module's stack from game_start_state the same
+  way, with the InputRouter fed by the editor's view rules (ADR-113).
+- The Play mirror: panels keep reading a `const World*` (one inspector
+  path, mt-design "Editor"). In threaded Play it is a mirror World: the
+  sim clones the play World after a published tick (World::Clone plus
+  `EditorGame::clone_context`, which copies the ctx resources panels read:
+  rampage's ArenaBounds, EffectSettings, SceneSeed, StatNames,
+  TextureNames) into one of two slots of a `MirrorChannel`
+  (se_editor/mirror_channel.h: the SnapshotChannel's protocol with two
+  World slots, published and returned rings, one owner per slot); main
+  reads the newest published mirror for the frame and returns the older
+  one; the sim reuses or destroys returned Worlds on its own thread, so
+  Worlds still die on their owner. A mirror is made after every tick
+  while paused or stepping, after a tick that applied an edit, and at most
+  every 33 ms while running (`kMirrorPeriodNs`); the panels label the
+  values with the mirror's tick (PanelContext gains `world_tick`).
+  `bench.mirror_clone_5k` (msvc-release) measures a clone of the sandbox
+  with 5000 enemies on the sim thread; its p95 is a threshold, and above
+  1 ms (an eighth of a tick) the integration moves to the design's
+  selected-entities payload instead (decision 7 below).
+- Drawers in threaded Play keep showing the value they submitted while
+  its command is unacknowledged (`PlayEdits::Pending(guid, component)`:
+  the command's sequence above AckedSeq), then the mirror's again, so a
+  value drag does not jump back a mirror period.
+- The Viewport in threaded Play draws the session from the snapshots
+  (interpolated, the App's path), the overlays and picking from the mirror
+  (ADR-101's exact path; positions are those of the mirror's tick).
+- Stats: in threaded Play, FillStats takes the systems' costs and each
+  phase's parallel time from the newest slot's TickStats, and
+  FillForkStats reads TickStats' site copies (the carry-over: the pool's
+  records are the sim's data from Play to Stop). The profiler's rings
+  keep 1024 entries copied out of slots, on the frame's wall-time axis.
+- Play.Faulted in threaded Play: the sim's fault boundary catches the
+  throw (M17a); OnFault makes one more mirror of the faulted World inside
+  the editor's RunContained (play_fault_boundary.cc, already a fault
+  boundary) before the session is destroyed, so the panels inspect the
+  World the throw left, as M10a's Play.Faulted does; if that clone throws,
+  the last mirror stays and the fault screen says which tick it shows. The
+  replay, SessionLog and breadcrumb come from the ended session's slot and
+  the FaultBox. A throw in the platform's snapshot RenderList build is
+  contained in the editor's boundary as before and pauses the session.
+- Dumps: the threaded session writes the SessionLog stream itself
+  (M17b.1's write-ahead stream), so a dump during threaded Play holds every
+  applied edit; the editor no longer re-attaches it per frame in either
+  driver.
+- Tests (everywhere; TSan in WSL headless):
+  - every `editor.script.*` test that plays runs a second time with
+    `--sim-driver threaded --sim-clock frame` (CTest names
+    `editor.script.threaded.*`), with the same `expect-hash` values;
+  - `editor.Threaded Play mirrors the play World` (the mirror's hash and
+    content equal the sim's World at its tick, sampled over 300 ticks);
+    `editor.A mirror is never written while main reads it` (TSan property
+    test of MirrorChannel); `editor.Threaded Stop leaves the document
+    untouched`; `editor.A threaded tick fault leaves the faulted World
+    inspectable`; `editor.Drawers show a pending edit until it is
+    acknowledged`; `editor.Fork stats in threaded Play come from the
+    slots`;
+  - `crash.editor_play_hang_threaded` (desktop): M12's play_hang script
+    with the threaded driver: the dump within 6 s, the SessionLog stream
+    complete, se_replay --from-dump reaching the hanging tick with every
+    edit applied.
+
+ADRs 136-139.
+
+### Exit (M17b)
+
+- Inline and threaded per-tick hashes are equal on every golden replay
+  for W = 0, 1 and 3 (determinism.threaded.*), and the editor's scripted
+  Play sessions give the same hashes in both drivers.
+- SnapshotChannel, MirrorChannel, the content handoff and the
+  write-ahead stream pass their property tests; TSan clean in WSL for
+  the App's and the editor's threaded paths.
+- The editor's Play panels read a mirror in threaded Play (the design's
+  "an editor mirror for the Play panels").
+- `--sim-driver inline` stays the default for rampage and the editor.
+- A person comparing the two drivers' feel, PresentMon's displayed
+  latency for both, and the weak machines are gates.md rows.
+
+## Integration (M17b.1 + M17b.2)
+
+- The editor runs on the App's ThreadedHost: 'Play game' and Play in a
+  window with the threaded driver (`editor.desktop.threaded`), the dock
+  layout and every panel live; the M12 hang test and the M10a fault
+  scripts in both drivers.
+- The App's and the editor's threaded paths in one TSan run (WSL, the
+  headless script tests and runtime.threaded.*).
+- se_replay replays an editor session recorded with the threaded driver
+  inline, and the reverse.
+- docs: README (the switch, `--sim-clock frame`, what differs: input
+  latency by design, the mirror's lag), the ledger, gates.md rows, the
+  plan's tracking of design changes #1-25 (the dedicated driver's column).
+- The full matrix (-Milestone -Legacy, which includes -Desktop, plus
+  wsl:linux-clang-debug and msvc-unpatched-dev), once with
+  `SE_SIM_DRIVER=threaded` set for the runtime and editor test labels
+  (the CTest variants above), once without.
+- ADRs 140 and on.
+
+## gates.md rows these milestones add
+
+| Gate | Milestone | Needs | Command / procedure |
+|---|---|---|---|
+| Documents, prefabs and hot reload in a window, checked by eye | M11 | the owner looking at a screenshot | `out\build\msvc-dev\bin\simple_editor --audio null`: open the sandbox and assets/prefabs/enemy.prefab.json, change the prefab's sprite region or HP, save it, switch to the sandbox: every enemy follows, an enemy with an overridden Path keeps it; remove a component, undo, redo; save the sandbox and look at the file (only overrides); `ctest --test-dir out/build/msvc-dev -L desktop -R "editor.desktop.prefabs"` runs the scripted equivalent |
+| rampage played by a person | M13 | a person with the keyboard and a gamepad | `out\build\msvc-dev\bin\rampage --audio null`: Title (Enter or the pad's start), play, Escape opens Pause and Escape resumes, Space in Pause returns to the Title, walk into the enemies until GameOver, Enter retries, Escape at the Title ends the game; switching to another window pauses; with `--record run.sereplay`, `se_replay --module rampage --inputs run.sereplay` reproduces it |
+| The threaded driver played by a person | M17b | a person at the machine | `out\build\msvc-dev\bin\rampage --audio null --sim-driver threaded`, then the same without the switch: the feel of input (the design's 4-6 ms more latency) and no visible stutter while dragging the window (the threaded driver keeps ticking in the modal loop) |
+| PresentMon: displayed latency, inline against threaded | M17b | PresentMon 2.x (not installed; not approved for download), an elevated shell | `tools/presentmon/run.ps1 -Mode paced -Seconds 20 -PresentMon <path>` with and without `-ExtraArgs "--sim-driver threaded"`; compare MsUntilDisplayed p50/p99 |
+| The threaded driver on weak machines | M17b, M15 | a 4-core laptop; a 2P+8E laptop on battery | `se_bench --suite threaded_platform_frame_10k`, then rampage `--sim-driver threaded --log-level debug` for 60 s: dropped publishes, dilations and the sim's wake error p99 from the log |
+
+The existing rows "ThreadSanitizer" (M0, M4, M14, M17) and "Release
+bench gates on an idle machine" gain M17b's tests and bench rows.
+
+## Decisions for M11, M13 and M17b (2026-11-17)
+
+Taken when these specs were written; each track records the one it
+implements in its ADRs.
+
+1. The editor holds several documents (M11b's DocumentSet): a scene and
+   the prefabs it uses can be open together.
+2. A prefab change applied to an open document is an undo step, so the
+   content hash is always explained by the stack. It marks the document
+   dirty only when the document's own file text would change.
+3. Until M19's menus, Pause returns to the Title with Jump (Space, the
+   pad's south button); Exit resumes Gameplay.
+4. rampage persists no game save yet (no consumer reads one). The runtime's
+   durability tests use the `--record` replay.
+5. A failed Durable save at quit in the game build is logged and the quit
+   goes on; the editor keeps M10a's cancel (ADR-089).
+6. M9's Prefab and SceneChunk stores are kept, unused, for M19's importer;
+   scenes and prefabs load as text through the lane.
+7. The editor's Play mirror is a cloned World with panels unchanged, gated
+   by `bench.mirror_clone_5k` (p95 at most 1 ms at 5000 enemies). Above
+   that the integration moves to the design's selected-entities payload.
+8. `--sim-driver threaded` is obeyed on every machine; below 3 physical
+   cores the App logs a warning and does not fall back to inline.
