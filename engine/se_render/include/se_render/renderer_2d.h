@@ -23,6 +23,11 @@
 // to the swapchain. The composite serves readback (goldens, tests,
 // --readback) and RepresentLast(), HalfRate's re-present in Standard pacing
 // (M6 integration). A target whose pass fails keeps its last image.
+// A frame with a SwapchainOverlay holds the textures it retires (a resized
+// viewport's old texture, a reloaded texture's old one) until the next
+// Frame(): the overlay's draw data was built before the frame and may name
+// them, and RepresentLast() draws it again after the frame's submit
+// (ADR-113).
 //
 // PumpUploads() keeps uploads going on iterates that do not render (a
 // minimized window). Device loss (integration): ReleaseGpuObjects(), then
@@ -105,7 +110,9 @@ class ViewportTarget {
   }
   [[nodiscard]] std::uint32_t Width() const noexcept { return width_; }
   [[nodiscard]] std::uint32_t Height() const noexcept { return height_; }
-  // Applies at the next frame start; the old texture is retired.
+  // Applies in the next Frame(), before its passes; the old texture is
+  // retired (and held past RepresentLast() while that frame has an overlay
+  // whose draw data may still show it, ADR-113).
   void RequestSize(std::uint32_t width, std::uint32_t height) noexcept {
     requested_width_ = width;
     requested_height_ = height;
@@ -146,7 +153,8 @@ struct FrameRequest {
   // Acquire the swapchain and blit the composite (false: offscreen only).
   bool present = true;
   // Drawn after the blit (M10a); kept for RepresentLast() until the next
-  // Frame() or ForgetOverlay().
+  // Frame() or ForgetOverlay(). The textures the frame retires are held
+  // until the next Frame() (ADR-113).
   SwapchainOverlay* overlay = nullptr;
 };
 

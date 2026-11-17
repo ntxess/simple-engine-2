@@ -221,6 +221,57 @@ TEST_CASE("A drag coalesces into one command", "[commands]") {
   REQUIRE_FALSE((*first)->Absorb(**other));
 }
 
+// R7 of the M10-M14 review: a panel's commands are made during its Draw and
+// applied after ImGui::Render, so two commands of one frame are made from
+// the same World. Each takes its start when it first applies: undoing the
+// second gives the first's result, and both path inserts land.
+TEST_CASE("Commands of one frame undo to their own start", "[commands]") {
+  const testing::MainThreadScope main_thread;
+  const InlineOwnerScope owner(OnMainThread());
+  DocumentWorld doc;
+  const std::string start = doc.ComponentJson(kPlayer, "Transform");
+  const std::string middle = doc.ComponentJson(kEnemy1, "Transform");
+  const std::string end = doc.ComponentJson(kEnemy2, "Transform");
+  auto first =
+      SetComponentCommand::Make(doc.Get(), kPlayer, "Transform", middle);
+  auto second = SetComponentCommand::Make(doc.Get(), kPlayer, "Transform", end);
+  REQUIRE((first && second));
+  REQUIRE(doc.Apply(**first).has_value());
+  REQUIRE(doc.Apply(**second).has_value());
+  REQUIRE((*second)->Before() == middle);
+  REQUIRE(doc.Revert(**second).has_value());
+  REQUIRE(doc.ComponentJson(kPlayer, "Transform") == middle);
+  REQUIRE(doc.Revert(**first).has_value());
+  REQUIRE(doc.ComponentJson(kPlayer, "Transform") == start);
+  // Redo keeps each command's start.
+  REQUIRE(doc.Apply(**first).has_value());
+  REQUIRE(doc.Apply(**second).has_value());
+  REQUIRE(doc.ComponentJson(kPlayer, "Transform") == end);
+
+  const std::string path = doc.ComponentJson(kEnemy1, "Path");
+  auto points = PathPointCommand::PointsOf(path);
+  REQUIRE(points.has_value());
+  auto insert_a =
+      PathPointCommand::Insert(doc.Get(), kEnemy1, 0, Vec2{1.0F, 2.0F});
+  auto insert_b =
+      PathPointCommand::Insert(doc.Get(), kEnemy1, 0, Vec2{3.0F, 4.0F});
+  REQUIRE((insert_a && insert_b));
+  REQUIRE(doc.Apply(**insert_a).has_value());
+  REQUIRE(doc.Apply(**insert_b).has_value());
+  auto both = PathPointCommand::PointsOf(doc.ComponentJson(kEnemy1, "Path"));
+  REQUIRE(both.has_value());
+  REQUIRE(both->size() == points->size() + 2);
+  REQUIRE((*both)[0] == Vec2{3.0F, 4.0F});
+  REQUIRE((*both)[1] == Vec2{1.0F, 2.0F});
+  REQUIRE(doc.Revert(**insert_b).has_value());
+  auto one = PathPointCommand::PointsOf(doc.ComponentJson(kEnemy1, "Path"));
+  REQUIRE(one.has_value());
+  REQUIRE(one->size() == points->size() + 1);
+  REQUIRE((*one)[0] == Vec2{1.0F, 2.0F});
+  REQUIRE(doc.Revert(**insert_a).has_value());
+  REQUIRE(doc.ComponentJson(kEnemy1, "Path") == path);
+}
+
 TEST_CASE("Commands become SessionLog entries for Play", "[commands]") {
   const testing::MainThreadScope main_thread;
   const InlineOwnerScope owner(OnMainThread());

@@ -4199,3 +4199,121 @@ is not one colour, the log names the viewport); the existing
 docked. `jobs.The Schedule tells a system's time inside threaded forks`
 (W = 0: no parallel time; W = 3: the systems' parts add up to the pool's
 total; TSan in WSL). `editor_panels.*` unchanged (60 tests).
+
+## ADR-113 Review fixes: textures held past the re-present, the overlay fits its swapchain, Play game input by the view, the open prompt, DebugDraw slices (2026-11-16)
+
+**Context.** The adversarial review of M10, M12 and M14 (findings R1 to
+R10) found defects the tests did not cover. Five of them change a
+contract between modules and are recorded here.
+
+**Decision.**
+- **A frame with an overlay holds the textures it retires (R1).** HalfRate's
+  re-present (`Renderer2D::RepresentLast`) draws the last frame's
+  SwapchainOverlay again after that frame's submit ran the retire queue.
+  ImGui's draw data was built before the frame, so a viewport resized in
+  the frame (always the case when the Viewport panel's target is created
+  again) left it naming a released texture: an assert in the editor's
+  debug wrapper, a released SDL_GPUTexture bound in Release.
+  `GpuResources::HoldRetiredTextures(bool)` makes every texture retired
+  while it is on a held entry that `RunRetireQueue` skips;
+  `ReleaseHeld()` returns them to the queue. `Renderer2D::Frame` releases
+  the last frame's held textures at its start (they go at its submit) and
+  holds this frame's when it has an overlay; device loss and teardown
+  release everything. Only textures are held (the draw data names nothing
+  else), for one frame. `ViewportTarget::RequestSize` still applies in the
+  next `Frame()`: the draw data then shows the old texture, at its old
+  content, for that one frame, which is valid now; moving the resize to the
+  editor's frame start would need the editor to drive the renderer's
+  target list, which is not worth a contract change once the texture is
+  held.
+- **The ImGui overlay fits the swapchain it is given (R2).** ImGui reads
+  the window's size at NewFrame; another process that grows the window
+  (snap and tiling tools, a display change) makes it larger than the
+  swapchain SDL still has, for a frame, and the backend's viewport then
+  exceeds the render target (SDL's debug-mode assert). `ImGuiRenderer::Draw`
+  crops: `FitDisplayToTarget` shrinks each axis of the display that does
+  not fit for that draw only (the projection keeps ImGui's pixels in place,
+  the backend clamps every scissor to the smaller framebuffer), and
+  restores it after. `RendererStats::cropped_draws` counts it.
+- **In 'Play game' the view decides where the input goes (R3).** The editor
+  handed an event to the game only when ImGui did not want it; the Viewport
+  panel is an ImGui window, so ImGui wanted the mouse over it and, with
+  keyboard navigation on, the keyboard while it had the focus: the game
+  never got a key. `EditorViewports::ReportInput(focused, hovered)` is the
+  panel's report, every frame it draws (its window has the focus, the mouse
+  is over the view); `PanelContext::play_game` tells the panel, which then
+  marks its items `ImGuiItemFlags_NoNav` so navigation does not act on the
+  game's keys. `Editor::OnEvent` still feeds ImGui every event, and in
+  'Play game' gives the game the keyboard and the gamepad while the view
+  was focused in the last UI frame, the mouse while it was hovered, and
+  every release always (a key let go after the focus moved must not stay
+  held; the InputService ignores a release of nothing held). The frame's
+  ticks latch the InputService while the view is focused or hovered.
+  Headless there is no view: the game has the input, as before. Starting
+  'Play game' focuses the reporting panel's window, so play starts with
+  the keys in the game.
+- **File > Open waits for the unsaved-changes prompt (R4).** Opening over a
+  dirty document replaced it without a word. The open now waits for a
+  modal like the quit's: Save submits the save through the lane and opens
+  once no document save is in flight (a failed save, or a change made
+  meanwhile, calls the open off); Don't Save opens at once (an autosave's
+  recovery file stays, as at a quit without saving); Cancel keeps the
+  document. A quit drops a waiting open.
+- **A stale autosave removes its recovery file (R5).** The lane does not
+  complete in submission order: an autosave submitted before a save could
+  land after it and leave a recovery file holding older content. The editor
+  keeps the revision of the last completed save since the document opened;
+  a recovery write that completes at or below it removes the file.
+- **A failed script fails the process in every build (R6).** SDL's main
+  returns the result of the callback that ended the loop, not
+  `SdlAppQuit`'s, so `App::Iterate` now returns `SDL_APP_FAILURE` at the
+  quit when the extension reports `ExitFailure()`.
+- **Commands take their start when they first apply (R7).**
+  `SetComponentCommand` reads its before value, and `PathPointCommand`
+  makes its edit again on the current path (before and after), at the
+  first `Apply`; redo reuses them. Two commands made from one World in one
+  frame are each undone to their own start, and two path inserts made from
+  one World both land.
+- **M14's per-chunk DebugDraw slices exist (R10).** ADR-107 recorded them as
+  missing for want of a DebugDraw sink. se_core/debug_draw.h adds the sink:
+  `DebugDraw`, a World-level buffer of debug primitives (lines, boxes and
+  points in world units with a colour) whose writes assert not-in-fork, and
+  `jobs::DebugDrawSlices`, one `ChunkOutputs` arena per chunk that a chunk
+  draws into through its `DebugDrawSlice` and the owner merges into the
+  sink in chunk order after the join. No system draws yet and nothing
+  renders the primitives: a viewer (the Viewport's overlays, a debug layer)
+  reads `Primitives()` when one wants them. The wake-stall soak on an idle
+  machine and the kernel trace stay open gates.md rows (ADR-110): they
+  need the owner's machine to themselves.
+
+**Why.** R1 and R2 are crashes of the editor under ordinary desktop use; R3
+leaves the spec's 'Play game' input item unmet; R4 and R5 lose or misstate
+the user's work. Each fix is the smallest that closes the defect at its
+cause: the overlay's data outlives the frame by design (RepresentLast), so
+its textures must too; the swapchain size is the one the frame acquired,
+so the overlay must fit it; the view is where the game is, so the view
+must decide.
+
+**Consequences.** A frame with an overlay keeps a resized or reloaded
+texture one frame longer. During a window grow the UI is cropped for one
+frame instead of aborting. In 'Play game' hovering the view gives the game
+the mouse (window coordinates, as rampage's InputService has them), and the
+view's toolbar takes no keyboard navigation. New script verbs: `push-key
+KEY [up]` (an SDL key event, never OS input), `expect-game-keyboard`,
+`answer-open save|discard|cancel`, `expect-open-prompt`, `wait-saves`,
+`wait-autosave`; run_editor.py gained `--expect-edges N` and
+`--expect-script-failure`; the panel test harness `SetFirstWidth`.
+
+**Checked by.** `render_desktop.*.RepresentLast's overlay outlives a
+viewport resized in the frame` and `render_desktop.*.ImGui's overlay crops
+to a swapchain smaller than its display` (both fail on the old code: the
+release log check and SDL's viewport assert), `editor.The overlay's display
+is cropped only where it does not fit`, `editor.desktop.play_game_input`
+(four edges in the session's replay; none while the Inspector has the
+focus), `editor.script.open_dirty`, `editor.script.autosave_after_save`,
+`editor.script.failure_exit_status` (each fails on the old code),
+`editor.Commands of one frame undo to their own start` and
+`editor_panels.The effect drawer's headers keep to their columns when
+narrow` (R9: the headers are cut to their columns), `jobs.DebugDraw slices
+merge in chunk order for every W` (W = 0, 1, 3, 7 and the chaos seeds;
+TSan in WSL) and `death.debug_draw_in_fork`.

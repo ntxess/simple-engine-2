@@ -21,6 +21,7 @@ se_add_module(se_core KIND STATIC
     src/breadcrumb.cc
     src/component_registry.cc
     src/core_components.cc
+    src/debug_draw.cc
     src/detmath.cc
     src/dump_stream.cc
     src/edge_placement.cc

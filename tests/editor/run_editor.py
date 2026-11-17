@@ -12,12 +12,18 @@ usage:
                 [--expect TEXT]... [--expect-scene-contains TEXT]
                 [--expect-scene-unchanged] [--expect-recovery-file]
                 [--expect-fault-files] [--readback FRAME] [--timeout S]
+                [--expect-edges N] [--expect-script-failure]
 
   --scene-copy SRC       the editor opens a copy of SRC (saves go there)
   --then-script FILE     a second run on the same pref directory
   --replay SE_REPLAY     se_replay replays the last Play session's replay
                          (<pref>/sessions/last-play.sereplay) from its start
                          bytes; its recorded per-tick hashes must match
+  --expect-edges N       with --replay: the replay records exactly N input
+                         edges (se_replay --edges-out)
+  --expect-script-failure
+                         the script fails: the editor logs a FAILED line
+                         and exits with a non-zero status
   --readback TICK        write the composite of the first frame after tick
                          TICK and check it is not one colour (windowed)
 Python 3, stdlib only.
@@ -102,7 +108,13 @@ def editor_command(args, pref, script, scene, workdir):
     return cmd
 
 
-def check_run(name, code, output, failures):
+def check_run(name, code, output, failures, expect_failure=False):
+    if expect_failure:
+        if code == 0:
+            failures.append(f"{name}: exit status 0 after a failed script")
+        if "editor script: FAILED" not in output:
+            failures.append(f"{name}: no 'editor script: FAILED' line")
+        return
     if code != 0:
         failures.append(f"{name}: exit status {code}")
     if "editor script: passed" not in output:
@@ -126,6 +138,8 @@ def main():
     parser.add_argument("--expect-fault-files", action="store_true")
     parser.add_argument("--readback", type=int, default=0)
     parser.add_argument("--timeout", type=float, default=90.0)
+    parser.add_argument("--expect-edges", type=int)
+    parser.add_argument("--expect-script-failure", action="store_true")
     args = parser.parse_args()
 
     env = dict(os.environ)
@@ -147,7 +161,7 @@ def main():
         code, output = run(editor_command(args, pref, args.script, scene,
                                           workdir), args.timeout, env)
         outputs.append(output)
-        check_run("run", code, output, failures)
+        check_run("run", code, output, failures, args.expect_script_failure)
         if args.then_script:
             code, output = run(editor_command(args, pref, args.then_script,
                                               scene, workdir),
@@ -189,16 +203,28 @@ def main():
             if not replay.exists():
                 failures.append("no last-play.sereplay")
             else:
-                code, output = run(
-                    [args.replay, "--module", "rampage", "--inputs",
-                     str(replay), "--start-scene",
-                     str(workdir / "start.scene.json")],
-                    args.timeout, env)
+                edges = workdir / "edges.txt"
+                cmd = [args.replay, "--module", "rampage", "--inputs",
+                       str(replay), "--start-scene",
+                       str(workdir / "start.scene.json")]
+                if args.expect_edges is not None:
+                    cmd += ["--edges-out", str(edges)]
+                code, output = run(cmd, args.timeout, env)
                 outputs.append(output)
                 if code != 0:
                     failures.append(f"se_replay: exit status {code}")
                 if "diverges" in output:
                     failures.append("se_replay: the replay diverged")
+                if args.expect_edges is not None:
+                    lines = []
+                    if edges.exists():
+                        lines = [line for line in
+                                 edges.read_text(encoding="utf-8").splitlines()
+                                 if line.strip()]
+                    outputs.append("edges:\n" + "\n".join(lines))
+                    if len(lines) != args.expect_edges:
+                        failures.append(f"the replay has {len(lines)} input "
+                                        f"edges, expected {args.expect_edges}")
     except subprocess.TimeoutExpired:
         failures.append(f"timed out after {args.timeout} s")
     for output in outputs:

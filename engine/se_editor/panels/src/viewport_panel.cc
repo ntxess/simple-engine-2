@@ -65,6 +65,9 @@ void ViewportPanel::Draw(const PanelContext& context) {
   }
   const World& world = *context.world;
   EditSink sink(context);
+  // 'Play game': the view's keys are the game's, so keyboard and gamepad
+  // navigation do not act on the panel's items (ADR-113).
+  if (context.play_game) ImGui::PushItemFlag(ImGuiItemFlags_NoNav, true);
   if (!camera_) {
     // The view the game shows (its primary camera, else the arena), as an
     // editor camera the panel pans and zooms on its own.
@@ -124,8 +127,15 @@ void ViewportPanel::Draw(const PanelContext& context) {
                              ImGuiButtonFlags_MouseButtonRight |
                              ImGuiButtonFlags_MouseButtonMiddle);
   ProbeItem("viewport.image");
+  // Where the input is: the game's in 'Play game' (EditorViewports).
+  if (context.viewports != nullptr) {
+    context.viewports->ReportInput(
+        ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows),
+        ImGui::IsItemHovered());
+  }
   HandleInput(context, sink);
   DrawOverlays(context);
+  if (context.play_game) ImGui::PopItemFlag();
 }
 
 void ViewportPanel::HandleInput(const PanelContext& context, EditSink& sink) {

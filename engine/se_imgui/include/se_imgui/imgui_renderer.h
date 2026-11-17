@@ -20,13 +20,16 @@
 //     (an ImTextureID from TextureId) against GpuResources' release log:
 //     none may have been released this frame (GpuResources::
 //     MarkFrameStart at the editor's frame start). RepresentLast draws the
-//     same frame's data again.
+//     same frame's data again. The draw data's display is cropped to the
+//     swapchain it is given when it is larger (the window grew before SDL
+//     resized the swapchain, R2 of the M10-M14 review; ADR-113).
 // TextureId(handle) resolves a GpuResources slot to its texture of this
 // frame, as an ImTextureID (the backend's SDL_GPUTexture*).
 //
 // Input: ProcessEvent feeds ImGui first; it returns whether ImGui wants
-// the mouse or the keyboard (the editor then keeps the event from the
-// game). The platform backend never moves the OS cursor (navigation's
+// the mouse or the keyboard (in 'Play game' the editor decides by its
+// view's focus instead, ADR-113). The platform backend never moves the OS
+// cursor (navigation's
 // NavEnableSetMousePos stays off) and opens the first gamepad itself.
 // Multi-viewports, when the context enables them, render on main after the
 // frame (RenderPlatformWindows).
@@ -71,7 +74,17 @@ struct RendererStats {
   std::uint32_t max_indices = 0;
   // User textures checked against the release log.
   std::uint64_t checked_textures = 0;
+  // Draws whose display was cropped to a smaller swapchain.
+  std::uint64_t cropped_draws = 0;
 };
+
+// The display size to draw |display| (at |scale|, ImGui's FramebufferScale)
+// with on a |width| x |height| target: |display| itself when the backend's
+// framebuffer fits, otherwise each axis that does not fit shrunk until it
+// does. ImGui's pixels keep their place; the rest is cropped.
+[[nodiscard]] ImVec2 FitDisplayToTarget(ImVec2 display, ImVec2 scale,
+                                        std::uint32_t width,
+                                        std::uint32_t height) noexcept;
 
 class ImGuiRenderer final : public SwapchainOverlay {
  public:

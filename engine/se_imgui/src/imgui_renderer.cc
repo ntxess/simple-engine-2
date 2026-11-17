@@ -10,6 +10,7 @@
 #include <imgui_impl_sdlgpu3.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <expected>
 #include <memory>
@@ -67,7 +68,38 @@ void GrowBuffers(SDL_GPUCommandBuffer* commands, std::uint32_t vertices,
   ImGui_ImplSDLGPU3_PrepareDrawData(&sizing, commands);
 }
 
+// The backend's framebuffer size for |display| at |scale|, rounded as
+// ImGui_ImplSDLGPU3_RenderDrawData rounds it (half up; a size is never
+// negative).
+int BackendFramebuffer(float display, float scale) {
+  return static_cast<int>(std::floor(display * scale + 0.5F));
+}
+
+// One axis of FitDisplayToTarget.
+float FitAxis(float display, float scale, std::uint32_t target) {
+  if (!(scale > 0.0F) || BackendFramebuffer(display, scale) <= 0) {
+    return display;
+  }
+  if (BackendFramebuffer(display, scale) <= static_cast<int>(target)) {
+    return display;
+  }
+  float fitted = static_cast<float>(target) / scale;
+  // Rounding may land one pixel over: step down until it fits.
+  for (int i = 0;
+       i < 64 && BackendFramebuffer(fitted, scale) > static_cast<int>(target);
+       ++i) {
+    fitted = std::nextafter(fitted, 0.0F);
+  }
+  return fitted;
+}
+
 }  // namespace
+
+ImVec2 FitDisplayToTarget(ImVec2 display, ImVec2 scale, std::uint32_t width,
+                          std::uint32_t height) noexcept {
+  return ImVec2(FitAxis(display.x, scale.x, width),
+                FitAxis(display.y, scale.y, height));
+}
 
 std::expected<std::unique_ptr<ImGuiRenderer>, Error> ImGuiRenderer::Create(
     Context& context, GpuDevice& device, SDL_Window* window,
@@ -264,13 +296,29 @@ void ImGuiRenderer::Prepare(SDL_GPUCommandBuffer* commands) noexcept {
 }
 
 void ImGuiRenderer::Draw(SDL_GPUCommandBuffer* commands,
-                         SDL_GPURenderPass* pass, std::uint32_t /*width*/,
-                         std::uint32_t /*height*/) noexcept {
+                         SDL_GPURenderPass* pass, std::uint32_t width,
+                         std::uint32_t height) noexcept {
   if (!renderer_backend_ || commands == nullptr || pass == nullptr) return;
+  if (width == 0 || height == 0) return;
   ImDrawData* data = ImGui::GetDrawData();
   if (data == nullptr || !data->Valid) return;
   CheckBoundTextures(*data);
+  // The draw data has the window's size as read at NewFrame; when another
+  // process grew the window before SDL saw it, the swapchain is still the
+  // old size for a frame, and the backend's viewport (DisplaySize times
+  // FramebufferScale) must not exceed it (SDL's debug mode asserts). The
+  // display is cropped to the swapchain for this draw: the projection
+  // keeps ImGui's pixels where they are, the backend clamps every scissor
+  // to the smaller framebuffer, and what lies outside is not drawn.
+  const ImVec2 display = data->DisplaySize;
+  const ImVec2 fitted =
+      FitDisplayToTarget(display, data->FramebufferScale, width, height);
+  if (fitted.x != display.x || fitted.y != display.y) {
+    ++stats_.cropped_draws;
+    data->DisplaySize = fitted;
+  }
   ImGui_ImplSDLGPU3_RenderDrawData(data, commands, pass);
+  data->DisplaySize = display;
 }
 
 void ImGuiRenderer::CheckBoundTextures(const ImDrawData& data) noexcept {

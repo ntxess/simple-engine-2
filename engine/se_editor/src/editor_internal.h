@@ -62,6 +62,19 @@ class Editor::Viewports final : public EditorViewports {
 
   explicit Viewports(Editor* editor) : editor_(editor) {}
   [[nodiscard]] ViewportTarget* Viewport(std::string_view name) override;
+  void ReportInput(bool focused, bool hovered) override;
+  // The UI frame starts: no report yet.
+  void StartReports() noexcept {
+    focused_ = false;
+    hovered_ = false;
+  }
+  [[nodiscard]] bool Focused() const noexcept { return focused_; }
+  [[nodiscard]] bool Hovered() const noexcept { return hovered_; }
+  // The panel that last reported (its window gets the focus at 'Play
+  // game'); empty before any report.
+  [[nodiscard]] const std::string& ReportingPanel() const noexcept {
+    return reporting_panel_;
+  }
   // The frame start: viewports nobody asked for last frame are destroyed.
   void BeginFrame();
   void DestroyAll();
@@ -77,6 +90,9 @@ class Editor::Viewports final : public EditorViewports {
 
   Editor* editor_;
   std::vector<Entry> entries_;
+  bool focused_ = false;
+  bool hovered_ = false;
+  std::string reporting_panel_;
 };
 
 class Editor::Textures final : public TextureIds {
@@ -114,6 +130,30 @@ struct Editor::ScriptThread {
     case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
     case SDL_EVENT_GAMEPAD_BUTTON_UP:
     case SDL_EVENT_GAMEPAD_AXIS_MOTION:
+      return true;
+    default:
+      return false;
+  }
+}
+
+[[nodiscard]] inline bool IsMouseEvent(const SDL_Event& event) {
+  switch (event.type) {
+    case SDL_EVENT_MOUSE_MOTION:
+    case SDL_EVENT_MOUSE_BUTTON_DOWN:
+    case SDL_EVENT_MOUSE_BUTTON_UP:
+    case SDL_EVENT_MOUSE_WHEEL:
+      return true;
+    default:
+      return false;
+  }
+}
+
+// A key, mouse button or gamepad button let go.
+[[nodiscard]] inline bool IsReleaseEvent(const SDL_Event& event) {
+  switch (event.type) {
+    case SDL_EVENT_KEY_UP:
+    case SDL_EVENT_MOUSE_BUTTON_UP:
+    case SDL_EVENT_GAMEPAD_BUTTON_UP:
       return true;
     default:
       return false;

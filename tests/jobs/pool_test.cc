@@ -40,6 +40,7 @@
 
 #include "se_core/component_registry.h"
 #include "se_core/core_components.h"
+#include "se_core/debug_draw.h"
 #include "se_core/error.h"
 #include "se_core/input_frame.h"
 #include "se_core/jobs.h"
@@ -519,6 +520,67 @@ TEST_CASE("Per-chunk outputs concatenate in chunk order for every W",
         std::vector<std::uint32_t> joined;
         outputs.AppendTo(joined);
         REQUIRE(joined == serial);
+      }
+    }
+  }
+}
+
+// M14's per-chunk DebugDraw slices (ADR-113): a fork's chunks draw into
+// their own slices, merged into the World-level sink in chunk order, so the
+// primitives are the serial ones for every W and claim order.
+TEST_CASE("DebugDraw slices merge in chunk order for every W",
+          "[jobs][pool][property]") {
+  const testing::MainThreadScope main;
+  const InlineOwnerScope owner(OnMainThread());
+  constexpr std::uint32_t kCount = 501;
+  const auto draw = [](std::uint32_t i, jobs::DebugDrawSlice slice) {
+    const Vec2 at{static_cast<float>(i), static_cast<float>(i % 7)};
+    const Rgba8 color{static_cast<std::uint8_t>(i), 0, 0, 255};
+    switch ((i * 2654435761U) % 4) {
+      case 0:
+        break;
+      case 1:
+        slice.Point(at, color);
+        break;
+      case 2:
+        slice.Line(at, Vec2{at.x + 1.0F, at.y}, color);
+        break;
+      default:
+        slice.Box(at, Vec2{at.x + 2.0F, at.y + 2.0F}, color);
+        slice.Point(at, color);
+        break;
+    }
+  };
+  std::vector<DebugPrimitive> scratch;
+  for (std::uint32_t i = 0; i < kCount; ++i) {
+    draw(i, jobs::DebugDrawSlice(scratch));
+  }
+  DebugDraw serial;
+  serial.Line({-1.0F, -1.0F}, {1.0F, 1.0F}, Rgba8{1, 2, 3, 4});
+  serial.Append(scratch);
+  for (const int workers : {0, 1, 3, 7}) {
+    for (const std::uint64_t seed : SeedsWithNone()) {
+      INFO("W = " << workers << ", chaos seed " << seed);
+      ForkTestOptions options = Options(seed);
+      options.grain = 3;
+      jobs::ForkJoinPool pool(ForkTestConfig(workers, options));
+      jobs::ForkSite& site = pool.Site(TestSite());
+      jobs::DebugDrawSlices slices;
+      for (int round = 0; round < 3; ++round) {
+        DebugDraw sink;
+        // What the system drew before its fork stays first.
+        sink.Line({-1.0F, -1.0F}, {1.0F, 1.0F}, Rgba8{1, 2, 3, 4});
+        slices.Reset(pool.ChunkCountFor(site, kCount));
+        pool.ParallelFor(site, kCount, [&](jobs::ChunkRange r) {
+          for (std::uint32_t i = r.begin; i < r.end; ++i) {
+            draw(i, slices.At(r));
+          }
+        });
+        REQUIRE(slices.Total() == scratch.size());
+        slices.MergeInto(sink);
+        REQUIRE(sink.size() == serial.size());
+        REQUIRE(std::equal(sink.Primitives().begin(), sink.Primitives().end(),
+                           serial.Primitives().begin()));
       }
     }
   }

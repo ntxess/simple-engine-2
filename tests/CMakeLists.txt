@@ -129,6 +129,7 @@ if(NOT CMAKE_BUILD_TYPE STREQUAL "Release")
     "create_in_fork|not allowed inside a fork chunk"
     "sink_in_fork|not allowed inside a fork chunk"
     "sink_in_worker_chunk|not allowed inside a fork chunk"
+    "debug_draw_in_fork|not allowed inside a fork chunk"
     "owner_fork_inside_chunk|ParallelFor inside a fork chunk: use jobs::NestedParallelFor"
     "nested_fork_outside_chunk|NestedParallelFor outside a fork chunk"
     "undeclared_read|ParallelView read of a component the ForkSite does not declare"

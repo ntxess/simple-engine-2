@@ -60,7 +60,7 @@ void PanelHarness::Frame(std::span<editor::Panel* const> panels,
     // it, so the first one's widgets are never covered.
     if (i == 0) {
       ImGui::SetNextWindowPos({0.0F, 0.0F}, ImGuiCond_Always);
-      ImGui::SetNextWindowSize({kDisplayWidth, kDisplayHeight},
+      ImGui::SetNextWindowSize({first_width_, kDisplayHeight},
                                ImGuiCond_Always);
     } else {
       const float w = kDisplayWidth / static_cast<float>(panels.size());

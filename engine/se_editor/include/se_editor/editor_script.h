@@ -44,7 +44,22 @@
 //                                  ImGui as key events (never OS input):
 //                                  "ctrl+z", "shift+f5", "f10"; pressed
 //                                  for one frame, released in the next
+//   push-key KEY [up]              an SDL key event (SDL_PushEvent, as the
+//                                  OS sends one; never OS input) for the
+//                                  game: KEY as config/input.json names it
+//                                  ("d", "space"); down unless "up"
+//   expect-game-keyboard [yes|no]  'Play game' and the view has the focus:
+//                                  the keyboard and the gamepad are the
+//                                  game's InputService's (ADR-113)
 //   recovery accept|discard        the answer to the recovery offer
+//   answer-open save|discard|cancel
+//                                  the answer to the prompt about a dirty
+//                                  document that a dialog's open waits on
+//                                  (or to the next one)
+//   expect-open-prompt [yes|no]    an open waits for that prompt
+//   wait-saves                     until no save or autosave is in the lane
+//   wait-autosave                  until the dirty document's autosave of
+//                                  its revision was submitted
 //   expect-hash document|play V    V: 16 hex digits, "initial" (the
 //                                  document's at the script's start) or
 //                                  "play-start" (the document's at Play)

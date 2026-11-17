@@ -278,6 +278,27 @@ std::expected<void, Error> SetComponentCommand::Apply(World& world) {
   if (after_.empty()) {
     return Fail(ErrorCode::kInvalidArgument, label_ + ": no value");
   }
+  if (!applied_) {
+    // The value it replaces, read when it first applies: a command made
+    // during a panel's Draw applies after the frame's earlier ones, so its
+    // value at Make may already be stale (undo must invert this Apply).
+    auto entity = FindEntity(world, target_);
+    if (!entity) return std::unexpected(std::move(entity.error()));
+    auto info = FindComponent(world, component_);
+    if (!info) return std::unexpected(std::move(info.error()));
+    std::string before;
+    if (HasComponent(world, **info, *entity)) {
+      auto json = ReadComponent(world, **info, *entity);
+      if (!json) return std::unexpected(std::move(json.error()));
+      before = std::move(*json);
+    }
+    if (auto set = SetOrRemove(world, target_, component_, after_); !set) {
+      return set;
+    }
+    before_ = std::move(before);
+    applied_ = true;
+    return {};
+  }
   return SetOrRemove(world, target_, component_, after_);
 }
 
@@ -432,7 +453,17 @@ std::expected<std::unique_ptr<PathPointCommand>, Error> PathPointCommand::Make(
   if (!info) return std::unexpected(std::move(info.error()));
   auto before = ReadComponent(world, **info, *entity);
   if (!before) return std::unexpected(std::move(before.error()));
-  auto path = json::Parse(*before);
+  auto after = Edit(kind, *before, index, &point);
+  if (!after) return std::unexpected(std::move(after.error()));
+  return std::unique_ptr<PathPointCommand>(
+      new PathPointCommand(kind, target, std::string(component), index, point,
+                           std::move(*before), std::move(*after)));
+}
+
+std::expected<std::string, Error> PathPointCommand::Edit(
+    CommandKind kind, std::string_view before, std::uint32_t index,
+    Vec2* point) {
+  auto path = json::Parse(before);
   if (!path) return std::unexpected(std::move(path.error()));
   auto points = PointsOfValue(*path);
   if (!points) return std::unexpected(std::move(points.error()));
@@ -445,7 +476,7 @@ std::expected<std::unique_ptr<PathPointCommand>, Error> PathPointCommand::Make(
             ErrorCode::kInvalidArgument,
             std::format("insert at {} of a {}-point path", index, count));
       }
-      items.insert(items.begin() + index, PointValue(point));
+      items.insert(items.begin() + index, PointValue(*point));
       break;
     case CommandKind::kMovePathPoint: {
       if (index >= count) {
@@ -454,8 +485,8 @@ std::expected<std::unique_ptr<PathPointCommand>, Error> PathPointCommand::Make(
             std::format("move of point {} of a {}-point path", index, count));
       }
       json::Value& item = items[index];
-      item.Set("x", json::Value::Float(point.x));
-      item.Set("y", json::Value::Float(point.y));
+      item.Set("x", json::Value::Float(point->x));
+      item.Set("y", json::Value::Float(point->y));
       break;
     }
     case CommandKind::kDeletePathPoint:
@@ -464,16 +495,14 @@ std::expected<std::unique_ptr<PathPointCommand>, Error> PathPointCommand::Make(
             ErrorCode::kInvalidArgument,
             std::format("delete of point {} of a {}-point path", index, count));
       }
-      point = (*points)[index];
+      *point = (*points)[index];
       items.erase(items.begin() + index);
       break;
     default:
       return Fail(ErrorCode::kInvalidArgument, "not a path-point command");
   }
   if (items.size() != count) ClampProgress(*path, items.size());
-  return std::unique_ptr<PathPointCommand>(
-      new PathPointCommand(kind, target, std::string(component), index, point,
-                           std::move(*before), json::Write(*path)));
+  return json::Write(*path);
 }
 
 std::expected<std::unique_ptr<PathPointCommand>, Error>
@@ -509,6 +538,28 @@ std::string_view PathPointCommand::Label() const noexcept {
 }
 
 std::expected<void, Error> PathPointCommand::Apply(World& world) {
+  if (!applied_) {
+    // The path as it is when the command first applies: another command
+    // of the same frame may have changed it since Make, and undo must
+    // invert this Apply (the edit is made again on the current points).
+    auto entity = FindEntity(world, target_);
+    if (!entity) return std::unexpected(std::move(entity.error()));
+    auto info = FindComponent(world, component_);
+    if (!info) return std::unexpected(std::move(info.error()));
+    auto before = ReadComponent(world, **info, *entity);
+    if (!before) return std::unexpected(std::move(before.error()));
+    Vec2 point = point_;
+    auto after = Edit(kind_, *before, index_, &point);
+    if (!after) return std::unexpected(std::move(after.error()));
+    if (auto set = SetOrRemove(world, target_, component_, *after); !set) {
+      return set;
+    }
+    before_ = std::move(*before);
+    after_ = std::move(*after);
+    point_ = point;
+    applied_ = true;
+    return {};
+  }
   return SetOrRemove(world, target_, component_, after_);
 }
 

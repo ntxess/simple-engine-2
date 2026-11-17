@@ -29,6 +29,7 @@
 
 #include "se_core/component_registry.h"
 #include "se_core/core_components.h"
+#include "se_core/debug_draw.h"
 #include "se_core/jobs.h"
 #include "se_core/profile_clock.h"
 #include "se_core/thread_role.h"
@@ -146,6 +147,18 @@ void SinkInFork() {
   jobs::ForkJoinPool pool;
   jobs::ForkSite site{.name = "death", .grain = 1};
   pool.ParallelFor(site, 1, [&](jobs::ChunkRange) { events.Push({}); });
+}
+
+// The World-level DebugDraw (ADR-113) takes nothing from a fork chunk: a
+// chunk draws into its DebugDrawSlices slice.
+void DebugDrawInFork() {
+  const testing::MainThreadScope main_thread;
+  const InlineOwnerScope owner(OnMainThread());
+  DebugDraw draw;
+  jobs::ForkJoinPool pool;
+  jobs::ForkSite site{.name = "death", .grain = 1};
+  pool.ParallelFor(
+      site, 1, [&](jobs::ChunkRange) { draw.Point({0.0F, 0.0F}, Rgba8{}); });
 }
 
 // Two chunks on a pool of one worker: the caller's chunk waits (at most
@@ -309,6 +322,7 @@ const std::map<std::string, std::function<void()>>& Scenarios() {
       {"create_in_fork", CreateInFork},
       {"sink_in_fork", SinkInFork},
       {"sink_in_worker_chunk", SinkInWorkerChunk},
+      {"debug_draw_in_fork", DebugDrawInFork},
       {"owner_fork_inside_chunk", OwnerForkInsideChunk},
       {"nested_fork_outside_chunk", NestedForkOutsideChunk},
       {"undeclared_read", UndeclaredRead},

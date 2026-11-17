@@ -105,6 +105,13 @@ class EditorViewports {
   // for during a frame is destroyed at the next frame start. Null when
   // the editor has no renderer (headless).
   [[nodiscard]] virtual ViewportTarget* Viewport(std::string_view name) = 0;
+  // Where the input is, reported every frame by the panel that shows a
+  // viewport: |focused|, its window has the focus; |hovered|, the mouse is
+  // over the view. In 'Play game' the game's InputService takes the
+  // keyboard and the gamepad while a view is focused and the mouse while
+  // one is hovered; a frame without a report gives the game neither
+  // (ADR-113).
+  virtual void ReportInput(bool focused, bool hovered) = 0;
 };
 
 // Read-only state a panel draws from, valid for one frame.
@@ -125,6 +132,8 @@ struct PanelContext {
   PlayEdits* play_edits = nullptr;       // non-null in Play; when faulted,
                                          // for Select only
   EditorViewports* viewports = nullptr;  // null without a renderer
+  bool play_game = false;                // 'Play game': the view's input
+                                         // is the game's (ADR-113)
 };
 
 class Panel {

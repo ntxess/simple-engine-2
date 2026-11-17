@@ -109,7 +109,9 @@ class EditorCommand {
 };
 
 // Sets an entity's component to |after| (replacing it, or adding it when
-// the entity lacks it; Revert then removes it again).
+// the entity lacks it; Revert then removes it again). Before() is read
+// again when the command first applies, so commands made against one
+// World state and applied in order each undo to their own start.
 class SetComponentCommand final : public EditorCommand {
  public:
   // |before| empty: the entity did not have the component.
@@ -149,6 +151,8 @@ class SetComponentCommand final : public EditorCommand {
   std::string before_;
   std::string after_;
   std::string label_;
+  // Apply ran once: before_ is the value it replaced.
+  bool applied_ = false;
 };
 
 // Adds a component the entity does not have.
@@ -274,7 +278,9 @@ class DestroyEntityCommand final : public EditorCommand {
 
 // One point of a path component: inserted before |index| (index == the
 // point count appends), moved, or deleted. Made from the World the panel
-// sees: the path's JSON before and after the edit is computed then.
+// sees: the path's JSON before and after the edit is computed then, and
+// again from the World when the command first applies (an earlier command
+// of the same frame may have changed the path), so undo inverts the Apply.
 class PathPointCommand final : public EditorCommand {
  public:
   [[nodiscard]] static std::expected<std::unique_ptr<PathPointCommand>, Error>
@@ -319,6 +325,11 @@ class PathPointCommand final : public EditorCommand {
   [[nodiscard]] static std::expected<std::unique_ptr<PathPointCommand>, Error>
   Make(CommandKind kind, const World& world, Guid target, std::uint32_t index,
        Vec2 point, std::string_view component);
+  // The path JSON after |kind| at |index| of |before|'s points; a delete
+  // sets |point| to the deleted point.
+  [[nodiscard]] static std::expected<std::string, Error> Edit(
+      CommandKind kind, std::string_view before, std::uint32_t index,
+      Vec2* point);
 
   CommandKind kind_;
   Guid target_;
@@ -327,6 +338,8 @@ class PathPointCommand final : public EditorCommand {
   Vec2 point_;
   std::string before_;
   std::string after_;
+  // Apply ran once: before_ and after_ are from the path it changed.
+  bool applied_ = false;
 };
 
 // Commands applied in order and reverted in reverse, as one undo step.

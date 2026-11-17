@@ -1319,6 +1319,12 @@ SDL_AppResult App::Iterate() {
     }
     SE_LOG_INFO("quit ({}): exiting after {} iterates",
                 QuitReasonName(quit_.Reason()), iterates_);
+    // M10a: an extension that failed (a test script) fails the process.
+    // SDL's main returns the result of the callback that ended the loop,
+    // not Shutdown's, so the failure is carried here.
+    if (setup_.extension && setup_.extension->ExitFailure()) {
+      return SDL_APP_FAILURE;
+    }
     return SDL_APP_SUCCESS;
   }
 

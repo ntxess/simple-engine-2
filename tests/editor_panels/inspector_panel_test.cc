@@ -12,8 +12,10 @@
 #include <cmath>
 #include <cstdint>
 #include <entt/entity/registry.hpp>
+#include <format>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "editor_panels/support/panel_harness.h"
@@ -426,6 +428,65 @@ TEST_CASE("The effect drawer's stat is typed as text and set on Enter",
   const auto& source = w.CGet().CReg().get<rampage::EffectSource>(e);
   REQUIRE(source.effects.front().stat == rampage::StatIdOf("Speed"));
   REQUIRE(source.effects.front().value == -10.0F);
+}
+
+// R9 of the M10-M14 review: in the docked layout the Inspector is narrow,
+// and the effect table's headers ran into each other. Each header is cut
+// to its column, the column of the row widget under it.
+TEST_CASE("The effect drawer's headers keep to their columns when narrow",
+          "[editor][inspector]") {
+  const testing::MainThreadScope main_thread;
+  const InlineOwnerScope owner(OnMainThread());
+  PanelWorld w;
+  const entt::entity e = w.AddSprite({10.0F, 20.0F});
+  {
+    const MutationGate gate = w.Get().OpenGate(GateReason::kTest);
+    entt::registry& reg = w.Get().Reg();
+    auto& names = reg.ctx().get<rampage::StatNames>();
+    rampage::EffectSource source;
+    source.effects.push_back(
+        {rampage::EffectKind::kInstant, names.Add("HP"), -10.0F, 0, 0});
+    reg.emplace<rampage::EffectSource>(e, source);
+  }
+  w.Finish();
+  const Guid guid = w.GuidOf(e);
+  PanelHarness ui;
+  ui.SetFirstWidth(360.0F);
+  RecordingCommands commands;
+  commands.selection.Set(std::span<const Guid>(&guid, 1));
+  InspectorPanel inspector;
+  WidgetProbe probe;
+  inspector.SetProbe(&probe);
+  const PanelContext context = EditContext(w.CGet(), commands);
+  ui.Frame(inspector, context);
+  ui.Frame(inspector, context);
+  static constexpr const char* kRow[] = {"kind", "stat", "value", "duration",
+                                         "interval"};
+  static constexpr std::string_view kPrefixes[] = {"EffectSource",
+                                                   "EffectSource.new"};
+  for (const std::string_view prefix : kPrefixes) {
+    std::optional<float> previous_end;
+    for (int i = 0; i < 5; ++i) {
+      INFO(prefix << " header " << i);
+      const std::optional<Rect> found =
+          probe.Find(std::format("{}.header.{}", prefix, i));
+      REQUIRE(found.has_value());
+      const Rect cell = found.value_or(Rect{});
+      // "Max Duration" is wider than a column of a 360 px Inspector.
+      if (previous_end) REQUIRE(previous_end.value_or(0.0F) <= cell.x);
+      if (prefix == "EffectSource") {
+        const std::optional<Rect> under =
+            probe.Find(std::format("EffectSource.0.{}", kRow[i]));
+        REQUIRE(under.has_value());
+        const Rect widget = under.value_or(Rect{});
+        REQUIRE(cell.x == Approx(widget.x));
+        REQUIRE(cell.w <= widget.w + 0.5F);
+      }
+      previous_end = cell.x + cell.w;
+    }
+  }
+  REQUIRE(ImGui::CalcTextSize("Max Duration").x >
+          probe.Find("EffectSource.header.3").value_or(Rect{}).w);
 }
 
 TEST_CASE("Number fields are probed as floats or integers once",

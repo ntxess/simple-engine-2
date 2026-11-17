@@ -87,6 +87,8 @@ GpuResources::~GpuResources() {
 
 std::uint64_t GpuResources::ReleaseRemaining() noexcept {
   SE_ASSERT_GPU_THREAD();
+  hold_textures_ = false;
+  ReleaseHeld();
   RunRetireQueue();
   for (Slot& slot : slots_) {
     if (slot.resident != nullptr) {
@@ -530,7 +532,8 @@ std::expected<void, Error> GpuResources::FlushUploads() {
 
 void GpuResources::RetireObject(GpuObjectKind kind, void* object) {
   if (object == nullptr) return;
-  retired_.push_back(RetiredObject{kind, object});
+  const bool held = hold_textures_ && kind == GpuObjectKind::kTexture;
+  retired_.push_back(RetiredObject{kind, object, held});
   ++stats_.retired;
 }
 
@@ -552,10 +555,29 @@ void GpuResources::Retire(SDL_GPUGraphicsPipeline* pipeline) {
 
 void GpuResources::RunRetireQueue() noexcept {
   SE_ASSERT_GPU_THREAD();
+  // In place, so running the queue never allocates; held textures stay.
+  std::size_t kept = 0;
   for (const RetiredObject& retired : retired_) {
-    ReleaseNow(retired.kind, retired.object);
+    if (retired.held) {
+      retired_[kept++] = retired;
+    } else {
+      ReleaseNow(retired.kind, retired.object);
+    }
   }
-  retired_.clear();
+  while (retired_.size() > kept) retired_.pop_back();
+}
+
+void GpuResources::ReleaseHeld() noexcept {
+  SE_ASSERT_GPU_THREAD();
+  for (RetiredObject& retired : retired_) retired.held = false;
+}
+
+std::size_t GpuResources::HeldCount() const noexcept {
+  std::size_t held = 0;
+  for (const RetiredObject& retired : retired_) {
+    if (retired.held) ++held;
+  }
+  return held;
 }
 
 void GpuResources::ReleaseNow(GpuObjectKind kind, void* object) noexcept {

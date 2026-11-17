@@ -613,6 +613,13 @@ FrameResult Renderer2D::Frame(const FrameRequest& request) {
   last_.frame = ++totals_.frames;
   const std::uint64_t build_start = NowNs();
   CollectGpuTimes();
+  // ADR-113: the textures held for the last frame's overlay go out at this
+  // frame's submit (its draw data has been replaced); with an overlay, the
+  // textures this frame retires are held past RepresentLast(), which draws
+  // the same draw data again.
+  resources_->ReleaseHeld();
+  resources_->HoldRetiredTextures(request.overlay != nullptr);
+  last_overlay_ = request.overlay;
 
   // 1. The build phase.
   std::expected<void, Error> built;
@@ -642,7 +649,6 @@ FrameResult Renderer2D::Frame(const FrameRequest& request) {
 
   // 2. Prepare. The overlay's own submissions (ImGui's texture uploads)
   // go first.
-  last_overlay_ = request.overlay;
   if (request.overlay != nullptr) request.overlay->BeforeFrame();
   PrepareOptions options;
   options.uploads = planned_upload_bytes_ > 0;
@@ -823,6 +829,9 @@ std::expected<TexturePayload, Error> Renderer2D::Readback(
 
 void Renderer2D::ReleaseGpuObjects() {
   SE_ASSERT_GPU_THREAD();
+  // Everything goes, held textures included (the GPU idles below).
+  resources_->HoldRetiredTextures(false);
+  resources_->ReleaseHeld();
   ReleaseFences();
   RetireDeviceObjects();
   resources_->ReleaseAll();

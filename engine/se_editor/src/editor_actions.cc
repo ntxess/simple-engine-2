@@ -5,6 +5,7 @@
 
 #include <SDL3/SDL_error.h>
 #include <SDL3/SDL_events.h>
+#include <SDL3/SDL_keyboard.h>
 #include <SDL3/SDL_timer.h>
 #include <imgui.h>
 
@@ -41,6 +42,8 @@
 #include "se_os/thread.h"
 #include "se_platform/fs.h"
 #include "se_platform/fs_faults.h"
+#include "se_platform/window.h"
+#include "se_runtime/action_map.h"
 #include "se_runtime/app.h"
 #include "se_runtime/heartbeat.h"
 #include "src/editor_internal.h"
@@ -141,6 +144,12 @@ constexpr VerbSpec kVerbs[] = {
     {"expect-quit-pending", 0, 1, false},
     {"terminate", 0, 0, false},
     {"key", 1, 1, false},
+    {"push-key", 1, 2, false},
+    {"answer-open", 1, 1, false},
+    {"expect-open-prompt", 0, 1, false},
+    {"wait-saves", 0, 0, false},
+    {"wait-autosave", 0, 0, false},
+    {"expect-game-keyboard", 0, 1, false},
     {"show-panel", 1, 1, true},
     {"expect-panel", 1, 1, true},
     {"expect-viewport", 0, 1, false},
@@ -304,6 +313,7 @@ std::expected<void, Error> Editor::OpenDocument(App& app,
   }
   document_ = std::move(document);
   autosave_.Reset(document_->Revision());
+  last_save_revision_.reset();
   RebuildDocumentStack();
   SE_LOG_INFO("editor: opened {} ({} entities)", document_->Desc().path,
               document_->Get().EntityCount());
@@ -361,6 +371,7 @@ void Editor::ResolveRecovery(App& app, std::string_view answer) {
     // Not saved: the recovered changes are unsaved changes.
     document_->MarkSaved(~std::uint64_t{0});
     autosave_.Reset(document_->Revision());
+    last_save_revision_.reset();
     RebuildDocumentStack();
     SE_LOG_INFO("editor: recovered {} from {} (revision {})",
                 document_->Desc().path, file.path, file.revision);
@@ -477,20 +488,103 @@ void Editor::OnLaneCompletion(const LaneCompletion& completion) {
                  save.recovery ? "autosave" : "save", save.path, error.message);
     return;
   }
-  if (save.recovery || !document_ || save.path != document_->Desc().path) {
-    return;
-  }
-  document_->MarkSaved(save.revision);
-  // A saved document needs no recovery file.
+  if (!document_) return;
   const std::string recovery = RecoveryPathFor(
       app_->Paths().pref, document_->Desc().path, document_->Desc().name);
-  if (fs::Exists(recovery)) {
+  const auto remove_recovery = [&recovery] {
+    if (!fs::Exists(recovery)) return;
     if (auto removed = fs::Remove(recovery); !removed) {
       SE_LOG_WARN("editor: {}: {}", recovery, removed.error().message);
     }
+  };
+  if (save.recovery) {
+    // An autosave that lands after a save of the same or a newer revision
+    // completed holds older content than the file: it is no recovery.
+    if (save.path == recovery && last_save_revision_.has_value() &&
+        save.revision <= *last_save_revision_) {
+      remove_recovery();
+      SE_LOG_INFO(
+          "editor: autosave of revision {} landed after the save of "
+          "revision {}: recovery file removed",
+          save.revision, *last_save_revision_);
+    }
+    return;
   }
+  if (save.path != document_->Desc().path) return;
+  document_->MarkSaved(save.revision);
+  last_save_revision_ =
+      std::max(last_save_revision_.value_or(0), save.revision);
+  // A saved document needs no recovery file.
+  remove_recovery();
   SE_LOG_INFO("editor: saved {} (revision {}){}", save.path, save.revision,
               document_->Dirty() ? "; changed since" : "");
+}
+
+void Editor::RunPendingOpen(App& app) {
+  const auto open = [this, &app](const std::string& path) {
+    AssertMainThread();
+    if (auto opened = OpenDocument(app, path, /*offer_recovery=*/true);
+        !opened) {
+      SE_LOG_ERROR("editor: open {}: {}", path, opened.error().message);
+    }
+  };
+  if (!open_after_save_.empty()) {
+    const bool saving =
+        std::any_of(saves_.begin(), saves_.end(),
+                    [](const PendingSave& save) { return !save.recovery; });
+    if (saving) return;
+    std::string path = std::exchange(open_after_save_, {});
+    if (document_ && document_->Dirty()) {
+      SE_LOG_WARN("editor: open {} called off: '{}' is still unsaved{}", path,
+                  document_->Desc().name,
+                  save_error_.empty() ? std::string(" (changed since the save)")
+                                      : " (" + save_error_ + ")");
+      return;
+    }
+    open(path);
+  }
+  if (!pending_open_.has_value()) return;
+  std::string path = std::move(*pending_open_);
+  pending_open_.reset();
+  if (document_ && document_->Dirty()) {
+    // The open waits for the prompt (ADR-113): opening replaces the
+    // document, and its unsaved changes with it.
+    open_prompt_ = std::move(path);
+    SE_LOG_INFO(
+        "editor: '{}' has unsaved changes: opening {} waits for the "
+        "prompt",
+        document_->Desc().name, open_prompt_);
+    if (!open_answer_.empty()) {
+      ResolveOpenPrompt(app, std::exchange(open_answer_, {}));
+    }
+    return;
+  }
+  open(path);
+}
+
+void Editor::ResolveOpenPrompt(App& app, std::string_view answer) {
+  if (open_prompt_.empty()) return;
+  std::string path = std::exchange(open_prompt_, {});
+  if (answer == "cancel") {
+    SE_LOG_INFO("editor: open {} cancelled: '{}' keeps its changes", path,
+                document_ ? document_->Desc().name : std::string());
+    return;
+  }
+  if (answer == "save" && document_ && document_->Dirty()) {
+    if (auto saved = SaveDocument(app, {}, /*durable=*/true); !saved) {
+      save_error_ = saved.error().message;
+      SE_LOG_ERROR("editor: open {} called off: the save failed: {}", path,
+                   save_error_);
+      return;
+    }
+    open_after_save_ = std::move(path);
+    return;
+  }
+  SE_LOG_INFO("editor: open {}: the changes to '{}' are discarded", path,
+              document_ ? document_->Desc().name : std::string());
+  if (auto opened = OpenDocument(app, path, /*offer_recovery=*/true); !opened) {
+    SE_LOG_ERROR("editor: open {}: {}", path, opened.error().message);
+  }
 }
 
 void Editor::TakeDialogs(App& app) {
@@ -535,8 +629,7 @@ void Editor::RunPlayRequest(App& app, std::uint64_t /*now_ns*/) {
       if (!play_) {
         StartPlay(app, PlayKind::kPlay);
       } else {
-        play_->Resume();
-        SE_LOG_INFO("play: resumed at tick {}", play_->NextTick());
+        ResumePlay();
       }
       return;
     case Request::kPlayGame:
@@ -549,10 +642,7 @@ void Editor::RunPlayRequest(App& app, std::uint64_t /*now_ns*/) {
       }
       return;
     case Request::kResume:
-      if (play_) {
-        play_->Resume();
-        SE_LOG_INFO("play: resumed at tick {}", play_->NextTick());
-      }
+      if (play_) ResumePlay();
       return;
     case Request::kStep:
       if (play_ && play_->State() == PlayState::kPaused) {
@@ -568,6 +658,17 @@ void Editor::RunPlayRequest(App& app, std::uint64_t /*now_ns*/) {
         SE_LOG_INFO("play: stop after tick {}", play_->LastTick());
       }
       return;
+  }
+}
+
+void Editor::ResumePlay() {
+  // Resume acts only on Paused and Stepping (not on Play.Faulted).
+  const EditorMode before = Mode();
+  play_->Resume();
+  if (Mode() != before) {
+    SE_LOG_INFO("play: resumed at tick {}", play_->NextTick());
+  } else {
+    SE_LOG_INFO("play: resume ignored in {}", EditorModeName(before));
   }
 }
 
@@ -634,6 +735,11 @@ void Editor::StartPlay(App& app, PlayKind kind) {
   SE_LOG_INFO("{}: started at tick {} ({} bytes, document hash {:016x})",
               kind == PlayKind::kPlayGame ? "play game" : "play",
               play_->NextTick(), start_bytes.size(), play_start_document_hash_);
+  // 'Play game' plays in the view: its window takes the focus, so the
+  // keys are the game's at once (ADR-113).
+  if (kind == PlayKind::kPlayGame && !viewports_->ReportingPanel().empty()) {
+    focus_queue_.push_back(viewports_->ReportingPanel());
+  }
 }
 
 void Editor::StopPlay(App& app) {
@@ -661,10 +767,15 @@ void Editor::StopPlay(App& app) {
   SE_ASSERT_MSG(now == play_start_document_hash_,
                 "Stop: the document's hash changed during Play");
   if (now != play_start_document_hash_) {
-    SE_LOG_ERROR("stop: the document's hash changed during Play");
+    SE_LOG_ERROR(
+        "stop{} after tick {}: the document's hash changed during Play "
+        "({:016x}, {:016x} at Play)",
+        faulted ? " (from Play.Faulted)" : "", last, now,
+        play_start_document_hash_);
+  } else {
+    SE_LOG_INFO("stop{} after tick {}: document hash {:016x} unchanged",
+                faulted ? " (from Play.Faulted)" : "", last, now);
   }
-  SE_LOG_INFO("stop{} after tick {}: document hash {:016x} unchanged",
-              faulted ? " (from Play.Faulted)" : "", last, now);
 }
 
 // --- Quit ---
@@ -675,6 +786,14 @@ QuitPoll Editor::PollQuit(QuitReason /*reason*/) {
   // A file dialog is open: its callback first.
   if (dialogs_ && dialogs_->Pending() > 0) return QuitPoll::kPending;
   if (quit_cancel_) return QuitPoll::kCancel;
+  // An open waiting for its prompt or its save does not survive the quit
+  // (nothing acts on a dialog once the editor started quitting).
+  if (!open_prompt_.empty() || !open_after_save_.empty()) {
+    SE_LOG_INFO("editor: open {} dropped: the editor is quitting",
+                open_prompt_.empty() ? open_after_save_ : open_prompt_);
+    open_prompt_.clear();
+    open_after_save_.clear();
+  }
   switch (quit_phase_) {
     case QuitPhase::kNone:
       if (document_ && document_->Dirty()) {
@@ -1125,6 +1244,77 @@ bool Editor::RunAction(App& app, const ScriptAction& action) {
     FeedKeyChord(script_chord_, /*down=*/true);
     script_key_down_ = true;
     return false;
+  }
+  if (verb == "push-key") {
+    // An SDL key event as the OS would deliver it (SDL_PushEvent; never OS
+    // input): the App's event handling, the editor's routing and the
+    // game's InputService all see it.
+    const std::uint32_t keycode = KeycodeFromName(args[0]);
+    const bool down = args.size() < 2 || args[1] != "up";
+    if (keycode == 0 || (args.size() > 1 && args[1] != "up")) {
+      ScriptFailure(action, "push-key takes a key name and an optional up");
+      return true;
+    }
+    SDL_Event event{};
+    event.type = down ? SDL_EVENT_KEY_DOWN : SDL_EVENT_KEY_UP;
+    event.key.timestamp = SDL_GetTicksNS();
+    event.key.windowID = app.GetWindow() != nullptr ? app.GetWindow()->Id() : 0;
+    event.key.key = keycode;
+    event.key.scancode = SDL_GetScancodeFromKey(keycode, nullptr);
+    event.key.down = down;
+    if (!SDL_PushEvent(&event)) {
+      ScriptFailure(action, SDL_GetError());
+    } else {
+      SE_LOG_INFO("editor script: line {}: pushed key '{}' {}", action.line,
+                  args[0], down ? "down" : "up");
+    }
+    return true;
+  }
+  if (verb == "answer-open") {
+    if (args[0] != "save" && args[0] != "discard" && args[0] != "cancel") {
+      ScriptFailure(action, "answer-open takes save, discard or cancel");
+      return true;
+    }
+    if (open_prompt_.empty()) {
+      // The answer for the next prompt.
+      open_answer_ = args[0];
+    } else {
+      ResolveOpenPrompt(app, args[0]);
+    }
+    return true;
+  }
+  if (verb == "expect-open-prompt") {
+    const bool want = YesNo(action, true);
+    const bool have = !open_prompt_.empty();
+    if (want != have) {
+      ScriptFailure(action, have ? "an open waits for the prompt"
+                                 : "no open waits for the prompt");
+    }
+    return true;
+  }
+  if (verb == "wait-autosave") {
+    // The autosave of the document's revision was submitted.
+    return !document_ || !document_->Dirty() ||
+           autosave_.SubmittedRevision() == document_->Revision();
+  }
+  if (verb == "wait-saves") {
+    // Every save and autosave in the lane completed.
+    return saves_.empty();
+  }
+  if (verb == "expect-game-keyboard") {
+    // The keyboard only: the real cursor may rest over the window, which
+    // gives the game the mouse.
+    const bool want = YesNo(action, true);
+    const bool have =
+        game_input_focus_ && (imgui_renderer_ == nullptr || game_view_focused_);
+    if (have != want) {
+      ScriptFailure(action,
+                    std::format("the game {} the keyboard (view "
+                                "focused {}, hovered {})",
+                                have ? "has" : "lacks", game_view_focused_,
+                                game_view_hovered_));
+    }
+    return true;
   }
   if (verb == "wait-ms") {
     const auto ms = ParseU64(args[0]);

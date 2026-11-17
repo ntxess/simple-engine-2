@@ -124,6 +124,10 @@ class PanelHarness {
     Frame(one, context);
   }
 
+  // The first panel's window width from the next frame (a narrow docked
+  // panel); the display's width by default.
+  void SetFirstWidth(float width) noexcept { first_width_ = width; }
+
   // Input for the next frame (ImGui's IO event queue).
   void MoveMouse(ImVec2 pos);
   void Button(int button, bool down);
@@ -137,6 +141,7 @@ class PanelHarness {
              ImVec2 pos, int button = 0) SE_REQUIRES(g_main);
 
  private:
+  float first_width_ = kDisplayWidth;
   std::unique_ptr<imgui::Context> context_;
   std::unique_ptr<imgui::HeadlessFrames> frames_;
 };

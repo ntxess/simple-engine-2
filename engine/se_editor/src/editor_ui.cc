@@ -31,6 +31,7 @@ constexpr const char* kDockName = "EditorDockSpace";
 constexpr const char* kQuitPopup = "Unsaved changes";
 constexpr const char* kSavingPopup = "Saving";
 constexpr const char* kRecoveryPopup = "Recover unsaved changes";
+constexpr const char* kOpenPopup = "Unsaved changes##open";
 
 // Where the seeded layout docks a panel, by its window title (the names
 // of se_editor_panels; unknown ones go right). The built-in Play and
@@ -311,6 +312,21 @@ void Editor::DrawModals(App& app) {
       ImGui::EndPopup();
     }
   }
+  if (!open_prompt_.empty()) {
+    ImGui::OpenPopup(kOpenPopup);
+    if (ImGui::BeginPopupModal(kOpenPopup, nullptr,
+                               ImGuiWindowFlags_AlwaysAutoResize)) {
+      Text(std::format("Save changes to '{}' before opening {}?",
+                       document_ ? document_->Desc().name : std::string(),
+                       open_prompt_));
+      if (ImGui::Button("Save")) ResolveOpenPrompt(app, "save");
+      ImGui::SameLine();
+      if (ImGui::Button("Don't Save")) ResolveOpenPrompt(app, "discard");
+      ImGui::SameLine();
+      if (ImGui::Button("Cancel")) ResolveOpenPrompt(app, "cancel");
+      ImGui::EndPopup();
+    }
+  }
   if (!recovery_offer_.empty()) {
     ImGui::OpenPopup(kRecoveryPopup);
     if (ImGui::BeginPopupModal(kRecoveryPopup, nullptr,
@@ -352,18 +368,24 @@ void Editor::DrawUi(App& app, const FrameReport& report) {
   context.log = &log_;
   context.real_delta_sec = report.clock.real_delta;
   context.viewports = app.Renderer() != nullptr ? viewports_.get() : nullptr;
+  context.play_game =
+      play_ != nullptr && play_->Kind() == PlayKind::kPlayGame && !faulted;
+  viewports_->StartReports();
   DrawBuiltInPanels(context);
   ++ui_frame_;
   for (std::size_t i = 0; i < panels_.size(); ++i) {
     Panel& panel = *panels_[i];
     const std::string name(panel.Name());
     if (ImGui::Begin(name.c_str())) {
+      drawing_panel_ = panel.Name();
       panel.Draw(context);
+      drawing_panel_ = {};
       ++panel_draws_[i];
       panel_frame_[i] = ui_frame_;
     }
     ImGui::End();
   }
+  LatchGameInput();
   // A seeded layout shows its first tabs; a script brings a panel forward.
   // One window a frame: a dock node selects the tab of the window that has
   // the focus when the frame ends.

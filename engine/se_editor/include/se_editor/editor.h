@@ -221,6 +221,8 @@ class Editor final : public AppExtension, public QuitProvider {
   void TakeDialogs(App& app) SE_REQUIRES(g_main);
   void RunPlayRequest(App& app, std::uint64_t now_ns) SE_REQUIRES(g_main);
   void StartPlay(App& app, PlayKind kind) SE_REQUIRES(g_main);
+  // Play (F5) or Resume on a session; logs whether the state changed.
+  void ResumePlay() SE_REQUIRES(g_main);
   void StopPlay(App& app) SE_REQUIRES(g_main);
   void RunScript(App& app, std::uint64_t now_ns) SE_REQUIRES(g_main);
   // One script action; false when it waits (run it again next frame).
@@ -243,6 +245,8 @@ class Editor final : public AppExtension, public QuitProvider {
 
   // The frame's UI.
   void DrawUi(App& app, const FrameReport& report) SE_REQUIRES(g_main);
+  // After the panels: whether the next frame's input is the game's.
+  void LatchGameInput() SE_REQUIRES(g_main);
   void DrawDockSpace() SE_REQUIRES(g_main);
   void DrawMenus(App& app) SE_REQUIRES(g_main);
   // The hotkeys the menus name (Ctrl+S, Ctrl+Z, Ctrl+Y, F5, Shift+F5,
@@ -287,6 +291,13 @@ class Editor final : public AppExtension, public QuitProvider {
   void JoinScriptThread() noexcept;
   // Resolves the quit prompt: "save", "discard" or "cancel".
   void ResolveQuitPrompt(App& app, std::string_view answer) SE_REQUIRES(g_main);
+  // The open prompt about a dirty document (File > Open): "save" saves it
+  // and opens once the save completed, "discard" opens at once, "cancel"
+  // keeps the document.
+  void ResolveOpenPrompt(App& app, std::string_view answer) SE_REQUIRES(g_main);
+  // The frame start: a dialog's open, through the prompt when the document
+  // is dirty, or one waiting for its save.
+  void RunPendingOpen(App& app) SE_REQUIRES(g_main);
   // Resolves the recovery offer: "accept" or "discard".
   void ResolveRecovery(App& app, std::string_view answer) SE_REQUIRES(g_main);
 
@@ -323,8 +334,14 @@ class Editor final : public AppExtension, public QuitProvider {
   // The last frame drew the World into a panel's viewport.
   bool viewport_drawn_ = false;
   std::string fault_directory_;
-  // 'Play game' and the view (no ImGui window) has the input.
+  // 'Play game' and the view has the input: the frame's ticks latch the
+  // game's InputService (ADR-113). Set from the last UI frame's reports.
   bool game_input_focus_ = false;
+  // The last UI frame's view reports (EditorViewports::ReportInput).
+  bool game_view_focused_ = false;
+  bool game_view_hovered_ = false;
+  // The panel being drawn (its Name()), for the view's report.
+  std::string_view drawing_panel_;
   // A document to open at the next frame start (a dialog's result).
   std::optional<std::string> pending_open_;
 
@@ -385,6 +402,17 @@ class Editor final : public AppExtension, public QuitProvider {
   // The prompt's answer from a script ("save", "discard", "cancel").
   std::string quit_answer_;
   bool quit_cancel_ = false;
+
+  // File > Open over a dirty document: the file waiting for the prompt's
+  // answer, and the file to open once the document's save completed.
+  std::string open_prompt_;
+  std::string open_after_save_;
+  // The prompt's answer from a script.
+  std::string open_answer_;
+  // The revision of the document's last completed save since it was
+  // opened: a recovery write of an older revision that lands later is
+  // stale (the lane does not complete in submission order).
+  std::optional<std::uint64_t> last_save_revision_;
 
   // The longest UI work of the last 2 s (debug log).
   std::uint64_t timing_new_ = 0;

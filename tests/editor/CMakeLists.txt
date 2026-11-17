@@ -102,6 +102,15 @@ if(NOT CMAKE_BUILD_TYPE STREQUAL "Release" AND TARGET simple_editor)
   _se_editor_script(dialog_quit dialog_quit
     --expect "1 answered during the quit")
   _se_editor_script(dialog_open dialog_open)
+  # File > Open over a dirty document waits for the unsaved-changes prompt:
+  # Cancel keeps the changes, Save saves them first, Don't Save discards.
+  _se_editor_script(open_dirty open_dirty --scene-copy "${_se_sandbox}"
+    --expect-scene-contains "321" --expect "waits for the prompt")
+  # An autosave that lands after a newer save leaves no recovery file.
+  _se_editor_script(autosave_after_save autosave_after_save
+    --scene-copy "${_se_sandbox}" --expect-scene-contains "222")
+  # A failed script fails the process (its exit status).
+  _se_editor_script(failure_exit_status failing --expect-script-failure)
   _se_editor_script(autosave_recovers autosave --scene-copy "${_se_sandbox}"
     --then-script "${_se_scripts}/recover.editor"
     --expect "editor: recovered")
@@ -118,6 +127,11 @@ if(NOT CMAKE_BUILD_TYPE STREQUAL "Release" AND TARGET simple_editor)
     --expect "editor: viewport 'scene'")
   _se_editor_desktop(play_session play_session --readback 200
     --replay $<TARGET_FILE:se_replay>)
+  # 'Play game' in the view: keys pushed while the Viewport panel has the
+  # focus reach the game's InputService and its replay (ADR-113).
+  _se_editor_desktop(play_game_input play_game_input
+    --replay $<TARGET_FILE:se_replay> --expect-edges 4
+    --expect "play game: the view has the input")
   _se_editor_desktop(tick_fault tick_fault --expect-fault-files)
   _se_editor_desktop(render_fault render_fault --expect-fault-files)
   _se_editor_desktop(quit_save quit_save --scene-copy "${_se_sandbox}"

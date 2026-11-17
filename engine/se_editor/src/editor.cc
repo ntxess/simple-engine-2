@@ -133,6 +133,16 @@ void Editor::PlayEditsImpl::Select(std::span<const Guid> guids) {
   if (editor_->document_) editor_->document_->GetSelection().Set(guids);
 }
 
+void Editor::Viewports::ReportInput(bool focused, bool hovered) {
+  AssertMainThread();
+  focused_ = focused_ || focused;
+  hovered_ = hovered_ || hovered;
+  if (!editor_->drawing_panel_.empty() &&
+      reporting_panel_ != editor_->drawing_panel_) {
+    reporting_panel_ = std::string(editor_->drawing_panel_);
+  }
+}
+
 ViewportTarget* Editor::Viewports::Viewport(std::string_view name) {
   AssertMainThread();
   Renderer2D* renderer =
@@ -338,13 +348,34 @@ bool Editor::OnEvent(App& /*app*/, const SDL_Event& event) {
   AssertMainThread();
   const bool input = IsInputEvent(event);
   if (input) last_input_ns_ = SDL_GetTicksNS();
-  bool imgui_wants = false;
-  if (imgui_renderer_) imgui_wants = imgui_renderer_->ProcessEvent(event);
-  // The game sees input only in 'Play game' while the view has it.
-  const bool game_has_it =
-      play_ && play_->Kind() == PlayKind::kPlayGame && !imgui_wants;
-  game_input_focus_ = game_has_it;
-  return input && !game_has_it;
+  // ImGui sees every event (its key and mouse state stay whole); whether
+  // the game sees it too is the view's business, not io.WantCapture*: the
+  // Viewport panel is an ImGui window, so ImGui wants the mouse over it
+  // and, with keyboard navigation on, the keyboard while it has the focus.
+  if (imgui_renderer_) static_cast<void>(imgui_renderer_->ProcessEvent(event));
+  if (!input) return false;
+  if (!play_ || play_->Kind() != PlayKind::kPlayGame) return true;
+  // 'Play game' (ADR-113). Headless there is no view: the game has it.
+  if (!imgui_renderer_) return false;
+  // A release always reaches the game, so a key let go after the focus
+  // moved does not stay held (a release of nothing held is ignored).
+  if (IsReleaseEvent(event)) return false;
+  if (IsMouseEvent(event)) return !game_view_hovered_;
+  return !game_view_focused_;
+}
+
+void Editor::LatchGameInput() {
+  AssertMainThread();
+  game_view_focused_ = viewports_->Focused();
+  game_view_hovered_ = viewports_->Hovered();
+  const bool play_game = play_ && play_->Kind() == PlayKind::kPlayGame;
+  const bool has = play_game && (!imgui_renderer_ || game_view_focused_ ||
+                                 game_view_hovered_);
+  if (play_game && has != game_input_focus_) {
+    SE_LOG_INFO("play game: the view {} the input (focused {}, hovered {})",
+                has ? "has" : "lost", game_view_focused_, game_view_hovered_);
+  }
+  game_input_focus_ = has;
 }
 
 ExtensionSession Editor::BeginFrame(App& app, std::uint64_t now_ns) {
@@ -359,14 +390,7 @@ ExtensionSession Editor::BeginFrame(App& app, std::uint64_t now_ns) {
     reset = true;
   }
   viewports_->BeginFrame();
-  if (pending_open_.has_value()) {
-    std::string path = std::move(*pending_open_);
-    pending_open_.reset();
-    if (auto opened = OpenDocument(app, path, /*offer_recovery=*/true);
-        !opened) {
-      SE_LOG_ERROR("editor: open {}: {}", path, opened.error().message);
-    }
-  }
+  RunPendingOpen(app);
   RunScript(app, now_ns);
   const PlayState before = play_ ? play_->State() : PlayState::kPlaying;
   RunPlayRequest(app, now_ns);

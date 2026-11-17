@@ -3,6 +3,7 @@
 #include "se_editor_panels/component_drawers.h"
 
 #include <imgui.h>
+#include <imgui_internal.h>
 #include <imgui_stdlib.h>
 
 #include <algorithm>
@@ -87,6 +88,21 @@ float AsFloat(const json::Value& value) {
 
 void Probe(const DrawTarget& target, std::string key) {
   if (target.probe != nullptr) target.probe->RecordLastItem(std::move(key));
+}
+
+// A column header cut to its |width| (an ellipsis, the whole text as a
+// tooltip): the item is exactly the column, so a header never runs into
+// the next one in a narrow docked Inspector.
+void HeaderCell(const char* text, float width) {
+  const ImVec2 min = ImGui::GetCursorScreenPos();
+  const float height = ImGui::GetTextLineHeight();
+  const ImVec2 max(min.x + width, min.y + height);
+  ImGui::Dummy(ImVec2(width, height));
+  ImGui::RenderTextEllipsis(ImGui::GetWindowDrawList(), min, max, max.x, text,
+                            nullptr, nullptr);
+  if (ImGui::IsItemHovered() && ImGui::CalcTextSize(text).x > width) {
+    ImGui::SetTooltip("%s", text);
+  }
 }
 
 void SubmitValue(const DrawTarget& target, std::string_view component,
@@ -351,18 +367,20 @@ void EffectSourceDrawer::Draw(const DrawTarget& target) {
   ImGui::BeginDisabled(target.read_only);
   const float column = ImGui::GetContentRegionAvail().x / 6.0F;
   ImGui::PushItemWidth(column);
-  const auto header = [column] {
-    ImGui::TextUnformatted("Effect Type");
-    ImGui::SameLine(column + 10.0F);
-    ImGui::TextUnformatted("Aff. Status");
-    ImGui::SameLine(column * 2 + 20.0F);
-    ImGui::TextUnformatted("Modifier");
-    ImGui::SameLine(column * 3 + 30.0F);
-    ImGui::TextUnformatted("Max Duration");
-    ImGui::SameLine(column * 4 + 40.0F);
-    ImGui::TextUnformatted("Tick Rate");
+  // The headers sit over the row widgets' columns (column wide, 10 px
+  // apart), each cut to its column.
+  const auto header = [&target, column](std::string_view key) {
+    static constexpr const char* kHeaders[] = {
+        "Effect Type", "Aff. Status", "Modifier", "Max Duration", "Tick Rate"};
+    for (int i = 0; i < 5; ++i) {
+      if (i > 0) {
+        ImGui::SameLine((column + 10.0F) * static_cast<float>(i));
+      }
+      HeaderCell(kHeaders[i], column);
+      Probe(target, std::format("{}.header.{}", key, i));
+    }
   };
-  header();
+  header("EffectSource");
   std::optional<std::size_t> discard;
   for (std::size_t i = 0; i < source.effects.size(); ++i) {
     rampage::EffectDef& effect = source.effects[i];
@@ -413,7 +431,7 @@ void EffectSourceDrawer::Draw(const DrawTarget& target) {
 
   ImGui::Spacing();
   ImGui::TextUnformatted("Add New Effects");
-  header();
+  header("EffectSource.new");
   ImGui::PushID("new");
   ImGui::Combo("##kind", &new_kind_, kKinds, 3);
   ImGui::SameLine(column + 10.0F);
