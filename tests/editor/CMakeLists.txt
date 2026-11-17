@@ -21,6 +21,7 @@ se_add_module(se_editor_tests KIND EXECUTABLE
     play_session_test.cc
     prefab_document_test.cc
     recovery_test.cc
+    runtime_worlds_test.cc
     script_test.cc
     ../support/no_dialogs_listener.cc
     ../support/tracy_inert_listener.cc
@@ -34,6 +35,9 @@ se_add_module(se_editor_tests KIND EXECUTABLE
     se_replay_dump
     se_runtime
     se_sim
+    # M11/M13 integration: a headless App boot of rampage
+    # (runtime_worlds_test.cc).
+    se_platform_test_support
     Catch2::Catch2WithMain
   TEST)
 target_include_directories(se_editor_tests PRIVATE "${CMAKE_SOURCE_DIR}/tests")
@@ -140,6 +144,29 @@ if(NOT CMAKE_BUILD_TYPE STREQUAL "Release" AND TARGET simple_editor)
     --expect "handled at Stop")
   _se_editor_script(stat_names stat_names --scene-copy "${_se_sandbox}"
     --expect-scene-contains "Armor")
+  # M11/M13 integration: the design's quit durability test, editor side.
+  # Run 1: three dirty documents (a scene, two prefabs) on a throttled disk;
+  # the quit waits until all three are renamed into place, the files hold
+  # what each document saves, the shutdown deadline starts after the drain.
+  # Run 2: one rename held past the lane's retry: that document stays dirty
+  # and the quit is cancelled while the other two are saved; a second quit
+  # exits.
+  _se_editor_script(quit_durability quit_durability
+    --content-copy "${_se_content}"
+    --then-script "${_se_scripts}/quit_durability_fails.editor"
+    --expect-files-equal assets/scenes/sandbox.scene.json
+      expected-sandbox.scene.json
+    --expect-files-equal assets/prefabs/enemy.prefab.json
+      expected-enemy.prefab.json
+    --expect-files-equal assets/prefabs/player.prefab.json
+      expected-player.prefab.json
+    --then-expect-files-equal assets/prefabs/player.prefab.json
+      expected-player.prefab.json
+    --expect-order "quit pending (" "quit waits for"
+      "the lane's Durable jobs are done"
+      "shutdown deadline started: the quit drain is over" "quit ready after"
+    --expect "editor: quit cancelled (save failed"
+    --expect "player.prefab.json failed")
   _se_editor_script(stress_prefabs stress_prefabs
     --content-copy "${_se_content}"
     --expect-file-count assets/scenes/sandbox.scene.json

@@ -129,7 +129,7 @@ constexpr VerbSpec kVerbs[] = {
     {"expect-state", 1, 1, false},
     {"dump-hash", 1, 1, false},
     {"throttle-disk", 1, 1, false},
-    {"disk-busy", 1, 1, false},
+    {"disk-busy", 1, 2, false},
     {"wait-ms", 1, 1, false},
     {"expect-entities", 2, 2, false},
     {"expect-recovery", 0, 1, false},
@@ -166,6 +166,12 @@ constexpr VerbSpec kVerbs[] = {
     {"expect-viewport", 0, 1, false},
     {"expect-fork-sites", 1, 1, false},
     {"expect-dump-stream", 0, 1, false},
+    // M11/M13 integration: 'Play game' through the content gate, the
+    // N-documents quit.
+    {"expect-top-state", 1, 1, false},
+    {"wait-top-state", 1, 1, false},
+    {"expect-saved", 1, 1, false},
+    {"write-document", 2, 2, false},
 };
 
 // "ctrl+z", "shift+f5", "f10": modifiers, then one of ImGui's named keys
@@ -1246,11 +1252,14 @@ bool Editor::RunAction(App& app, const ScriptAction& action) {
       ScriptFailure(action, "bad milliseconds");
       return true;
     }
-    fs::FsFaults faults;
+    // Each verb changes its own setting and keeps the other's.
+    fs::FsFaults faults = fs::GetFsFaults();
     if (verb == "throttle-disk") {
       faults.write_step_delay_ms = static_cast<std::uint32_t>(*ms);
     } else {
       faults.rename_busy_ms = static_cast<std::uint32_t>(*ms);
+      // disk-busy MS FILE: only renames onto FILE are refused.
+      faults.rename_busy_suffix = args.size() > 1 ? args[1] : std::string();
     }
     if (!fs::kFsFaultHooks) {
       ScriptFailure(action, "this build has no se::fs fault hooks");
@@ -1258,6 +1267,51 @@ bool Editor::RunAction(App& app, const ScriptAction& action) {
     }
     fs::SetFsFaults(faults);
     SE_LOG_INFO("editor script: {} {} ms", verb, *ms);
+    return true;
+  }
+  if (verb == "expect-top-state" || verb == "wait-top-state") {
+    // The play session's top state (M13: 'Play game' moves between the
+    // game's states); wait-top-state waits for it.
+    const std::string_view top =
+        play_ ? play_->States().TopId() : std::string_view();
+    if (top == args[0]) return true;
+    if (verb == "wait-top-state" && play_ && !play_->Faulted()) return false;
+    ScriptFailure(action, std::format("the top state is '{}'", top));
+    return true;
+  }
+  if (verb == "expect-saved" || verb == "write-document") {
+    // expect-saved NAME: the document is clean and its file holds exactly
+    // what it would save; write-document NAME FILE writes that text to
+    // FILE under the content root (checked after the editor exited).
+    DocumentEntry* found = documents_.FindByName(args[0]);
+    if (found == nullptr) {
+      ScriptFailure(action, "no document '" + args[0] + "'");
+      return true;
+    }
+    const EditDocument& document = *found->document;
+    auto text = document.SerializeFile();
+    if (!text) {
+      ScriptFailure(action, text.error().message);
+      return true;
+    }
+    if (verb == "write-document") {
+      if (fs::IsAbsolute(args[1]) || args[1].find("..") != std::string::npos) {
+        ScriptFailure(action, "write-document takes a path under the root");
+        return true;
+      }
+      const std::string path = fs::Join(app.Paths().content_root, args[1]);
+      if (auto written = fs::WriteFile(path, AsBytes(*text)); !written) {
+        ScriptFailure(action, written.error().message);
+      }
+      return true;
+    }
+    auto on_disk = fs::ReadTextFile(document.Desc().path);
+    if (document.Dirty()) {
+      ScriptFailure(action, "the document is dirty");
+    } else if (!on_disk || *on_disk != *text) {
+      ScriptFailure(action, std::format("{} does not hold the document's text",
+                                        document.Desc().path));
+    }
     return true;
   }
   if (verb == "dump-hash") {

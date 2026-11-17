@@ -138,6 +138,26 @@ if(TARGET rampage AND NOT CMAKE_BUILD_TYPE STREQUAL "Release")
     LABELS "desktop;gpu;rampage" TIMEOUT 120)
 endif()
 
+# M11/M13 integration: a scene the editor saved with prefab references
+# plays in rampage (--start-state gameplay --scene, through the lane), and
+# its first 600 tick hashes equal se_replay's on the editor's Play-start
+# bytes of the same document (editor_saved_test.py; headless).
+if(TARGET rampage AND TARGET simple_editor AND
+   NOT CMAKE_BUILD_TYPE STREQUAL "Release")
+  add_test(NAME rampage.plays_an_editor_saved_scene
+    COMMAND Python3::Interpreter
+            "${CMAKE_CURRENT_SOURCE_DIR}/editor_saved_test.py"
+            --editor $<TARGET_FILE:simple_editor>
+            --rampage $<TARGET_FILE:rampage>
+            --se-replay $<TARGET_FILE:se_replay>
+            --content "${CMAKE_SOURCE_DIR}"
+            --script
+            "${CMAKE_SOURCE_DIR}/tests/editor/scripts/saved_for_rampage.editor"
+            --out "${_se_rampage_out}/editor_saved")
+  set_tests_properties(rampage.plays_an_editor_saved_scene PROPERTIES
+    LABELS "unit;rampage" TIMEOUT 180)
+endif()
+
 set(_se_ref "${CMAKE_SOURCE_DIR}/tests/fixtures/reference")
 set(_se_refcmp "${CMAKE_SOURCE_DIR}/tools/refcmp/refcmp.py")
 

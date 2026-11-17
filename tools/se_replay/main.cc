@@ -14,6 +14,10 @@
 //             [--record FILE] [--jobs W] [--expect-golden NAME]
 //   se_replay --from-dump DUMP [--root DIR] [--hash-out FILE]
 //             [--start-scene FILE] [--start-state ID]
+//   (with a replay whose start bytes are a content bundle, or with
+//   --start-state and no --inputs, --scene names the Gameplay state's
+//   scene, relative to the content root --root; without --inputs the
+//   states run --ticks N ticks without input)
 //   se_replay --module content_test [--start-state ID] [--root DIR]
 //             [--inputs FILE] [--ticks N] [--hash-out FILE]
 //
@@ -94,6 +98,7 @@
 #include <utility>
 #include <vector>
 
+#include "game_rampage/flow.h"
 #include "game_rampage/module.h"
 #include "game_rampage/projection.h"
 #include "rampage/support/rampage_session.h"
@@ -432,6 +437,33 @@ int RunRampage(const Args& args) SE_REQUIRES(g_main) SE_EXCLUDES(g_sim_owner) {
                  "se_replay: give --scene or --legacy-scenario, not both\n");
     return 2;
   }
+  if (!args.start_state.empty() && args.inputs.empty()) {
+    // The module's states from --start-state without a replay (M11/M13
+    // integration): the texts from the content root (--root, default the
+    // repository), --scene the Gameplay state's scene, no input.
+    const std::string root =
+        args.root.empty() ? testing::RampageRepoRoot() : args.root;
+    rampage::FlowConfig flow = rampage::GetFlowConfig();
+    if (!args.scene.empty()) flow.gameplay_scene = args.scene;
+    flow.content_root = root;
+    rampage::SetFlowConfig(std::move(flow));
+    const CachedContentSource content(
+        [&root](std::string_view path) -> std::expected<std::string, Error> {
+          // An absolute path (the Play-start bytes' file) as it is.
+          const bool absolute =
+              path.starts_with('/') || (path.size() > 1 && path[1] == ':');
+          const std::string file =
+              absolute ? std::string(path) : root + "/" + std::string(path);
+          const std::optional<std::vector<std::byte>> bytes = ReadFile(file);
+          if (!bytes) {
+            return std::unexpected(
+                Error{ErrorCode::kNotFound, "no such text", file, 0, 0});
+          }
+          return std::string(reinterpret_cast<const char*>(bytes->data()),
+                             bytes->size());
+        });
+    return RunStates(args, rampage::RampageModule(), &content);
+  }
   testing::RampageSessionOptions options;
   options.scene = testing::SandboxSceneRequest();
   if (!args.root.empty()) {
@@ -487,6 +519,14 @@ int RunRampage(const Args& args) SE_REQUIRES(g_main) SE_EXCLUDES(g_sim_owner) {
       // M13: a multi-state session's replay starts from its content bundle.
       if (ContentBundle::IsBundle(reader->StartBytes()) ||
           !args.start_state.empty()) {
+        // --scene names the Gameplay state's scene, as rampage's own
+        // --scene does (a session recorded with it replays from its
+        // bundle; M11/M13 integration).
+        if (!args.scene.empty()) {
+          rampage::FlowConfig flow = rampage::GetFlowConfig();
+          flow.gameplay_scene = args.scene;
+          rampage::SetFlowConfig(std::move(flow));
+        }
         return RunStates(args, rampage::RampageModule(), nullptr);
       }
       input_ticks = reader->Frames().size();

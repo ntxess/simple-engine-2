@@ -125,8 +125,16 @@
 //   dump-hash FILE                 writes "document H", "play H", "tick T"
 //   throttle-disk MS               every file write step takes MS ms more
 //                                  (se::fs's fault injector, test builds)
-//   disk-busy MS                   renames meet a sharing violation for MS
-//                                  ms (over 2 s, a save fails)
+//   disk-busy MS [FILE]            renames meet a sharing violation for MS
+//                                  ms (over 2 s, a save fails); with FILE,
+//                                  only renames onto a path ending with it
+//   expect-top-state ID            the play session's top state is ID
+//   wait-top-state ID              until it is ('Play game' moves between
+//                                  the game's states; M13 integration)
+//   expect-saved NAME              document NAME is clean and its file
+//                                  holds exactly the text it saves
+//   write-document NAME FILE       writes that text to FILE under the
+//                                  content root (compared after the exit)
 //
 // A failed action or expectation logs "editor script: line N: FAILED ..."
 // and the editor exits with a failure after the script.

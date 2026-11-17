@@ -159,6 +159,12 @@ class AssetRuntime final : public TickGate,
   [[nodiscard]] std::string_view StateErrorState() const noexcept {
     return state_error_state_;
   }
+  // Forgets the state error once its owner handled it (the editor's 'Play
+  // game' faults its session and goes on; M13 integration).
+  void ClearStateError() noexcept {
+    state_error_.reset();
+    state_error_state_.clear();
+  }
   // Every text version served to a state so far, in the order first served
   // (the session's content bundle; its start state is not set).
   [[nodiscard]] const ContentBundle& LoadedTexts() const noexcept {

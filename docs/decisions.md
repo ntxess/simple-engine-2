@@ -5109,3 +5109,194 @@ edges placed the way the runtime's InputService places them.
 of the clock`, `rampage.A recorded flow session replays at another rate`,
 `rampage.The flow's recorded session is its generator's output`,
 `rampage.flow_input_fixture`.
+
+## ADR-128 The M11/M13 integration: the merges, the editor and the runtime on one World, se_replay's state runs (2026-11-17)
+
+**Context.** docs/milestone-specs.md "Integration (M11a + M11b + M13a +
+M13b)" merges four tracks and asks that the editor and the runtime load a
+scene into identical Worlds in both directions, and that the runtime's dump
+with a session log is shown on rampage itself.
+
+**Decision.**
+- **The merges.** m11a-formats, m11b-editor-docs, m13a-runtime-engine and
+  m13b-game-states, in that order, each with --no-ff. m11b already held
+  m11a and m13b already held m13a, so only docs/README.md (the se_assets,
+  game_rampage, se_editor, se_editor_panels, simple_editor and rampage rows:
+  both sides' additions kept in one row each) and docs/decisions.md (ADR-114
+  to ADR-121 before ADR-122 to ADR-127) conflicted. The contract headers
+  were the owners' on both sides (M11b and M13b copied them verbatim); the
+  se_assets change of each side (M11b's kForeignWatchTag, bit 63 of a watch
+  tag; M13a's Text store, kind 4 in bits 60-62) merged without a conflict
+  and do not overlap. Each merge commit builds; the m13b merge passes the
+  whole msvc-dev suite.
+- **The editor against the runtime.** `editor.The editor and the runtime
+  load identical Worlds` (tests/editor/runtime_worlds_test.cc, in
+  se_editor_tests, which now links se_platform_test_support) boots the
+  real App headless with rampage's runtime setup (the flow states' scenes
+  as texts, SceneDependencies as text_dependencies, start state
+  "gameplay", the scene through FlowConfig) for each of the seven
+  tests/fixtures/scenes fixtures and the sandbox, and compares the
+  Gameplay World, taken in the first frame after the content gate created
+  it, with EditDocument::Open on the same file: Hash, Digests, the kFlatten
+  text, StatNames, TextureNames and the entity count. The App runs a 1 us
+  synthetic frame so no tick runs before the comparison (the test checks
+  that the World was taken before tick 1).
+- **The reverse direction.** `rampage.plays_an_editor_saved_scene`
+  (tests/rampage/editor_saved_test.py): the editor, headless on a copy of
+  the content, presses the Stress generator for 20 enemy-prefab instances,
+  saves (kPrefabs) and plays 5 ticks; se_replay writes the Play session's
+  start bytes from its replay. The per-tick hash is the stack's hash, which
+  is tagged with the state ids (GameStateStack::Hash), so "se_replay's on
+  the editor's Play-start bytes" is read as the "gameplay" state run on
+  those bytes (`se_replay --module rampage --start-state gameplay --scene
+  PLAY_START --root CONTENT --seed 1 --ticks 600`): the sandbox state on
+  the same bytes gives the same Worlds under another tag. rampage runs
+  `-- --start-state gameplay --scene assets/scenes/sandbox.scene.json` on
+  the saved file with `--record`; se_replay replays that recording from its
+  content bundle (the recorded hashes checked tick by tick), and the first
+  600 hashes of both must be equal.
+- **se_replay** (tools/se_replay, M13a's): `--module rampage --start-state
+  ID` without `--inputs` runs the module's states for `--ticks N` without
+  input, reading texts from `--root` through a CachedContentSource (an
+  absolute path as it is), and `--scene FILE` sets rampage's Gameplay scene
+  (FlowConfig::gameplay_scene) for these runs and for a replay that starts
+  from a content bundle. The second closes M13b's open issue: a session
+  recorded with `rampage -- --scene X` now replays from its bundle with
+  `se_replay --inputs R --scene X`.
+- **crash.rampage_dump_with_session_log** runs M13a's
+  tests/crash/session_log_dump_test.py on rampage (`--module rampage
+  --play-state gameplay --game-arg=--start-state --game-arg=gameplay`): a
+  focus loss pushed at iterate 3000 pushes rampage's Pause over its
+  Gameplay as a logged state command, the dump after tick 6000 carries the
+  session stream (a bundle of the sandbox and its prefabs), and se_replay
+  --from-dump replays it, the pause included, to the dump's hash.
+  crash.runtime_dump_with_session_log keeps running on content_probe.
+
+**Why.** Booting the real App (lane, gate, AssetRuntime as the content
+source) is the only way the comparison covers what the runtime does; a
+headless stack with a CachedContentSource would compare the loader with
+itself. Comparing the stack's hashes under the same state id keeps the
+reverse test about the Worlds, not about the tag.
+
+**Consequences.** The two Worlds are compared at their creation; their
+ticks are compared through the reverse test (600 ticks). Release builds
+have no --editor-script and skip the reverse test.
+
+**Checked by.** `editor.The editor and the runtime load identical Worlds`,
+`rampage.plays_an_editor_saved_scene`, `crash.rampage_dump_with_session_log`,
+`crash.runtime_dump_with_session_log`, `rampage.headless_flow`.
+
+## ADR-129 The editor's content through the AssetRuntime: 'Play game' from the Title through the content gate (2026-11-17)
+
+**Context.** The integration asks that the editor read documents and Play
+game's content through the AssetRuntime's texts where M13a made them
+available, and that 'Play game' start at game_start_state with the Gameplay
+scene pointed at the Play-start bytes, its states loading through the gate
+like the runtime's. Until now Play game pushed the module's start state
+("sandbox") on the Play-start file, reading it on main.
+
+**Decision.**
+- **Play game.** PlaySession::Start takes the content gate and the content
+  source (both the AssetRuntime, for Play game only; additive parameters
+  with null defaults). It pushes GameModule::game_start_state (else
+  start_state) onto a stack whose StateEnv::content is the AssetRuntime and
+  whose content gate is set, so the push waits at the gate; Start accepts a
+  stack that waits for its first state. The Editor calls
+  PlaySession::CompleteBoundary at every frame start (BeginFrame, after
+  the Play request), which finishes the boundary as the runtime's iterate
+  does; while a state waits the App's AssetRuntime::Hold holds the frame's
+  ticks (it already looked at the extension's stack).
+- **The Gameplay scene.** EditorGame::set_play_game_scene (apps/editor)
+  still writes the Play-start bytes to <pref>play-game.scene.json and now
+  also sets rampage's FlowConfig: the Gameplay scene is that file's
+  absolute path (the AssetRuntime's text keys are normalised paths, and
+  fs::Join keeps an absolute one), the content root the editor's. The
+  editor's GameSetup gives the same state_assets (each flow state's scene
+  as a text, besides every texture and sound) and text_dependencies
+  (SceneDependencies) as rampage's executable; the document's state and
+  Play's one-World state name no text.
+- **A text that does not load.** The AssetRuntime's StateError is sticky;
+  the editor turns it into Play.Faulted with where = "content" (the fault
+  files are written as for a tick fault) and clears it
+  (AssetRuntime::ClearStateError, additive), so the editor goes on and the
+  next Play game starts clean. The game build keeps M13a's fault path.
+- **Documents stay synchronous reads.** File > Open, a reload and a
+  recovery read the document's file on main, as known long work to the
+  watchdog (M12), and hot reload's reads of changed files stay the lane's
+  Urgent reads (ADR-120). The AssetRuntime's Text store keeps texts per
+  state scope: an editor document is no state, an open must produce its
+  document in the frame that asked, and the main thread must not wait on
+  the lane. This is where M13a's texts are "not available".
+
+**Why.** The editor's Play game is the game's session: it must hold no
+tick before its content is resident and read its scenes from the same
+source as the runtime, or a scene that plays in the editor might not play
+in rampage.
+
+**Consequences.**
+- Play game's replay (<pref>sessions/last-play.sereplay) and its dump
+  stream keep the Play-start bytes as their start bytes (no content
+  bundle), so se_replay replays a Play game session as the sandbox state on
+  them, which matches the live session only if it never left the Gameplay.
+  A bundle would have to name the Gameplay scene, which lives under <pref>,
+  not under the content root. Open for M17b or later.
+- The App's text swap listener (StartGame) logs the editor's text swaps
+  into the App's own unused SessionLog; a Play game session does not see
+  them (gameplay texts are frozen during Play, so none happens inside a
+  session).
+- tests/editor/scripts/play_game.editor now goes Title, Enter, Gameplay
+  (17 entities) and back; play_game_input.editor's keys reach the Title.
+
+**Checked by.** `editor.script.play_game` (the Title waits at the gate,
+"play game: 'title' waits at the content gate", then Gameplay from the
+Play-start bytes), `editor.script.play_game_input`,
+`editor.desktop.play_session`, `editor.Play-start bytes stay flattened`.
+
+## ADR-130 The editor's quit durability test: one file held, documents checked against their files (2026-11-17)
+
+**Context.** The design's quit durability test, editor side
+(`editor.script.quit_durability`): three dirty documents on a throttled
+disk, the quit pending until all three are renamed, the files equal to
+what each document saves, one save failed by the injector, a second quit
+that exits, the shutdown deadline after the drain. M9's injector refused
+every rename, so one failure out of three was not possible, and the
+script's throttle-disk and disk-busy each replaced the other's setting.
+
+**Decision.**
+- **se::fs's injector** (se_platform, test builds) gains
+  FsFaults::rename_busy_suffix: when set, only renames whose destination
+  ends with it are refused (internal::RefuseReplace takes the
+  destination), and GetFsFaults() returns the settings. Release builds
+  still compile the injector out.
+- **Script verbs** (se_editor, test builds): `disk-busy MS [FILE]` limits
+  the refusal to FILE; throttle-disk and disk-busy now keep each other's
+  setting; `expect-saved NAME` (the document is clean and its file's bytes
+  are its SerializeFile text); `write-document NAME FILE` (that text to a
+  file under the content root, for a comparison after the editor exited);
+  `expect-top-state ID` and `wait-top-state ID` (the play session's top
+  state, for Play game).
+- **run_editor.py** takes `--expect-files-equal A B` (after the first run),
+  `--then-expect-files-equal A B` (after --then-script) and
+  `--expect-order TEXT...`.
+- **The test** is two runs on one content copy.
+  tests/editor/scripts/quit_durability.editor: the sandbox, enemy and
+  player documents dirty, write-document for each, a 400 ms write step,
+  quit with Save All; the log has "quit pending", "quit waits for", "the
+  lane's Durable jobs are done", "shutdown deadline started: the quit drain
+  is over" and "quit ready after" in that order, and each file equals its
+  write-document copy. quit_durability_fails.editor: the three dirty again,
+  the player prefab's renames refused for 3 s (past the lane's 2 s retry):
+  its save fails, the quit is cancelled with the error shown, the sandbox
+  and the enemy prefab are saved (expect-saved), the player stays dirty;
+  a second quit without the refusal saves it (its file equals its
+  write-document copy) and exits.
+
+**Why.** "One save failed while the other two are saved" needs a fault on
+one file; a path suffix is the smallest addition to the injector, and the
+comparison with the document's own text is the spec's "the bytes on disk
+equal each document's Serialize" (for an editor document, SerializeFile:
+the scene with prefab references, the prefab document's own form).
+
+**Checked by.** `editor.script.quit_durability`, `editor.script.quit_save`,
+`editor.script.quit_save_fails`, `assets.*` (the lane's busy-rename tests),
+`platform.quit_durability.*`.

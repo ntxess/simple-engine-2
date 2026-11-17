@@ -381,6 +381,9 @@ class Editor final : public AppExtension, public QuitProvider {
   void EnterFaulted(App& app, std::string where, std::string what)
       SE_REQUIRES(g_main);
   void SaveFaultFiles(App& app) SE_REQUIRES(g_main);
+  // 'Play game': the content gate's boundary at frame start, and a state
+  // whose text did not load faults the session.
+  void CompletePlayBoundary(App& app) SE_REQUIRES(g_main);
 
   // Submits |bytes| to |path| through the lane (Durable: Urgent class,
   // quit waits; else Background).

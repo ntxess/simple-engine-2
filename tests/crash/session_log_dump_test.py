@@ -13,9 +13,16 @@ SessionLog with the focus loss's entry); se_replay --from-dump replays the
 session from it, the pause included, to tick 6000 and matches the dump's
 published hash.
 
+crash.rampage_dump_with_session_log (the M11/M13 integration) runs the same
+script on rampage itself: --module rampage --play-state gameplay and the
+game arguments "--start-state gameplay", so the focus loss pushes rampage's
+Pause over its Gameplay (M13b), and the dump's bundle holds the sandbox
+scene and its prefabs.
+
 usage:
   session_log_dump_test.py --probe EXE --se-replay EXE --read-dump PY
-      --content-root DIR --work DIR
+      --content-root DIR --work DIR [--module NAME] [--play-state ID]
+      [--game-arg ARG]...
 """
 
 import argparse
@@ -43,11 +50,11 @@ RUN_TIMEOUT_S = 90
 
 def report(failures):
     if failures.items:
-        print("FAIL: runtime_dump_with_session_log")
+        print("FAIL: dump_with_session_log")
         for item in failures.items:
             print(f"  {item}")
         return 1
-    print("PASS: runtime_dump_with_session_log")
+    print("PASS: dump_with_session_log")
     return 0
 
 
@@ -58,6 +65,9 @@ def main():
     parser.add_argument("--read-dump", type=pathlib.Path, required=True)
     parser.add_argument("--content-root", type=pathlib.Path, required=True)
     parser.add_argument("--work", type=pathlib.Path, required=True)
+    parser.add_argument("--module", default="content_test")
+    parser.add_argument("--play-state", default="play")
+    parser.add_argument("--game-arg", action="append", default=[])
     args = parser.parse_args()
     if args.work.exists():
         shutil.rmtree(args.work)
@@ -73,6 +83,8 @@ def main():
                "--pref-dir", str(pref),
                "--push-event", f"{FOCUS_FRAME}:focus-lost",
                "--dump-test", f"after-ticks:{TICK}"]
+    if args.game_arg:
+        command += ["--"] + args.game_arg
     print("$", " ".join(command))
     result = subprocess.run(command, capture_output=True, text=True,
                             errors="replace", env=env, timeout=RUN_TIMEOUT_S,
@@ -82,8 +94,9 @@ def main():
     failures.equal(result.returncode, 0, "content_probe exit code")
     failures.check("crash capture on" in output,
                    "the probe did not start crash capture")
-    focus = re.search(r"focus lost on 'play': GameState command push "
-                      r"'pause' logged before tick (\d+)", output)
+    focus = re.search(rf"focus lost on '{args.play_state}': GameState "
+                      r"command push 'pause' logged before tick (\d+)",
+                      output)
     failures.check(focus is not None, "no focus-loss state command logged")
     failures.check("dump test: the watchdog finished the dump" in output,
                    "main did not see the watchdog finish the dump")
@@ -101,12 +114,13 @@ def main():
     if failures.check(header is not None, "no session header stream"):
         record = header["records"][0]
         failures.equal((record.get("module"), record.get("flags", 0)),
-                       ("content_test", 0), "session header module, flags")
+                       (args.module, 0), "session header module, flags")
 
     hashes = args.work / "replayed.txt"
     replay = subprocess.run(
         [str(args.se_replay), "--from-dump", str(dumps[0]), "--hash-out",
-         str(hashes)], capture_output=True, text=True, errors="replace",
+         str(hashes), "--root", str(args.content_root)],
+        capture_output=True, text=True, errors="replace",
         timeout=RUN_TIMEOUT_S, check=False)
     text = (replay.stdout or "") + (replay.stderr or "")
     print(f"se_replay --from-dump: exit {replay.returncode}\n{text}")
@@ -123,7 +137,7 @@ def main():
             tops[int(tick)] = top
         paused = int(focus.group(1))
         failures.equal((tops.get(paused - 1), tops.get(paused)),
-                       ("play", "pause"),
+                       (args.play_state, "pause"),
                        f"the replay's top states at ticks {paused - 1} and "
                        f"{paused}")
     return report(failures)

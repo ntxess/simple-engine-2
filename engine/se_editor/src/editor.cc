@@ -36,6 +36,7 @@
 #include "se_render_core/render_list.h"
 #include "se_runtime/app.h"
 #include "se_runtime/app_config.h"
+#include "se_runtime/asset_runtime.h"
 #include "se_runtime/integration.h"
 #include "src/editor_internal.h"
 #include "src/play_fault_boundary.h"
@@ -397,6 +398,7 @@ ExtensionSession Editor::BeginFrame(App& app, std::uint64_t now_ns) {
   const PlayState before = play_ ? play_->State() : PlayState::kPlaying;
   RunPlayRequest(app, now_ns);
   if (play_ && play_->State() != before) reset = true;
+  CompletePlayBoundary(app);
   Autosave(app, now_ns);
   if (imgui_ && imgui_->WantSaveSettings() &&
       now_ns - layout_saved_ns_ >= kLayoutSaveIntervalNs) {
@@ -431,6 +433,30 @@ ExtensionSession Editor::BeginFrame(App& app, std::uint64_t now_ns) {
   }
   session.reset_accumulator = reset;
   return session;
+}
+
+void Editor::CompletePlayBoundary(App& app) {
+  if (!play_ || play_->Kind() != PlayKind::kPlayGame || play_->Faulted()) {
+    return;
+  }
+  // 'Play game' (M13 integration, ADR-129): a state waiting at the content
+  // gate is created at this boundary once its texts and assets are
+  // resident; the App holds the frame's ticks while it waits.
+  if (!play_->Waiting().empty()) play_->CompleteBoundary();
+  AssetRuntime* assets = app.Assets();
+  if (assets == nullptr || assets->StateError() == nullptr) return;
+  // A text that did not load: the state is never created, and the session
+  // faults as a tick would (the editor goes on).
+  const Error& error = *assets->StateError();
+  PlayFault fault;
+  fault.where = "content";
+  fault.what = std::format("state '{}' cannot be created: {} ({}:{}:{})",
+                           assets->StateErrorState(), error.message, error.path,
+                           error.line, error.column);
+  fault.tick = play_->LastTick();
+  assets->ClearStateError();
+  play_->Fault(std::move(fault));
+  SaveFaultFiles(app);
 }
 
 ExtensionTicks Editor::TickFrame(App& app, const StepPlan& plan,

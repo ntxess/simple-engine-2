@@ -10,6 +10,9 @@
 //   rename_busy_ms        TryReplace reports kBusy until this long after
 //                         the first attempt it refused (another process
 //                         holding the destination for that long)
+//   rename_busy_suffix    when set, only destinations ending with it are
+//                         refused (one file held; the editor's N-documents
+//                         quit test, M11/M13 integration)
 //
 // The settings are atomics: a test sets them on its thread while the lane
 // runs. Release builds compile the injector out (SetFsFaults does nothing).
@@ -18,6 +21,8 @@
 #define SE_PLATFORM_FS_FAULTS_H_
 
 #include <cstdint>
+#include <string>
+#include <string_view>
 
 #ifndef SE_FS_TEST_HOOKS
 #define SE_FS_TEST_HOOKS 0
@@ -31,6 +36,7 @@ struct FsFaults {
   std::uint32_t write_step_delay_ms = 0;
   std::uint32_t read_step_delay_ms = 0;
   std::uint32_t rename_busy_ms = 0;
+  std::string rename_busy_suffix = {};
 };
 
 struct FsFaultStats {
@@ -43,14 +49,16 @@ struct FsFaultStats {
 void SetFsFaults(const FsFaults& faults) noexcept;
 // No faults.
 void ClearFsFaults() noexcept;
+// The settings now (the busy window's start is not part of them).
+[[nodiscard]] FsFaults GetFsFaults();
 [[nodiscard]] FsFaultStats GetFsFaultStats() noexcept;
 
 namespace internal {
 // Called by the file streams.
 void BeforeWriteStep() noexcept;
 void BeforeReadStep() noexcept;
-// True when TryReplace must report kBusy now.
-[[nodiscard]] bool RefuseReplace() noexcept;
+// True when TryReplace must report kBusy now for |destination|.
+[[nodiscard]] bool RefuseReplace(std::string_view destination) noexcept;
 }  // namespace internal
 
 }  // namespace se::fs

@@ -337,7 +337,7 @@ std::expected<void, Error> FileWriter::FlushAndClose() {
 
 std::expected<ReplaceOutcome, Error> TryReplace(std::string_view from,
                                                 std::string_view to) {
-  if (internal::RefuseReplace()) return ReplaceOutcome::kBusy;
+  if (internal::RefuseReplace(to)) return ReplaceOutcome::kBusy;
 #if defined(_WIN32)
   const std::wstring wide_from = Widen(from);
   const std::wstring wide_to = Widen(to);

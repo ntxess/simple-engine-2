@@ -46,6 +46,7 @@
 #include "se_platform/window.h"
 #include "se_runtime/action_map.h"
 #include "se_runtime/app.h"
+#include "se_runtime/asset_runtime.h"
 #include "se_runtime/heartbeat.h"
 #include "src/editor_internal.h"
 #include "src/json_value.h"
@@ -182,8 +183,13 @@ void Editor::StartPlay(App& app, PlayKind kind) {
     // The serializer round trip into the play World, on main: known long
     // work to the watchdog (M12).
     const HeartbeatScope beat = app.KnownLongWork("play start");
-    session = PlaySession::Start(*app.GameInstance(), *app.GamePool(), game_,
-                                 std::move(start), app.Assets());
+    // 'Play game' loads its states through the content gate and reads
+    // their texts from the lane, as the runtime does (ADR-129).
+    AssetRuntime* content =
+        kind == PlayKind::kPlayGame ? app.Assets() : nullptr;
+    session =
+        PlaySession::Start(*app.GameInstance(), *app.GamePool(), game_,
+                           std::move(start), app.Assets(), content, content);
   }
   if (!session) {
     SE_LOG_ERROR("play: {}", session.error().message);

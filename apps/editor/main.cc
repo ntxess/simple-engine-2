@@ -28,6 +28,8 @@
 #include <utility>
 #include <vector>
 
+#include "game_rampage/content.h"
+#include "game_rampage/flow.h"
 #include "game_rampage/module.h"
 #include "game_rampage/scene.h"
 #include "game_rampage/view.h"
@@ -39,8 +41,10 @@
 #include "se_editor/panel.h"
 #include "se_editor_panels/panels.h"
 #include "se_editor_panels/stat_name_command.h"
+#include "se_platform/fs.h"
 #include "se_runtime/app.h"
 #include "se_runtime/app_config.h"
+#include "se_runtime/asset_runtime.h"
 #include "se_runtime/integration.h"
 #include "se_runtime/pacer_policy.h"
 #include "se_runtime/quit.h"
@@ -150,6 +154,14 @@ se::editor::EditorGame RampageForTheEditor() {
     request.path = scene_path;
     request.asset_root = asset_root;
     se::rampage::SetSandboxScene(std::move(request));
+    // M13 integration: 'Play game' starts at the Title, and the Gameplay
+    // state's scene is the Play-start bytes' file, read through the lane
+    // like every state's text (an absolute path; the prefabs it names, if
+    // any, stay content-relative).
+    se::rampage::FlowConfig flow;
+    flow.gameplay_scene = scene_path;
+    flow.content_root = se::fs::Parent(asset_root);
+    se::rampage::SetFlowConfig(std::move(flow));
   };
   game.camera = [](const se::World& world) {
     return se::rampage::SandboxCamera(world);
@@ -216,6 +228,20 @@ std::expected<se::GameSetup, se::Error> MakeEditor(
   setup.sound_table = "config/sound.json";
   setup.camera = [](const se::World& world) {
     return se::rampage::SandboxCamera(world);
+  };
+  // 'Play game' loads its states as rampage does (M13 integration): each
+  // flow state's scene as a text through the lane with the prefabs it
+  // names, besides every texture and sound of the tables. The document's
+  // states and Play's one-World state read no text.
+  setup.state_assets = [](std::string_view state_id) {
+    se::StateAssets assets;
+    const std::string scene = se::rampage::FlowSceneOf(state_id);
+    if (!scene.empty()) assets.texts.push_back(scene);
+    return assets;
+  };
+  setup.text_dependencies = [](std::string_view path, std::string_view text) {
+    return se::rampage::SceneDependencies(path, text,
+                                          se::rampage::kContentAssetDir);
   };
   // The editor's shell: it owns the session, starts in Edit mode, idles
   // after 1 s without input, paces Standard with frame latency 2 and

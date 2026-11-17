@@ -85,7 +85,8 @@ PlaySession::PlaySession(ModuleInstance& instance, jobs::ForkJoinPool& pool,
 
 std::expected<std::unique_ptr<PlaySession>, Error> PlaySession::Start(
     ModuleInstance& instance, jobs::ForkJoinPool& pool, const EditorGame& game,
-    PlayStart start, TickGate* gate) {
+    PlayStart start, TickGate* gate, StateContentGate* content_gate,
+    const ContentSource* content) {
   AssertMainThread();
   const std::string_view start_state = instance.Module().start_state;
   if (start_state.empty()) {
@@ -100,6 +101,9 @@ std::expected<std::unique_ptr<PlaySession>, Error> PlaySession::Start(
   env.tick_rate = s.start_.tick_rate;
   env.world_kind = WorldKind::kPlay;
   const InlineOwnerScope owner(OnMainThread());
+  // Play pushes the one-World start state; 'Play game' the state a
+  // player's session starts in (M13: rampage's Title).
+  std::string_view first = start_state;
   if (s.kind_ == PlayKind::kPlay) {
     // The serializer round trip: the document's bytes into a fresh World.
     if (!game.load_scene) {
@@ -130,14 +134,26 @@ std::expected<std::unique_ptr<PlaySession>, Error> PlaySession::Start(
     if (game.set_play_game_scene) {
       game.set_play_game_scene(s.start_.scene_path, s.start_.asset_root);
     }
+    const std::string_view game_start = instance.Module().game_start_state;
+    if (!game_start.empty()) first = game_start;
+    // The runtime's rules (M13): texts from the content source, every push
+    // through the content gate.
+    env.content = content;
     s.states_ = std::make_unique<GameStateStack>(instance.Factory(), env);
+    s.states_->SetContentGate(content_gate);
   }
-  s.states_->Request(StackOp::kPush, start_state);
+  s.states_->Request(StackOp::kPush, first);
   s.states_->ApplyPending();
-  if (s.states_->Depth() != 1) {
-    return Fail(
-        ErrorCode::kInvalidArgument,
-        std::format("the start state '{}' could not be pushed", start_state));
+  if (s.states_->RejectedCount() != 0 ||
+      (s.states_->Depth() != 1 && s.states_->Waiting() != first)) {
+    return Fail(ErrorCode::kInvalidArgument,
+                std::format("the start state '{}' could not be pushed", first));
+  }
+  if (s.states_->Waiting() == first) {
+    SE_LOG_INFO(
+        "play game: '{}' waits at the content gate (no tick before its "
+        "texts and assets are resident)",
+        first);
   }
   s.driver_.SetTickGate(gate);
   s.recorder_.Begin(
@@ -154,6 +170,13 @@ PlaySession::~PlaySession() {
 }
 
 void PlaySession::SetRunning(bool running) noexcept { play_running_ = running; }
+
+void PlaySession::CompleteBoundary() {
+  AssertMainThread();
+  if (!states_ || states_->Waiting().empty() || Faulted()) return;
+  const InlineOwnerScope owner(OnMainThread());
+  driver_.CompleteBoundary(*states_, log_);
+}
 
 void PlaySession::Marker(SessionOp op) {
   const InlineOwnerScope owner(OnMainThread());

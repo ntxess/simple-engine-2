@@ -17,6 +17,9 @@ usage:
                 [--expect-file-lacks REL TEXT]...
                 [--expect-file-count REL TEXT N]...
                 [--readback-frames A B]
+                [--expect-files-equal REL REL]...
+                [--then-expect-files-equal REL REL]...
+                [--expect-order TEXT...]...
 
   --scene-copy SRC       the editor opens a copy of SRC (saves go there)
   --content-copy ROOT    the editor runs on a copy of ROOT's assets/ and
@@ -28,6 +31,13 @@ usage:
                          the content copy's file REL has TEXT N times or more
   --readback-frames A B  read the Viewport back at frames A and B (windowed)
                          and check the two images differ
+  --expect-files-equal REL REL
+                         after the first run, the content copy's two files
+                         hold the same bytes (a document's file and what
+                         the script's write-document wrote for it)
+  --then-expect-files-equal REL REL
+                         the same after the second run (--then-script)
+  --expect-order TEXT... the run's output has the texts in this order
   --then-script FILE     a second run on the same pref directory
   --replay SE_REPLAY     se_replay replays the last Play session's replay
                          (<pref>/sessions/last-play.sereplay) from its start
@@ -142,6 +152,27 @@ def check_run(name, code, output, failures, expect_failure=False):
         failures.append(f"{name}: the script reported a failure")
 
 
+def files_equal(content, pairs, name, failures):
+    for first, second in pairs:
+        a, b = content / first, content / second
+        if not a.exists() or not b.exists():
+            failures.append(f"{name}: {first} or {second} is missing")
+        elif a.read_bytes() != b.read_bytes():
+            failures.append(f"{name}: {first} and {second} differ")
+
+
+def in_order(output, orders, name, failures):
+    for texts in orders:
+        position = 0
+        for text in texts:
+            found = output.find(text, position)
+            if found < 0:
+                failures.append(f"{name}: '{text}' is missing, or not after "
+                                f"the texts before it in {texts}")
+                break
+            position = found + len(text)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--editor", required=True)
@@ -167,6 +198,12 @@ def main():
     parser.add_argument("--expect-file-count", nargs=3, action="append",
                         default=[])
     parser.add_argument("--readback-frames", nargs=2, type=int)
+    parser.add_argument("--expect-files-equal", nargs=2, action="append",
+                        default=[])
+    parser.add_argument("--then-expect-files-equal", nargs=2,
+                        action="append", default=[])
+    parser.add_argument("--expect-order", nargs="+", action="append",
+                        default=[])
     args = parser.parse_args()
 
     env = dict(os.environ)
@@ -196,12 +233,16 @@ def main():
                                           workdir), args.timeout, env)
         outputs.append(output)
         check_run("run", code, output, failures, args.expect_script_failure)
+        files_equal(content, args.expect_files_equal, "run", failures)
+        in_order(output, args.expect_order, "run", failures)
         if args.then_script:
             code, output = run(editor_command(args, pref, args.then_script,
                                               scene, workdir),
                                args.timeout, env)
             outputs.append(output)
             check_run("second run", code, output, failures)
+            files_equal(content, args.then_expect_files_equal, "second run",
+                        failures)
         everything = "\n".join(outputs)
         for text in args.expect:
             if text not in everything:
