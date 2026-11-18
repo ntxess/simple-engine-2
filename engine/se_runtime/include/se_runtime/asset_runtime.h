@@ -25,6 +25,19 @@
 //                   running step finishes, Durable jobs run to the end
 //   shutdown 10     ReleaseScopes: every scope, the UI scope too
 //
+// M13 (ADR-123): the AssetRuntime is the stack's StateContentGate and the
+// states' ContentSource. A push or replace waits at the gate until its
+// state's AssetScope, created the first time the gate is asked (textures,
+// sounds, texts and the texts' dependencies, found as they land), is
+// resident; Hold and HoldTicks hold while a state waits, so no tick runs
+// before it is created. Text(path) serves the texts the scopes on the
+// stack (and the waiting one) pinned when their state was created: a text
+// changed on disk never changes under a running World; the next state that
+// loads it gets the new version, reported to the text swap listener (the
+// App logs a kAssetSwap entry). A text that fails to load is the state's
+// error (StateError): the state is not created. LoadedTexts() is every
+// version served, in order: the session's content bundle.
+//
 // Textures come from cooked pages (tools/asset_cook, CMake, into
 // <executable dir>/cooked or --cooked-root): in dev builds a page whose
 // source changed or is missing is re-cooked on the lane, and the 500 ms
@@ -41,6 +54,7 @@
 #include <expected>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -58,6 +72,8 @@
 #include "se_render/renderer_2d.h"
 #include "se_render/texture_table.h"
 #include "se_runtime/lane_quit.h"
+#include "se_sim/content_bundle.h"
+#include "se_sim/content_source.h"
 #include "se_sim/game_state.h"
 #include "se_sim/sim_driver.h"
 
@@ -76,6 +92,10 @@ struct StateAssets {
   std::vector<std::string> scene_chunks;
   std::vector<std::string> sounds;
   bool all_sounds = true;
+  // Files loaded as text through the lane before the state is created,
+  // relative to the content root, and every file text_dependencies names
+  // for them.
+  std::vector<std::string> texts;
 };
 
 struct AssetRuntimeConfig {
@@ -92,9 +112,15 @@ struct AssetRuntimeConfig {
   std::uint32_t trace_capacity = 0;
   // By state id; empty: every state loads every texture.
   std::function<StateAssets(std::string_view state_id)> state_assets;
+  // The files a loaded text needs too (GameSetup::text_dependencies).
+  std::function<std::vector<std::string>(std::string_view path,
+                                         std::string_view text)>
+      text_dependencies;
 };
 
-class AssetRuntime final : public TickGate {
+class AssetRuntime final : public TickGate,
+                           public StateContentGate,
+                           public ContentSource {
  public:
   // |renderer| may be null (headless): textures settle without the GPU.
   [[nodiscard]] static std::expected<std::unique_ptr<AssetRuntime>, Error>
@@ -111,9 +137,47 @@ class AssetRuntime final : public TickGate {
   void BeginFrame(const GameStateStack& states) SE_REQUIRES(g_main);
   // True while the top state's scope is not resident: plan no ticks.
   [[nodiscard]] bool Hold(const GameStateStack& states) SE_REQUIRES(g_main);
-  // TickGate: a tick about to run on a state whose scope is not resident.
+  // TickGate: a tick about to run on a state whose scope is not resident,
+  // or while a state waits at the content gate.
   bool HoldTicks(const GameStateStack& states, Tick next_tick) override
       SE_REQUIRES(g_sim_owner);
+  // StateContentGate (M13): creates |state_id|'s scope the first time it is
+  // asked; true once every asset and text of it is resident or failed and
+  // no text failed. Main thread (inline: the owner).
+  [[nodiscard]] bool Ready(std::string_view state_id) override
+      SE_REQUIRES(g_sim_owner);
+  // ContentSource (M13): a text a state on the stack, or the one being
+  // created, loaded; |path| is content-relative.
+  [[nodiscard]] std::expected<std::string_view, Error> Text(
+      std::string_view path) const override;
+  // A state whose text did not load (it is never created): the App takes
+  // the fault path. Null while none.
+  [[nodiscard]] const Error* StateError() const noexcept {
+    return state_error_ ? &*state_error_ : nullptr;
+  }
+  // The state StateError() is about.
+  [[nodiscard]] std::string_view StateErrorState() const noexcept {
+    return state_error_state_;
+  }
+  // Forgets the state error once its owner handled it (the editor's 'Play
+  // game' faults its session and goes on; M13 integration).
+  void ClearStateError() noexcept {
+    state_error_.reset();
+    state_error_state_.clear();
+  }
+  // Every text version served to a state so far, in the order first served
+  // (the session's content bundle; its start state is not set).
+  [[nodiscard]] const ContentBundle& LoadedTexts() const noexcept {
+    return loaded_texts_;
+  }
+  // Called when a state is created with a version of a text that differs
+  // from the one the path served before (path content-relative, the
+  // version's ContentTextHash); the App logs a kAssetSwap entry.
+  using TextSwapListener =
+      std::function<void(std::string_view path, std::uint64_t hash)>;
+  void SetTextSwapListener(TextSwapListener listener) {
+    text_swap_listener_ = std::move(listener);
+  }
   // Before the frame's render: the scopes follow the stack (a tick may
   // have pushed or popped a state; a new state's assets are requested at
   // once).
@@ -159,6 +223,7 @@ class AssetRuntime final : public TickGate {
   [[nodiscard]] AssetRegistry& Registry() noexcept { return *registry_; }
   [[nodiscard]] BackgroundLane& Lane() noexcept { return *lane_; }
   [[nodiscard]] QuitProvider& QuitWaiter() noexcept { return *quit_; }
+  [[nodiscard]] LaneQuitProvider& LaneQuit() noexcept { return *quit_; }
   // The scope of the state on the stack with |id| (null when none).
   [[nodiscard]] AssetScope ScopeOf(std::string_view id) const;
   // Frames the top state was held for so far.
@@ -167,12 +232,27 @@ class AssetRuntime final : public TickGate {
   }
 
  private:
+  // A text a state's scope loads (M13).
+  struct ScopeText {
+    // Content-relative, normalised.
+    std::string path;
+    Handle<TextAsset> handle;
+    // The version the state was created with.
+    std::shared_ptr<const std::string> pinned;
+    bool expanded = false;
+  };
+
   struct StateScope {
     const GameState* state = nullptr;
     std::string id;
     AssetScope scope;
     std::uint64_t created_ns = 0;
     bool resident_logged = false;
+    // M13: made by Ready() before its state exists (state is null until
+    // SyncScopes adopts it); ready once Ready() said yes.
+    bool pending = false;
+    bool ready = false;
+    std::vector<ScopeText> texts;
   };
 
   // A sound a scope requested, and the version the listener saw.
@@ -188,6 +268,13 @@ class AssetRuntime final : public TickGate {
   void NotifySounds() SE_REQUIRES(g_main);
   void SyncScopes(const GameStateStack& states) SE_REQUIRES(g_main);
   void RequestStateAssets(StateScope& entry) SE_REQUIRES(g_main);
+  void RequestText(StateScope& entry, std::string_view path)
+      SE_REQUIRES(g_main);
+  // Requests the dependencies of every text of |entry| that landed; false
+  // when a text failed (state_error_ is set).
+  bool ExpandTexts(StateScope& entry) SE_REQUIRES(g_main);
+  void PinTexts(StateScope& entry) SE_REQUIRES(g_main);
+  [[nodiscard]] std::string ContentKey(std::string_view path) const;
   [[nodiscard]] TextureSource SourceOf(const TextureTableEntry& entry) const;
   bool TopResident(const GameStateStack& states, std::string_view reason)
       SE_REQUIRES(g_main);
@@ -204,6 +291,12 @@ class AssetRuntime final : public TickGate {
   ForeignListener foreign_listener_;
   bool holding_ = false;
   std::uint64_t held_frames_ = 0;
+  // M13.
+  ContentBundle loaded_texts_;
+  TextSwapListener text_swap_listener_;
+  std::optional<Error> state_error_;
+  std::string state_error_state_;
+  bool waiting_logged_ = false;
 };
 
 }  // namespace se

@@ -51,6 +51,15 @@ std::uint32_t NameTable::Add(std::string_view name) {
   return id;
 }
 
+bool NameTable::Remove(std::uint32_t id) {
+  const auto it = std::lower_bound(
+      names_.begin(), names_.end(), id,
+      [](const auto& entry, std::uint32_t key) { return entry.first < key; });
+  if (it == names_.end() || it->first != id) return false;
+  names_.erase(it);
+  return true;
+}
+
 std::string_view NameTable::Name(std::uint32_t id) const noexcept {
   const auto it = std::lower_bound(
       names_.begin(), names_.end(), id,

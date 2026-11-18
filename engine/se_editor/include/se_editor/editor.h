@@ -32,11 +32,22 @@
 // Overloaded floor of 0 ticks in editor Play, Idle (waitevent) after 1 s
 // without input in Edit mode, a 60 Hz preview toggle.
 //
-// Quit (QuitProvider): waits while a file dialog is open; a prompt about
-// dirty documents runs over normal frames (Save, Don't Save, Cancel); saves
-// go through the lane as Durable jobs with a progress modal; a failed save
-// keeps its document dirty and cancels the quit. The recovery hook writes
-// every dirty document's recovery file synchronously.
+// Quit (QuitProvider): waits while a file dialog is open; a prompt lists
+// every dirty document (Save All, Don't Save, Cancel) and runs over normal
+// frames; saves go through the lane as Durable jobs with a progress modal;
+// a failed save keeps its document dirty, shows its error and cancels the
+// quit (the others are saved). The recovery hook writes every dirty
+// document's recovery file synchronously.
+//
+// Documents (M11b; ADR-117 to ADR-121): a DocumentSet of scenes and
+// prefabs, one active. A command records the document it was submitted
+// for and applies to that one (dropped, logged, when it was closed); a
+// coalesce scope belongs to its document and to the panel that opened it,
+// and ends at the frame's apply step when that panel did not draw, when
+// its document is closed or deactivated, and at Play. Each document
+// watches its file and the prefab files its load read; a change is read on
+// the lane and, outside Play, rebased into the open scenes (one undo step
+// per document) or reloaded (a clean document; a dirty one asks).
 
 #ifndef SE_EDITOR_EDITOR_H_
 #define SE_EDITOR_EDITOR_H_
@@ -47,6 +58,8 @@
 #include <cstdint>
 #include <deque>
 #include <expected>
+#include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -63,7 +76,9 @@
 #include "se_core/time.h"
 #include "se_editor/commands.h"
 #include "se_editor/dialog_mailbox.h"
+#include "se_editor/documents.h"
 #include "se_editor/edit_document.h"
+#include "se_editor/edit_queue.h"
 #include "se_editor/editor_game.h"
 #include "se_editor/editor_script.h"
 #include "se_editor/editor_stats.h"
@@ -84,15 +99,33 @@
 
 namespace se::editor {
 
+// Game-aware script verbs the editor executable provides (stat-name,
+// expect-stat-name and stress-press: se_editor_panels' commands).
+struct ScriptHooks {
+  // The Stats drawer's new-stat edit: a CommandGroup {StatNameCommand,
+  // SetComponentCommand} adding stat |name| = |value| to |guid|.
+  std::function<std::expected<std::unique_ptr<EditorCommand>, Error>(
+      const World& world, Guid guid, std::string_view name, float value)>
+      stat_name_edit;
+  // Whether |world|'s stat names hold |name|.
+  std::function<bool(const World& world, std::string_view name)> has_stat_name;
+  // The Stress generator's Edit-mode press of |count| enemies (one
+  // CommandGroup of prefab instances; stress-press).
+  std::function<std::unique_ptr<EditorCommand>(const World& world,
+                                               std::uint32_t count)>
+      stress_press;
+};
+
 struct EditorOptions {
-  // The document opened at boot: a scene file relative to the content
-  // root (or absolute).
+  // The document opened at boot: a scene (or prefab) file relative to the
+  // content root (or absolute).
   std::string scene;
   // --editor-script FILE (test builds): actions at frame boundaries.
   std::string script;
   // ImGui multi-viewports (opt-in).
   bool viewports = false;
   std::uint64_t autosave_quiet_ns = kAutosaveQuietNs;
+  ScriptHooks script_hooks;
 };
 
 // The editor's mode, from the panels' point of view.
@@ -149,8 +182,12 @@ class Editor final : public AppExtension, public QuitProvider {
 
   // --- State, for tests ---
   [[nodiscard]] EditorMode Mode() const noexcept;
+  // The active document.
   [[nodiscard]] const EditDocument* Document() const noexcept {
-    return document_.get();
+    return documents_.ActiveDocument();
+  }
+  [[nodiscard]] const DocumentSet& Documents() const noexcept {
+    return documents_;
   }
   [[nodiscard]] const PlaySession* Play() const noexcept { return play_.get(); }
   [[nodiscard]] const LogView& Log() const noexcept { return log_; }
@@ -176,16 +213,12 @@ class Editor final : public AppExtension, public QuitProvider {
   class Viewports;
   class Textures;
 
-  // A command waiting for the frame's apply step (after ImGui::Render).
+  // A Play edit waiting for the frame's apply step (after ImGui::Render);
+  // Edit-mode commands wait in edits_ (EditQueue).
   struct Queued {
     std::unique_ptr<EditorCommand> command;
-    // Play edits: the tick (0: the next).
+    // The tick (0: the next).
     Tick apply_before = 0;
-    bool play = false;
-    // A coalesce scope begins (label) or ends here instead.
-    bool begin_coalesce = false;
-    bool end_coalesce = false;
-    std::string label;
   };
 
   // A save of a document in flight through the lane.
@@ -195,6 +228,17 @@ class Editor final : public AppExtension, public QuitProvider {
     std::string path;
     bool durable = false;
     bool recovery = false;
+    DocumentId document = kNoDocument;
+    // The file's text as submitted (a save, not a recovery file).
+    std::string text;
+  };
+
+  // A watched file's change, or its text once read or saved: queued by the
+  // lane's completions, handled at a frame start outside Play.
+  struct FileEvent {
+    std::string path;
+    bool read = false;
+    std::string text;
   };
 
   enum class Request : std::uint8_t {
@@ -227,21 +271,77 @@ class Editor final : public AppExtension, public QuitProvider {
   void RunScript(App& app, std::uint64_t now_ns) SE_REQUIRES(g_main);
   // One script action; false when it waits (run it again next frame).
   bool RunAction(App& app, const ScriptAction& action) SE_REQUIRES(g_main);
+  // The M11b verbs; |handled| is false for any other.
+  bool RunDocumentAction(App& app, const ScriptAction& action, bool& handled)
+      SE_REQUIRES(g_main);
   void ScriptFailure(const ScriptAction& action, std::string_view what);
   void Autosave(App& app, std::uint64_t now_ns) SE_REQUIRES(g_main);
   void OnLaneCompletion(const LaneCompletion& completion) SE_REQUIRES(g_main);
 
-  // Documents.
+  // Documents (editor_documents.cc).
+  // Opens |path| as a new document, or activates the one open on it.
   [[nodiscard]] std::expected<void, Error> OpenDocument(App& app,
                                                         const std::string& path,
                                                         bool offer_recovery)
       SE_REQUIRES(g_main);
-  void RebuildDocumentStack() SE_REQUIRES(g_main);
-  // Saves the document to |path| (its own when empty) through the lane.
-  [[nodiscard]] std::expected<void, Error> SaveDocument(App& app,
+  // Loads |text| as a document of |path|: its kind by the text's "format".
+  [[nodiscard]] std::expected<std::unique_ptr<EditDocument>, Error>
+  LoadDocument(App& app, const std::string& path, std::string_view text)
+      SE_REQUIRES(g_main);
+  // The document stack shows the active document (rebuilt when it
+  // changed).
+  void SyncDocumentStack() SE_REQUIRES(g_main);
+  void DropDocumentStack() SE_REQUIRES(g_main);
+  // Activates |id| (logged; the open scope of the old one ends).
+  bool ActivateDocument(DocumentId id) SE_REQUIRES(g_main);
+  // Closes |id| at once (no prompt).
+  void CloseDocumentNow(DocumentId id) SE_REQUIRES(g_main);
+  // Replaces |id| with |document| (a reload or a recovery).
+  DocumentId ReplaceDocument(DocumentId id,
+                             std::unique_ptr<EditDocument> document)
+      SE_REQUIRES(g_main);
+  // Saves document |id| to |path| (its own when empty) through the lane.
+  [[nodiscard]] std::expected<void, Error> SaveDocument(App& app, DocumentId id,
                                                         const std::string& path,
                                                         bool durable)
       SE_REQUIRES(g_main);
+  // Every dirty document; false when one could not be submitted.
+  bool SaveAll(App& app) SE_REQUIRES(g_main);
+  // The active document (null when none).
+  [[nodiscard]] EditDocument* Active() noexcept {
+    return documents_.ActiveDocument();
+  }
+  [[nodiscard]] const EditDocument* Active() const noexcept {
+    return documents_.ActiveDocument();
+  }
+  void OfferRecovery(App& app, DocumentId id) SE_REQUIRES(g_main);
+  void SaveCompleted(const PendingSave& save) SE_REQUIRES(g_main);
+  [[nodiscard]] RecoveryFile RecoveryOf(const EditDocument& document,
+                                        std::string text) const;
+
+  // Hot reload (editor_reload.cc).
+  // The files a document watches: its own and the prefabs its load read.
+  [[nodiscard]] std::vector<std::string> WatchedPaths(
+      const EditDocument& document) const;
+  void Watch(const EditDocument& document, bool watch) SE_REQUIRES(g_main);
+  void OnFileChanged(const FileChange& change) SE_REQUIRES(g_main);
+  void OnFileRead(const std::string& path, std::string text)
+      SE_REQUIRES(g_main);
+  // A prefab's file now holds |text|: every open scene holding instances
+  // of it gets one undo step "Prefab changed: <ref>".
+  void RebasePrefab(const std::string& ref, const std::string& text)
+      SE_REQUIRES(g_main);
+  // The reference of |path| under the asset root ("" when not under it).
+  [[nodiscard]] std::string RefOf(std::string_view path) const;
+  // Resolves the reload prompt of the first document that has one:
+  // "reload" or "keep".
+  void ResolveReloadPrompt(App& app, std::string_view answer)
+      SE_REQUIRES(g_main);
+  // The frame start, outside Play: the file events the lane's completions
+  // queued (a change to read, a text read or saved), in order. A document
+  // is reloaded only here, never inside the lane's drain (the App still
+  // holds the frame's stack then).
+  void RunFileEvents() SE_REQUIRES(g_main);
 
   // The frame's UI.
   void DrawUi(App& app, const FrameReport& report) SE_REQUIRES(g_main);
@@ -281,6 +381,9 @@ class Editor final : public AppExtension, public QuitProvider {
   void EnterFaulted(App& app, std::string where, std::string what)
       SE_REQUIRES(g_main);
   void SaveFaultFiles(App& app) SE_REQUIRES(g_main);
+  // 'Play game': the content gate's boundary at frame start, and a state
+  // whose text did not load faults the session.
+  void CompletePlayBoundary(App& app) SE_REQUIRES(g_main);
 
   // Submits |bytes| to |path| through the lane (Durable: Urgent class,
   // quit waits; else Background).
@@ -291,12 +394,13 @@ class Editor final : public AppExtension, public QuitProvider {
   void JoinScriptThread() noexcept;
   // Resolves the quit prompt: "save", "discard" or "cancel".
   void ResolveQuitPrompt(App& app, std::string_view answer) SE_REQUIRES(g_main);
-  // The open prompt about a dirty document (File > Open): "save" saves it
-  // and opens once the save completed, "discard" opens at once, "cancel"
-  // keeps the document.
-  void ResolveOpenPrompt(App& app, std::string_view answer) SE_REQUIRES(g_main);
-  // The frame start: a dialog's open, through the prompt when the document
-  // is dirty, or one waiting for its save.
+  // File > Close: a dirty document asks first (the close prompt). "save"
+  // saves it and closes once the save completed, "discard" closes at
+  // once, "cancel" keeps the document.
+  void RequestClose(App& app, DocumentId id) SE_REQUIRES(g_main);
+  void ResolveClosePrompt(App& app, std::string_view answer)
+      SE_REQUIRES(g_main);
+  // The frame start: a dialog's open, or a close waiting for its save.
   void RunPendingOpen(App& app) SE_REQUIRES(g_main);
   // Resolves the recovery offer: "accept" or "discard".
   void ResolveRecovery(App& app, std::string_view answer) SE_REQUIRES(g_main);
@@ -313,11 +417,14 @@ class Editor final : public AppExtension, public QuitProvider {
   std::string layout_path_;
   std::uint64_t layout_saved_ns_ = 0;
 
-  // The document and its stack (one document state).
-  std::unique_ptr<EditDocument> document_;
+  // The documents, and the stack of the active one (one document state).
+  DocumentSet documents_;
   GameStateFactory document_factory_;
   std::unique_ptr<GameStateStack> document_states_;
-  std::uint64_t initial_hash_ = 0;
+  // The document the stack shows.
+  DocumentId stack_document_ = kNoDocument;
+  // The frame's Edit-mode commands and the open coalesce scope.
+  EditQueue edits_;
   AssetScope editor_scope_;
 
   // Play.
@@ -326,6 +433,9 @@ class Editor final : public AppExtension, public QuitProvider {
   bool stop_pending_ = false;
   std::uint64_t play_count_ = 0;
   std::uint64_t play_start_document_hash_ = 0;
+  std::uint64_t play_start_content_hash_ = 0;
+  // The document Play plays (the set is frozen meanwhile).
+  DocumentId play_document_ = kNoDocument;
   // The play World's RenderLists of the frame (guarded builds).
   std::deque<RenderList> play_lists_;
   std::vector<std::vector<RenderLayer>> viewport_layers_;
@@ -387,15 +497,24 @@ class Editor final : public AppExtension, public QuitProvider {
   std::unique_ptr<ScriptThread> script_thread_;
 
   // Saves, autosave and recovery.
-  AutosaveTimer autosave_;
   std::vector<PendingSave> saves_;
   std::uint64_t write_revision_ = 0;
   std::uint64_t last_input_ns_ = 0;
-  // The last document change the autosave saw, and when it saw it.
-  std::uint64_t seen_revision_ = 0;
-  std::uint64_t last_change_ns_ = 0;
   std::vector<RecoveryFile> recovery_offer_;
+  // The document the recovery offer is about.
+  DocumentId recovery_document_ = kNoDocument;
+  // The last save error of any document (the Document panel shows it).
   std::string save_error_;
+
+  // Hot reload: how many documents watch each path, the reads in flight,
+  // the queued file events, and the changes handled so far.
+  std::map<std::string, int, std::less<>> watch_refs_;
+  std::vector<std::pair<Ticket, std::string>> reads_;
+  std::deque<FileEvent> file_events_;
+  std::uint64_t file_events_handled_ = 0;
+  std::uint64_t wait_reload_base_ = 0;
+  bool waiting_reload_ = false;
+  std::string reload_answer_;
 
   // Quit.
   QuitPhase quit_phase_ = QuitPhase::kNone;
@@ -403,16 +522,12 @@ class Editor final : public AppExtension, public QuitProvider {
   std::string quit_answer_;
   bool quit_cancel_ = false;
 
-  // File > Open over a dirty document: the file waiting for the prompt's
-  // answer, and the file to open once the document's save completed.
-  std::string open_prompt_;
-  std::string open_after_save_;
+  // File > Close of a dirty document: the document waiting for the
+  // prompt's answer, and the one to close once its save completed.
+  DocumentId close_prompt_ = kNoDocument;
+  DocumentId close_after_save_ = kNoDocument;
   // The prompt's answer from a script.
-  std::string open_answer_;
-  // The revision of the document's last completed save since it was
-  // opened: a recovery write of an older revision that lands later is
-  // stale (the lane does not complete in submission order).
-  std::optional<std::uint64_t> last_save_revision_;
+  std::string close_answer_;
 
   // The longest UI work of the last 2 s (debug log).
   std::uint64_t timing_new_ = 0;

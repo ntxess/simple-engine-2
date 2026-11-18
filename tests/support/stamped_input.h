@@ -18,11 +18,17 @@
 // A scripted source has no "now", so it does not hand later edges to a
 // frame's last tick (last_tick_of_frame); they wait for the tick whose
 // window holds them.
+//
+// The second constructor plays a given script instead of a seeded one
+// (M13b's flow session): each edge is stamped at the middle of its tick's
+// window, epoch + (t_e - 1/2) * dt.
 
 #ifndef TESTS_SUPPORT_STAMPED_INPUT_H_
 #define TESTS_SUPPORT_STAMPED_INPUT_H_
 
+#include <cstddef>
 #include <cstdint>
+#include <vector>
 
 #include "se_core/input_frame.h"
 #include "se_core/sim_clock.h"
@@ -32,8 +38,18 @@ namespace se::testing {
 
 class StampedInput final : public InputSource {
  public:
+  // One edge of a given script.
+  struct ScriptedEdge {
+    Tick tick = 0;
+    ActionId action = 0;
+    bool down = true;
+  };
+
   StampedInput(std::uint64_t seed, std::uint64_t epoch_ns,
                std::uint32_t tick_rate = kDefaultTickRate) noexcept;
+  // Plays |script| (ticks increasing), then no more edges.
+  StampedInput(std::vector<ScriptedEdge> script, std::uint64_t epoch_ns,
+               std::uint32_t tick_rate = kDefaultTickRate);
 
   InputFrame Latch(Tick tick, std::uint64_t tick_window_end_ns,
                    bool last_tick_of_frame) override;
@@ -53,6 +69,9 @@ class StampedInput final : public InputSource {
   [[nodiscard]] Edge Script() noexcept;
 
   std::uint64_t seed_;
+  // The given script (empty: the seeded one).
+  std::vector<ScriptedEdge> script_;
+  bool scripted_ = false;
   std::uint64_t epoch_ns_;
   double dt_ns_;
   std::uint64_t index_ = 0;

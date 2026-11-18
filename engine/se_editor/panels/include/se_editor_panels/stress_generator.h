@@ -9,7 +9,10 @@
 // ComponentRegistry's JSON, prefab-like, into which each spawn writes its
 // Transform position and its Path's points. Each spawn also carries the
 // derived components a loader adds (PathCache, ActiveEffects; rampage's
-// FinishLoad), so the PathSystem moves it from its first tick.
+// FinishLoad), so the PathSystem moves it from its first tick, and since
+// M11b the prefab link PrefabInstance{kStressPrefab}: a spawn is an
+// instance of the enemy prefab, so a saved scene writes it as the prefab
+// plus its Path (and its Transform where rule R12 does not place it).
 //
 // Distributions (decided here, ADR-102; the legacy ones are written down in
 // docs/ledger.md "Stress generator distributions"): spawn i of press p draws
@@ -22,10 +25,13 @@
 // Guids are StressGuid(seed, press, index): a fixed hash, so a press makes
 // the same entities on every machine, and presses never collide.
 //
-// Spreading: a press of n spawns becomes ceil(n / per_tick) batches of at
-// most per_tick spawns; batch k applies k ticks after the first (Play: the
-// SessionLog's kSpawnBatch entries against next tick + k) or k frames after
-// the press (Edit: create-entity commands, one coalesced undo step).
+// Spreading (Play): a press of n spawns becomes ceil(n / per_tick)
+// batches of at most per_tick spawns; batch k applies k ticks after the
+// first (the SessionLog's entries against next tick + k), so a large press
+// replays exactly. In Edit mode, where nothing ticks, a press is one
+// CommandGroup of create-entity commands submitted in the frame of the
+// press: one undo step, no coalesce scope spanning frames (M11b, ADR-102
+// amended by ADR-121).
 
 #ifndef SE_EDITOR_PANELS_STRESS_GENERATOR_H_
 #define SE_EDITOR_PANELS_STRESS_GENERATOR_H_
@@ -33,6 +39,7 @@
 #include <cstdint>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "se_core/guid.h"
@@ -42,6 +49,8 @@ namespace se::editor {
 
 inline constexpr std::uint32_t kStressRngStream = 0x53545200U;  // "STR\0"
 inline constexpr std::uint32_t kStressDefaultPerTick = 64;
+// The prefab every spawn is an instance of.
+inline constexpr std::string_view kStressPrefab = "prefabs/enemy.prefab.json";
 
 // One component of a spawn: registered name and JSON value.
 struct SpawnComponent {

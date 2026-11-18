@@ -18,6 +18,14 @@
 // stops the frame's ticks while the gate holds; RunTick's own
 // ApplyPending then finds nothing left, so replays, which call RunTick
 // directly, run the same ticks.
+//
+// M13: with the stack's content gate, a boundary can stop at a state that
+// is not ready (GameStateStack::Waiting). CompleteBoundary finishes the
+// boundary before NextTick (the stack's pending commands, then the
+// SessionLog's due entries, both stopping at a wait); TickInline calls it
+// before asking the TickGate, and the runtime calls it at each frame start
+// while a state waits, so the push applies, and the ticks resume, as soon
+// as the state is ready.
 
 #ifndef SE_SIM_SIM_DRIVER_H_
 #define SE_SIM_SIM_DRIVER_H_
@@ -100,6 +108,12 @@ class SimDriver {
       SE_EXCLUDES(g_sim_owner);
 
   [[nodiscard]] Tick NextTick() const noexcept { return next_tick_; }
+
+  // The boundary before NextTick(): the stack's pending commands, then the
+  // log's entries due by NextTick(). Either stops while a state waits at
+  // the content gate. RunTick's own calls then find nothing left.
+  void CompleteBoundary(GameStateStack& states, SessionLog& log) const
+      SE_REQUIRES(g_sim_owner);
 
   // TickInline asks |gate| before each tick (nullptr: none). The gate must
   // outlive its use here.

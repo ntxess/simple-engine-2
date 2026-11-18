@@ -1,0 +1,131 @@
+{
+  "format": "se-scene-v1",
+  "name": "sprite_tint",
+  "settings": {
+    "bounds": {
+      "w": 1920,
+      "h": 1080
+    },
+    "seed": 9,
+    "event_watchdog_ms": 36000
+  },
+  "entities": [
+    {
+      "guid": "11a00000-0000-4000-8000-000000000601",
+      "name": "red enemy",
+      "components": {
+        "Transform": {
+          "pos": {
+            "x": 300,
+            "y": 300
+          },
+          "rot": 0,
+          "scale": {
+            "x": 1,
+            "y": 1
+          },
+          "teleport_tick": 0
+        },
+        "Team": {
+          "id": "enemy"
+        },
+        "Stats": {
+          "Speed": 500,
+          "HP": 100
+        },
+        "ActiveEffects": {
+          "effects": []
+        },
+        "Collider": {
+          "half_extents": {
+            "x": 24,
+            "y": 24
+          },
+          "role": "body",
+          "layer": 1,
+          "mask": 4294967295
+        },
+        "Path": {
+          "points": [
+            {
+              "x": 300,
+              "y": 300
+            },
+            {
+              "x": 600,
+              "y": 300
+            }
+          ],
+          "loop": true,
+          "segment": 0,
+          "u": 0,
+          "done": false
+        },
+        "SpriteRenderer": {
+          "texture": "player",
+          "region": {
+            "x": 0,
+            "y": 0,
+            "w": 48,
+            "h": 48
+          },
+          "origin": {
+            "x": 24,
+            "y": 24
+          },
+          "tint": {
+            "r": 255,
+            "g": 64,
+            "b": 64,
+            "a": 200
+          },
+          "layer": 2,
+          "z": 0,
+          "flip_x": true,
+          "flip_y": false
+        }
+      }
+    },
+    {
+      "guid": "11a00000-0000-4000-8000-000000000602",
+      "name": "coin",
+      "components": {
+        "Transform": {
+          "pos": {
+            "x": 1000,
+            "y": 500
+          },
+          "rot": 0,
+          "scale": {
+            "x": 1,
+            "y": 1
+          },
+          "teleport_tick": 0
+        },
+        "SpriteRenderer": {
+          "texture": "coin",
+          "region": {
+            "x": 0,
+            "y": 0,
+            "w": 16,
+            "h": 16
+          },
+          "origin": {
+            "x": 8,
+            "y": 8
+          },
+          "tint": {
+            "r": 255,
+            "g": 215,
+            "b": 0,
+            "a": 255
+          },
+          "layer": 0,
+          "z": 0.5,
+          "flip_x": false,
+          "flip_y": false
+        }
+      }
+    }
+  ]
+}

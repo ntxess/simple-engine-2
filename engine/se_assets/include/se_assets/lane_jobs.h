@@ -16,6 +16,8 @@
 //   MakeWatchJob       adds or removes a path in the hot-reload scan
 //   MakeJsonJob        reads a prefab or a scene chunk and parses it
 //                      (one chunk per step) with glaze
+//   MakeTextJob        reads a text file (a scene, a prefab; M13) in the
+//                      same 1 MB steps, unparsed
 //   MakeSoundJob       reads a sound file and decodes it with the
 //                      SoundDecoder the integration provides (M8's
 //                      miniaudio decoder, data only on the lane)
@@ -110,6 +112,9 @@ enum class JsonKind : std::uint8_t { kPrefab, kSceneChunk };
 // Payload: PrefabPayload or SceneChunkPayload.
 [[nodiscard]] std::unique_ptr<LaneJob> MakeJsonJob(std::string path,
                                                    JsonKind kind);
+
+// Payload: TextPayload.
+[[nodiscard]] std::unique_ptr<LaneJob> MakeTextJob(std::string path);
 
 }  // namespace se
 

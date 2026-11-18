@@ -1,0 +1,18 @@
+# A hang in the editor's 'Play game' (crash.editor_play_game_hang; review
+# fix F4): the editor runs with --hang-test after-ticks:240. 'Play game'
+# starts at rampage's Title; Enter pushes Gameplay on the Play-start bytes,
+# and main loops inside the HangTest system at tick 240 of Gameplay. The
+# dump's Play-start stream starts from the session's content bundle (the
+# Gameplay scene under rampage's Play game key), which se_replay
+# --from-dump replays through the game's states to tick 240.
+expect-state edit
+play-game
+wait-top-state title
+wait-ticks 10
+push-key enter
+wait-frames 2
+push-key enter up
+wait-top-state gameplay
+expect-dump-stream yes
+# Tick 240 never ends.
+wait-ticks 400

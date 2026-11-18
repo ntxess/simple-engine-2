@@ -1,0 +1,20 @@
+{
+  "format": "se-scene-v1",
+  "name": "doomed",
+  "settings": {"bounds": {"w": 1920, "h": 1080}, "seed": 1, "event_watchdog_ms": 36000},
+  "entities": [
+    {"guid": "d00d0000-0000-4000-8000-000000000000", "name": "player",
+     "prefab": "prefabs/player.prefab.json",
+     "overrides": {"Transform": {"pos": {"x": 400, "y": 400}},
+                   "Stats": {"HP": 10}}},
+    {"guid": "d00d0000-0000-4000-8000-000000000001", "name": "hunter",
+     "prefab": "prefabs/enemy.prefab.json",
+     "components": {
+       "EffectSource": {
+         "effects": [{"kind": "instant", "stat": "HP", "value": -10}],
+         "polled": true,
+         "cooldown_ms": 1000,
+         "ready_on_start": true}},
+     "overrides": {"Path": {"points": [{"x": 1000, "y": 400}, {"x": 100, "y": 400}]}}}
+  ]
+}

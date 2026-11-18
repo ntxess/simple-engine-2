@@ -12,6 +12,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <expected>
 #include <format>
@@ -337,7 +338,7 @@ std::expected<void, Error> FileWriter::FlushAndClose() {
 
 std::expected<ReplaceOutcome, Error> TryReplace(std::string_view from,
                                                 std::string_view to) {
-  if (internal::RefuseReplace()) return ReplaceOutcome::kBusy;
+  if (internal::RefuseReplace(to)) return ReplaceOutcome::kBusy;
 #if defined(_WIN32)
   const std::wstring wide_from = Widen(from);
   const std::wstring wide_to = Widen(to);
@@ -379,6 +380,54 @@ std::string UniqueTempPath(std::string_view path) {
       g_temp_serial.fetch_add(1, std::memory_order_relaxed);
   return std::format("{}.{:x}-{}.tmp", path, SDL_GetPerformanceCounter(),
                      serial);
+}
+
+std::string Canonical(std::string_view path) {
+  std::string normal = Normalize(path);
+  if (normal.empty()) return normal;
+#if defined(_WIN32)
+  // No access asked: only the handle's final path.
+  HANDLE file =
+      CreateFileW(Widen(normal).c_str(), 0,
+                  FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                  nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+  if (file == INVALID_HANDLE_VALUE) return normal;
+  std::wstring wide(MAX_PATH, L'\0');
+  DWORD size = GetFinalPathNameByHandleW(
+      file, wide.data(), static_cast<DWORD>(wide.size()), FILE_NAME_NORMALIZED);
+  if (size >= wide.size()) {
+    wide.assign(static_cast<std::size_t>(size) + 1, L'\0');
+    size = GetFinalPathNameByHandleW(file, wide.data(),
+                                     static_cast<DWORD>(wide.size()),
+                                     FILE_NAME_NORMALIZED);
+  }
+  CloseHandle(file);
+  if (size == 0 || size >= wide.size()) return normal;
+  wide.resize(size);
+  // "\\?\C:\x" is "C:\x"; "\\?\UNC\server\share" is "\\server\share".
+  std::wstring_view view(wide);
+  std::wstring unc;
+  if (view.starts_with(L"\\\\?\\UNC\\")) {
+    unc = L"\\\\" + std::wstring(view.substr(8));
+    view = unc;
+  } else if (view.starts_with(L"\\\\?\\")) {
+    view.remove_prefix(4);
+  }
+  const int bytes = WideCharToMultiByte(CP_UTF8, 0, view.data(),
+                                        static_cast<int>(view.size()), nullptr,
+                                        0, nullptr, nullptr);
+  if (bytes <= 0) return normal;
+  std::string narrow(static_cast<std::size_t>(bytes), '\0');
+  WideCharToMultiByte(CP_UTF8, 0, view.data(), static_cast<int>(view.size()),
+                      narrow.data(), bytes, nullptr, nullptr);
+  return Normalize(narrow);
+#else
+  char* real = realpath(normal.c_str(), nullptr);
+  if (real == nullptr) return normal;
+  std::string out(real);
+  free(real);  // NOLINT(cppcoreguidelines-no-malloc): realpath's buffer.
+  return Normalize(out);
+#endif
 }
 
 }  // namespace se::fs

@@ -55,6 +55,11 @@ struct ReplayHeader {
 class ReplayRecorder {
  public:
   void Begin(const ReplayHeader& header, std::span<const std::byte> start);
+  // Replaces the start bytes and the header's hash of them (M13: a
+  // multi-state session's content bundle, set at shutdown); ignored when
+  // not active.
+  void SetStart(std::span<const std::byte> start);
+  [[nodiscard]] const ReplayHeader& Header() const noexcept { return header_; }
   [[nodiscard]] bool Active() const noexcept { return active_; }
   // Frames must arrive in consecutive ticks; ignored when not active.
   void Record(const InputFrame& frame);

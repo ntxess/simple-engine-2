@@ -21,6 +21,8 @@
 #include <cstdint>
 #include <entt/entity/registry.hpp>
 #include <expected>
+#include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <span>
@@ -36,6 +38,7 @@
 #include "se_core/types.h"
 #include "se_core/world.h"
 #include "se_editor/commands.h"
+#include "se_editor/editor_game.h"
 #include "se_editor/panel.h"
 
 namespace se::editor {
@@ -83,6 +86,36 @@ class EditSink {
 
  private:
   const PanelContext* context_;
+};
+
+// Prefab baselines of the active document's instances (review fix F8;
+// ADR-119). A bare instance's components depend only on its prefab's text,
+// so one baseline is kept per prefab reference and recorded text, taken
+// from the document's prefab texts (PanelContext::prefab_texts): drawing
+// the panels reads no prefab file and loads one scratch World per prefab
+// and text, not one per row and revision. A reference the document has no
+// text for is read from the asset root, once per revision.
+class PrefabBaselines {
+ public:
+  // The baseline of the instance |guid| of |context.world|; null when it is
+  // no instance, the game has no baseline, or it failed (reported once).
+  [[nodiscard]] const EntityJson* Get(const PanelContext& context, Guid guid);
+  // Scratch loads made so far (tests).
+  [[nodiscard]] std::uint64_t Loads() const noexcept { return loads_; }
+
+ private:
+  struct Entry {
+    // The recorded text it was made from (none: read from the disk at
+    // |revision|).
+    std::optional<std::string> text;
+    std::uint64_t revision = 0;
+    std::optional<EntityJson> baseline;
+  };
+
+  const World* world_ = nullptr;
+  std::uint64_t document_ = 0;
+  std::map<std::string, Entry, std::less<>> by_ref_;
+  std::uint64_t loads_ = 0;
 };
 
 // Begins the sink's coalesce scope when the last item was activated and

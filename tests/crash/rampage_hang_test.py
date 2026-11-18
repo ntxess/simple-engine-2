@@ -36,12 +36,20 @@ tick 240, and checks what the watchdog did:
                 --from-dump replaying the session from those bytes, the
                 SessionLog's edits included, to tick 240 (docs/milestone-
                 specs.md "Integration (M10a + M10b + M12 + M14)").
+  editor_play_game_hang
+                the same with a script that starts 'Play game' (rampage's
+                Title, then Enter: Gameplay on the Play-start bytes) and
+                hangs inside Gameplay's tick 240: the dump's stream starts
+                from the session's content bundle, and se_replay
+                --from-dump replays it through the game's states, Title then
+                Gameplay, to tick 240 (review fix F4).
 
 usage:
   rampage_hang_test.py --rampage EXE --se-replay EXE --read-dump PY
       --work DIR --scenario hang|driver_stall
   rampage_hang_test.py --editor EXE --script FILE --se-replay EXE
-      --read-dump PY --work DIR --scenario editor_play_hang
+      --read-dump PY --work DIR
+      --scenario editor_play_hang|editor_play_game_hang
 """
 
 import argparse
@@ -82,6 +90,14 @@ SCENARIOS = {
         "reason": "hang 1: main made no progress for 5.",
         "ends": False,
         "editor": True,
+    },
+    "editor_play_game_hang": {
+        "args": ["--hang-test", f"after-ticks:{TICK}"],
+        "reason": "hang 1: main made no progress for 5.",
+        "ends": False,
+        "editor": True,
+        "started": "play game: started at tick 1",
+        "play_game": True,
     },
 }
 STREAM_PLAY_START = 0x53450006
@@ -210,15 +226,13 @@ def check_dump(failures, dump, expected, system):
     if failures.check(ring is not None, "no InputFrame ring"):
         failures.equal(ring["head"], TICK, "InputFrame ring head (frames 1 "
                        f"to {TICK}, the hanging tick's included)")
+    # The editor's Play-start stream, and since M13a a game's session
+    # stream: the session's replay file without frames (the scene in it).
     start = base.stream(dump, STREAM_PLAY_START)
-    if editor:
-        if failures.check(start is not None, "no Play-start stream"):
-            failures.check(start.get("head", 0) > 1000,
-                           f"the Play-start stream holds {start.get('head')} "
-                           "bytes (a replay file with the scene in it)")
-    else:
-        failures.check(start is None or not start.get("head"),
-                       "a game's dump has a Play-start stream")
+    if failures.check(start is not None, "no session (Play-start) stream"):
+        failures.check(start.get("head", 0) > 1000,
+                       f"the session stream holds {start.get('head')} "
+                       "bytes (a replay file with the scene in it)")
 
 
 def main():
@@ -242,7 +256,7 @@ def main():
     editor = expected.get("editor", False)
     if editor:
         if args.editor is None or args.script is None:
-            parser.error("editor_play_hang needs --editor and --script")
+            parser.error(f"{args.scenario} needs --editor and --script")
         # The editor's own options come after "--"; audio stays on the null
         # backend (Run sets SE_AUDIO too).
         run = Run(args.editor, [*expected["args"], "--no-activate",
@@ -252,8 +266,10 @@ def main():
     else:
         if args.rampage is None:
             parser.error(f"{args.scenario} needs --rampage")
+        # The sandbox's ticks and hashes (M13b: rampage starts at the Title).
         run = Run(args.rampage, [*expected["args"], "--no-activate",
-                                 "--pref-dir", str(pref)])
+                                 "--pref-dir", str(pref), "--",
+                                 "--start-state", "sandbox"])
     hang = run.wait_for("hang test: main loops", 30)
     dumped = run.wait_for("dump written (hang 1", 30) if hang else None
     if expected["ends"]:
@@ -271,8 +287,9 @@ def main():
     if editor:
         failures.check("editor script: FAILED" not in output,
                        "the editor script reported a failure before the hang")
-        failures.check("play: started at tick 1" in output,
-                       "the editor did not start Play")
+        started = expected.get("started", "play: started at tick 1")
+        failures.check(started in output,
+                       f"the editor did not start Play ({started!r})")
     if failures.check(dumped is not None, "no hang dump was written"):
         start, written = log_time(hang[1]), log_time(dumped[1])
         if failures.check(start is not None and written is not None,
@@ -337,6 +354,18 @@ def main():
                 failures.check("an editor Play session" in replay.stdout,
                                "se_replay did not start from the dump's "
                                "Play-start stream")
+            if expected.get("play_game", False):
+                # From the bundle: the game's states, the Title first and
+                # Gameplay (the Play-start bytes) when the hang came.
+                states_file = args.work / "hashes.txt.states"
+                tops = states_file.read_text().split() \
+                    if states_file.exists() else []
+                failures.check(tops[1::2][:1] == ["title"] and
+                               tops[1::2][-1:] == ["gameplay"],
+                               "se_replay did not run Title then Gameplay "
+                               f"from the bundle ({tops[1::2][:1]} to "
+                               f"{tops[1::2][-1:]})")
+            elif editor:
                 failures.check(
                     (args.work / "play-start.scene.json").exists(),
                     "se_replay did not write the Play-start bytes")

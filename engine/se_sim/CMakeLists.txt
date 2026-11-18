@@ -10,6 +10,8 @@ se_add_module(se_sim KIND STATIC
   SOURCES
     src/beve.cc
     src/bytes.cc
+    src/content_bundle.cc
+    src/content_source.cc
     src/game_module.cc
     src/game_state.cc
     src/input_folder.cc

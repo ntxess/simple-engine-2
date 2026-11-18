@@ -7,6 +7,7 @@
 #include <array>
 #include <catch2/catch_test_macros.hpp>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <utility>
@@ -14,6 +15,7 @@
 
 #include "se_core/component_registry.h"
 #include "se_core/core_components.h"
+#include "se_core/error.h"
 #include "se_core/input_frame.h"
 #include "se_core/jobs.h"
 #include "se_core/schedule.h"
@@ -80,6 +82,25 @@ class TraceState final : public GameState {
   std::array<World*, 1> worlds_{};
 };
 
+// A state whose content does not load: OnEnter sets EnterError.
+class BrokenState final : public GameState {
+ public:
+  void OnEnter() SE_REQUIRES(g_sim_owner) override {
+    Trace().emplace_back("broken.enter");
+    error_ = Error{ErrorCode::kParse, "unknown component", "broken.json", 3, 7};
+  }
+  void OnExit() SE_REQUIRES(g_sim_owner) override {
+    Trace().emplace_back("broken.exit");
+  }
+  [[nodiscard]] std::span<World* const> Worlds() const override { return {}; }
+  [[nodiscard]] const Error* EnterError() const noexcept override {
+    return error_ ? &*error_ : nullptr;
+  }
+
+ private:
+  std::optional<Error> error_;
+};
+
 GameStateFactory TraceFactory() {
   GameStateFactory factory;
   factory.Register("a", [](const StateEnv&) -> std::unique_ptr<GameState> {
@@ -93,6 +114,9 @@ GameStateFactory TraceFactory() {
   });
   factory.Register("play", [](const StateEnv&) -> std::unique_ptr<GameState> {
     return std::make_unique<TraceState>("play", true, WorldKind::kPlay);
+  });
+  factory.Register("broken", [](const StateEnv&) -> std::unique_ptr<GameState> {
+    return std::make_unique<BrokenState>();
   });
   return factory;
 }
@@ -311,6 +335,79 @@ TEST_CASE(
   REQUIRE(states.RunningWorlds().front()->Clock().tick == 1);
   const InlineOwnerScope owner(OnMainThread());
   states.Clear();
+}
+
+// Review fix F2: a state whose OnEnter fails is taken off again, its error
+// kept with its path, line and column, and nothing more applies.
+TEST_CASE("A state that cannot enter is not kept", "[game_state]") {
+  const testing::MainThreadScope main_thread;
+  const InlineOwnerScope owner(OnMainThread());
+  Trace().clear();
+  const GameStateFactory factory = TraceFactory();
+  GameStateStack stack(factory, {});
+  stack.Request(StackOp::kPush, "a");
+  stack.Request(StackOp::kPush, "broken");
+  stack.Request(StackOp::kPush, "b");
+  stack.ApplyPending();
+  REQUIRE(stack.EnterError() != nullptr);
+  REQUIRE(stack.EnterErrorState() == "broken");
+  REQUIRE(stack.EnterError()->path == "broken.json");
+  REQUIRE(stack.EnterError()->line == 3);
+  REQUIRE(stack.EnterError()->column == 7);
+  REQUIRE(stack.Depth() == 1);
+  REQUIRE(stack.TopId() == "a");
+  // "b" stays queued: the owner takes the fault path.
+  REQUIRE(stack.PendingCount() == 1);
+  stack.ApplyPending();
+  REQUIRE(stack.Depth() == 1);
+  CHECK(Trace() == std::vector<std::string>{"a.enter", "a.pause",
+                                            "broken.enter", "broken.exit",
+                                            "a.resume"});
+  stack.Clear();
+  REQUIRE(stack.EnterError() == nullptr);
+}
+
+// Review fix F6: a command conditional on the top state is decided where it
+// applies, after the commands before it, so a World's own request of the
+// same boundary (Escape's Pause, a death's GameOver) wins over a focus
+// loss's pause; through the SessionLog, a replay decides the same.
+TEST_CASE("A conditional command applies only over its state", "[game_state]") {
+  const testing::MainThreadScope main_thread;
+  const InlineOwnerScope owner(OnMainThread());
+  const GameStateFactory factory = TraceFactory();
+  GameStateStack stack(factory, {});
+  stack.Request(StackOp::kPush, "a");
+  stack.ApplyPending();
+  // The World's request first, then the focus loss's "pause if 'a'".
+  stack.Request(StackOp::kPush, "pause");
+  stack.Request(StackOp::kPush, "pause", "a");
+  stack.ApplyPending();
+  REQUIRE(stack.Depth() == 2);
+  REQUIRE(stack.DroppedCount() == 1);
+  // Over 'a' it applies.
+  stack.Request(StackOp::kPop);
+  stack.Request(StackOp::kPush, "pause", "a");
+  stack.ApplyPending();
+  REQUIRE(stack.Depth() == 2);
+  REQUIRE(stack.TopId() == "pause");
+  REQUIRE(stack.DroppedCount() == 1);
+  stack.Clear();
+
+  // The same through a SessionLog entry, written and read back.
+  stack.Request(StackOp::kPush, "a");
+  stack.ApplyPending();
+  SessionLog live;
+  live.Enqueue(MakeGameStateCommand(2, StackOp::kPush, "pause", "a"), 2, stack);
+  auto read = SessionLog::Read(live.Write());
+  REQUIRE(read.has_value());
+  stack.Request(StackOp::kReplace, "b");
+  stack.ApplyPending();
+  read->ApplyDue(2, stack);
+  REQUIRE(read->Failures() == 0);
+  REQUIRE(stack.TopId() == "b");
+  REQUIRE(stack.Depth() == 1);
+  REQUIRE(stack.DroppedCount() == 2);
+  stack.Clear();
 }
 
 }  // namespace

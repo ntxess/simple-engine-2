@@ -17,6 +17,13 @@
 //     entry applies at once and is logged against N. A replay's boundary
 //     before N applies the same things in the same order, because the
 //     paused entry's seq is above those of the entries it followed.
+//   - a state waiting at the stack's content gate (M13): the entry is
+//     queued against N (nothing applies while a state waits), so it applies
+//     after the push, as it does in a replay without a gate.
+//
+// ApplyDue stops while a state waits at the content gate: an entry that
+// pushes a state which is not ready leaves the entries behind it pending,
+// so they apply to the new top once it is created, as in a replay.
 //
 // SessionEntry::type is the component's stable name id
 // (ComponentInfo::name_id), so logs read the same on every compiler.
@@ -103,8 +110,11 @@ struct ComponentValue {
     const ComponentRegistry& registry, Tick apply_before,
     std::span<const std::pair<Guid, std::vector<ComponentValue>>> entities);
 [[nodiscard]] SessionEntry MakeDestroyEntity(Tick apply_before, Guid target);
-[[nodiscard]] SessionEntry MakeGameStateCommand(Tick apply_before, StackOp op,
-                                                std::string_view state_id);
+// |only_if_top| non-empty: StateCommand::only_if_top (written after the
+// state id; entries without it read as before).
+[[nodiscard]] SessionEntry MakeGameStateCommand(
+    Tick apply_before, StackOp op, std::string_view state_id,
+    std::string_view only_if_top = {});
 [[nodiscard]] SessionEntry MakeAssetSwap(Tick apply_before, Guid asset,
                                          std::uint64_t content_hash);
 // kPause, kResume, kStep and kStop markers.
@@ -122,7 +132,8 @@ class SessionLog {
   // Queues an entry for its tick without applying it (scripted edits,
   // fixtures).
   void AddScheduled(SessionEntry entry);
-  // Applies every queued entry with apply_before <= tick, in order.
+  // Applies every queued entry with apply_before <= tick, in order; stops
+  // while a state waits at the stack's content gate (M13).
   void ApplyDue(Tick tick, GameStateStack& states) SE_REQUIRES(g_sim_owner);
 
   [[nodiscard]] std::span<const SessionEntry> Applied() const noexcept {
@@ -130,6 +141,11 @@ class SessionLog {
   }
   [[nodiscard]] std::size_t PendingCount() const noexcept {
     return pending_.size();
+  }
+  // The queued entries, in (apply_before, seq) order (M13: a replay's
+  // content bundle reads its kAssetSwap entries).
+  [[nodiscard]] std::span<const SessionEntry> Pending() const noexcept {
+    return pending_;
   }
   // Entries that could not apply (missing entity, bad payload).
   [[nodiscard]] std::uint32_t Failures() const noexcept { return failures_; }

@@ -14,7 +14,11 @@
 // A recovery file is <pref>recovery/<name>-<16 hex digits>.serecovery, the
 // digits a hash of the document's path, holding
 //   {"format": "se-recovery-v1", "document": "<path>", "name": "<name>",
-//    "revision": N, "scene": "<the scene file's text>"}
+//    "revision": N, "kind": "scene"|"prefab", "ref": "<prefab reference>",
+//    "scene": "<the document file's text>"}
+// The text is the document's file as Save writes it (M11b: a scene keeps
+// its prefab references, a prefab is a prefab file). "kind" and "ref" were
+// added by M11b; a file without them is a scene (no migration needed).
 // The Play-start bytes go to <pref>recovery/play-start.scene.json when Play
 // starts (the session's start, kept for bundles and hang dumps).
 
@@ -28,6 +32,7 @@
 #include <vector>
 
 #include "se_core/error.h"
+#include "se_editor/edit_document.h"
 
 namespace se::editor {
 
@@ -42,7 +47,10 @@ struct RecoveryFile {
   std::string document;
   std::string name;
   std::uint64_t revision = 0;
-  // The document's scene text at that revision.
+  // The document's kind, and a prefab document's reference.
+  DocumentKind kind = DocumentKind::kScene;
+  std::string ref;
+  // The document's file text at that revision.
   std::string scene;
 };
 

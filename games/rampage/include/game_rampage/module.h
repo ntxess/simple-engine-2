@@ -1,10 +1,11 @@
 // Copyright 2026 The simple-engine-2 Authors.
 //
-// The rampage GameModule: components, systems and the "sandbox" gameplay
+// The rampage GameModule: components, systems, the "sandbox" gameplay
 // state, which loads a scene (se-scene-v1) or a legacy scenario into one
-// World. The rampage executable (games/rampage/app, M5) runs it on
-// se_runtime; se_replay and the tests run it headless. M13 adds the game's
-// other states.
+// World, and the game's flow (flow.h, M13): Title, Gameplay, Pause and
+// GameOver. The rampage executable (games/rampage/app, M5) runs it on
+// se_runtime from game_start_state ("title"); the editor's Play, se_replay
+// and the goldens start in start_state ("sandbox").
 
 #ifndef GAME_RAMPAGE_MODULE_H_
 #define GAME_RAMPAGE_MODULE_H_
@@ -20,6 +21,7 @@
 #include "se_core/thread_role.h"
 #include "se_core/thread_safety.h"
 #include "se_core/world.h"
+#include "se_sim/content_source.h"
 #include "se_sim/game_module.h"
 
 namespace se::rampage {
@@ -61,6 +63,11 @@ struct SceneRequest {
   std::string asset_root;
   std::string legacy_root;
   RulesVersion rules = RulesVersion::kV2;
+  // The scene again, relative to the content root (kScene only): when it is
+  // set and the state's StateEnv::content is not null, the sandbox reads
+  // the scene and its prefabs (relative to kContentAssetDir) through the
+  // content source instead of from |path| (M13).
+  std::string content_path;
 };
 
 // Sets the scene of the next sandbox state. Call it on the owner thread
@@ -74,6 +81,12 @@ void SetSandboxScene(SceneRequest request);
 // the tests call it first to report errors.
 std::expected<void, Error> LoadRequestedScene(World& world,
                                               const SceneRequest& request)
+    SE_REQUIRES(g_sim_owner);
+// The same through |content| when it is not null and |request| has a
+// content_path (the sandbox state's load).
+std::expected<void, Error> LoadRequestedScene(World& world,
+                                              const SceneRequest& request,
+                                              const ContentSource* content)
     SE_REQUIRES(g_sim_owner);
 
 }  // namespace se::rampage

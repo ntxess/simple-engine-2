@@ -120,10 +120,72 @@ if(TARGET rampage AND _se_crash_backend STREQUAL "crashpad" AND
     set_tests_properties(crash.editor_play_hang PROPERTIES
       LABELS "desktop;crash;editor" TIMEOUT 120
       ENVIRONMENT "SE_NO_MESSAGE_BOX=1")
+    # Review fix F4: the same for 'Play game', whose dump stream starts from
+    # its content bundle; se_replay --from-dump runs the game's states from
+    # it (Title, then Gameplay on the Play-start bytes) to the hanging tick.
+    add_test(NAME crash.editor_play_game_hang
+      COMMAND Python3::Interpreter
+              "${CMAKE_CURRENT_SOURCE_DIR}/rampage_hang_test.py"
+              --editor "$<TARGET_FILE:simple_editor>"
+              --script
+              "${CMAKE_SOURCE_DIR}/tests/editor/scripts/play_game_hang.editor"
+              --se-replay "$<TARGET_FILE:se_replay>"
+              --read-dump "${_se_read_dump}"
+              --work "${_se_crash_work}/editor_play_game_hang"
+              --scenario editor_play_game_hang)
+    set_tests_properties(crash.editor_play_game_hang PROPERTIES
+      LABELS "desktop;crash;editor" TIMEOUT 120
+      ENVIRONMENT "SE_NO_MESSAGE_BOX=1")
   endif()
 endif()
 
 # read_dump.py on synthetic minidumps (any platform).
+# M13a: a game's dump carries its SessionLog. content_probe runs the content
+# test module as a game (its texts through the lane and the content gate);
+# a focus loss logged as a state command, then a --dump-test dump, which
+# se_replay --from-dump replays from the dump's session stream (a content
+# bundle and the SessionLog) to its tick (session_log_dump_test.py).
+se_add_module(content_probe KIND EXECUTABLE
+  SOURCES
+    content_probe.cc
+  PRIVATE_DEPS
+    se_runtime
+    se_content_test_support
+  FORBID
+    se_imgui
+  TEST)
+se_crash_copy_handler(content_probe)
+if(_se_crash_backend STREQUAL "crashpad" AND
+   NOT CMAKE_BUILD_TYPE STREQUAL "Release")
+  add_test(NAME crash.runtime_dump_with_session_log
+    COMMAND Python3::Interpreter
+            "${CMAKE_CURRENT_SOURCE_DIR}/session_log_dump_test.py"
+            --probe "$<TARGET_FILE:content_probe>"
+            --se-replay "$<TARGET_FILE:se_replay>"
+            --read-dump "${_se_read_dump}"
+            --content-root "${CMAKE_SOURCE_DIR}/tests/fixtures"
+            --work "${_se_crash_work}/runtime_dump_with_session_log")
+  set_tests_properties(crash.runtime_dump_with_session_log PROPERTIES
+    LABELS "desktop;crash" TIMEOUT 120 ENVIRONMENT "SE_NO_MESSAGE_BOX=1")
+  # M11/M13 integration: the same on rampage, its Pause pushed over its
+  # Gameplay by the focus loss (the spec's crash.rampage_dump_with_session_
+  # log; ADR-124).
+  if(TARGET rampage)
+    add_test(NAME crash.rampage_dump_with_session_log
+      COMMAND Python3::Interpreter
+              "${CMAKE_CURRENT_SOURCE_DIR}/session_log_dump_test.py"
+              --probe "$<TARGET_FILE:rampage>"
+              --se-replay "$<TARGET_FILE:se_replay>"
+              --read-dump "${_se_read_dump}"
+              --content-root "${CMAKE_SOURCE_DIR}"
+              --module rampage --play-state gameplay
+              --game-arg=--start-state --game-arg=gameplay
+              --work "${_se_crash_work}/rampage_dump_with_session_log")
+    set_tests_properties(crash.rampage_dump_with_session_log PROPERTIES
+      LABELS "desktop;crash" TIMEOUT 120 ENVIRONMENT "SE_NO_MESSAGE_BOX=1")
+  endif()
+endif()
+
 add_test(NAME minidump.read_dump
   COMMAND Python3::Interpreter
           "${CMAKE_SOURCE_DIR}/tools/minidump/read_dump_test.py")

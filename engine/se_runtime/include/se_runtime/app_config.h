@@ -89,6 +89,18 @@
 //                          SDL_GPU wait would be (M12)
 //   --watchdog-period-ms MS  the watchdog's hang period (default 1000; the
 //                          headless hang tests shorten it; M12)
+//   --push-event FRAME:KIND  at the end of iterate FRAME, push an SDL event
+//                          with SDL_PushEvent: quit, terminating, focus-lost
+//                          or focus-gained (the window's, or window 0
+//                          headless); repeatable (M13)
+//   --fs-faults SPEC       the se::fs injector for the whole run, set at
+//                          boot step 9: write-ms=N (every write step
+//                          sleeps N ms), read-ms=N (every read step),
+//                          busy-ms=N (a rename is refused for
+//                          N ms after its first refusal), comma-separated
+//                          (the quit durability tests; M13)
+//   --expect-no-threads    after the teardown, fail the run when an engine
+//                          thread is still registered (shutdown stress; M13)
 // Frames are iterates, counted from 1, as for --inject-null-acquire.
 
 #ifndef SE_RUNTIME_APP_CONFIG_H_
@@ -151,6 +163,18 @@ struct DurableSaveTestHook {
   std::uint32_t step_ms = 0;
 };
 
+// --push-event FRAME:KIND (M13).
+enum class PushedEvent : std::uint8_t {
+  kQuit,
+  kTerminating,
+  kFocusLost,
+  kFocusGained
+};
+struct PushEventHook {
+  std::int64_t frame = 0;
+  PushedEvent kind = PushedEvent::kQuit;
+};
+
 // --audio.
 enum class AudioRequest : std::uint8_t { kDefault, kDevice, kNull, kNone };
 
@@ -203,6 +227,12 @@ struct AppConfig {
   // M12.
   HangTestHook hang_test;
   std::uint32_t watchdog_period_ms = 0;
+  // M13.
+  std::vector<PushEventHook> push_events;
+  std::uint32_t fs_write_delay_ms = 0;
+  std::uint32_t fs_read_delay_ms = 0;
+  std::uint32_t fs_rename_busy_ms = 0;
+  bool expect_no_threads = false;
 
   // The arguments after "--".
   std::vector<std::string> game_args;

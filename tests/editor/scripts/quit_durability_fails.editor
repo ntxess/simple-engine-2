@@ -1,0 +1,36 @@
+# editor.script.quit_durability, run 2 of 2 (M11/M13 integration): three
+# dirty documents again on a throttled disk, and the player prefab's file
+# held by another program past the lane's 2 s retry (disk-busy for that one
+# file). Its save fails: that document stays dirty, the editor shows the
+# error and the quit is cancelled, while the scene and the enemy prefab are
+# saved. A second quit with no failure saves the third and exits.
+open assets/prefabs/enemy.prefab.json
+open assets/prefabs/player.prefab.json
+expect-documents 3
+activate sandbox
+set 5a4db0c5-0000-4000-8000-000000000000 Transform {"pos":{"x":432,"y":234},"rot":0,"scale":{"x":1,"y":1},"teleport_tick":0}
+activate enemy
+set root Collider {"half_extents":{"x":27,"y":27}}
+activate player
+set root Collider {"half_extents":{"x":28,"y":28}}
+wait-frames 1
+throttle-disk 200
+disk-busy 3000 player.prefab.json
+quit save
+wait-frames 2
+expect-quit-pending yes
+# The busy rename fails after the lane's 2 s retry; the other two land.
+wait-ms 3500
+wait-saves
+wait-frames 3
+expect-quit-pending no
+expect-saved sandbox
+expect-saved enemy
+activate player
+expect-dirty yes
+write-document player expected-player.prefab.json
+# The second quit: nothing refuses a rename now.
+disk-busy 0
+quit save
+wait-frames 2
+expect-quit-pending yes

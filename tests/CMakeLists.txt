@@ -53,6 +53,26 @@ target_compile_definitions(se_test_support PUBLIC
   SE_GOLDEN_PLATFORM="${SE_GOLDEN_PLATFORM}"
   SE_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
 
+# M13a: the content test module (its states build their Worlds from texts
+# read through StateEnv::content) and the headless session runner over any
+# module's states, for the gate, bundle and runtime tests and se_replay.
+# Separate from se_test_support, which carries the null WakeMain() the
+# platform tests must not link.
+se_add_module(se_content_test_support KIND STATIC
+  SOURCES
+    support/content_test_components.cc
+    support/content_test_module.cc
+    support/module_session.cc
+  PUBLIC_DEPS
+    se_core
+    se_sim
+  DETERMINISTIC
+  TEST)
+target_include_directories(se_content_test_support PUBLIC
+  "${CMAKE_CURRENT_SOURCE_DIR}")
+target_compile_definitions(se_content_test_support PRIVATE
+  SE_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
+
 se_add_module(se_tests KIND EXECUTABLE
   SOURCES
     smoke/smoke_test.cc

@@ -4317,3 +4317,1104 @@ focus), `editor.script.open_dirty`, `editor.script.autosave_after_save`,
 narrow` (R9: the headers are cut to their columns), `jobs.DebugDraw slices
 merge in chunk order for every W` (W = 0, 1, 3, 7 and the chaos seeds;
 TSan in WSL) and `death.debug_draw_in_fork`.
+
+## ADR-114 The scene contract's details: PrefabInstance, the root Guid, what the entity JSON holds (2026-11-17)
+
+**Decision.** docs/milestone-specs.md "The scene contract (between M11a and
+M11b)" is copied verbatim into se_core/core_components.h and
+game_rampage/scene.h. Where it leaves a detail open:
+
+- **PrefabInstance** is registered right after DestroyRequest, version 1,
+  `kSerialized | kEditorVisible`. It joins IdComponent, Name and Spawned as
+  a reserved name: a scene may not set it under "components" or
+  "overrides", and neither writer puts it there (kFlatten drops it,
+  kPrefabs writes it as "prefab"). The loader adds `PrefabInstance{ref}`
+  with the reference exactly as the file spells it.
+- **PrefabRootGuid(ref)**: `Hasher(0x9EFAB5007C0DE000)`, `AddString(ref)`,
+  hi = `Finish()`, then `AddU64(0x5EEDF00D0F1CE5ED)`, lo = `Finish()`; a nil
+  result (never seen) becomes lo = 1. The reference is hashed byte for byte:
+  callers pass it as scenes write it (relative to the asset root, forward
+  slashes); nothing normalises it.
+- **SceneLoadOptions::on_prefab** is called once per distinct reference per
+  load, with the text as read, before it is parsed. LoadPrefabDocument does
+  not report the document's own text (it is the document, not a prefab the
+  document uses), and the scratch loads inside SaveScene (kPrefabs),
+  PrefabBaseline and RebasePrefabInstances never report.
+- **EntityComponentsJson** holds every kSerialized component the entity has
+  except the four reserved ones (identity, not content), each as its
+  registry hook writes it (compact, stat ids, texture keys), in
+  registration order. Derived components with a serialized form
+  (ActiveEffects, PairCooldowns) are included: they are what the entity
+  holds. PrefabBaseline fails with kNotFound for an unknown Guid and
+  kInvalidArgument for an entity without PrefabInstance.
+- **SceneWriteOptions** resolves like SceneLoadOptions (|resolver| when set,
+  else `<asset_root>/<ref>`); kPrefabs takes the rules version from the
+  World's RulesConfig. A prefab that cannot be read fails the save: writing
+  the entity flattened instead would silently unlink it.
+- **RemovedWith / Removable** of a name nothing registers: nothing, and
+  removable (the registry, not this table, says what exists).
+
+**Why.** Each detail is the one the M11b track has to rely on before the
+bodies exist: the root Guid must be the same on every machine (a prefab
+document's hash), the callback must not report scratch loads (the editor
+would watch prefab texts it never loaded), and EntityComponentsJson must
+cover everything a set/add/remove command can change, which is exactly the
+serialized, non-reserved set.
+
+**Consequences.** The declarations were committed first, with stub bodies,
+so M11b could copy them; later changes to them are additive only.
+`serialization.*` gained PrefabInstance's sample (the round trip "for every
+registered component" requires one). An entity's PrefabInstance is never
+hashed, so no golden changed.
+
+**Checked by.** `rampage.scene.A prefab root's Guid is fixed`, the
+serialization round trips, and the determinism and reference suites
+unchanged.
+
+## ADR-115 The scene writer's prefab mode: two passes, what each leaves out, and its fallback (2026-11-17)
+
+**Decision.** `SaveScene(world, name, {.mode = kPrefabs})` writes every
+entity in spawn order: one without PrefabInstance as kFlatten writes it
+("components" whole), an instance as `"prefab"` plus `"overrides"` (left
+out when empty; never "components", never Spawned). The overrides of all
+instances of one save are computed together:
+
+1. **Pass 1, against a bare instance.** One scratch World holds one bare
+   instance of each prefab the save uses (Guid PrefabRootGuid(ref)). Per
+   component in registration order, the scene form (stats and textures by
+   name) of the entity's against the bare instance's: equal, nothing;
+   absent from the prefab, the whole value; absent from the entity, null;
+   otherwise `json::MergeDiff` (objects member by member, arrays and
+   scalars whole, a member the entity lacks as null). Left out, as the
+   spec lists them: Transform (R12 may place it), what FinishLoad derives
+   (PathCache, ActiveEffects, PairCooldowns) and what the ticks set
+   (MoveIntent, ActionBuffer, Moved). FinishLoad derives only the first
+   three; the spec groups the runtime state with them, and the rule is the
+   same for all six: pass 2 writes them when they differ.
+2. **Pass 2, against the loaded instance.** A second scratch World loads
+   every instance with pass 1's overrides (the loader, R12 and FinishLoad
+   included). Each serialized, non-reserved component whose registry JSON
+   still differs is written as its merge diff against the scratch entity's
+   scene form (absent from the entity: null; absent from the scratch: the
+   whole value). If a component pass 1 already wrote still differs (no
+   fixture does), it is rewritten as the diff of the prefab's own text
+   against the entity's scene form, which rebuilds the value exactly. The
+   overrides are then put in registration order.
+
+Pass 1 diffs against the loaded bare instance, not the prefab's text,
+because that keeps the output minimal: a prefab's `"Path": {"points": [],
+"loop": true}` loads to a Path with segment, u and done, so a diff against
+the text would write those three members on every enemy. `json::Equal`
+compares numbers by value and objects regardless of member order; it is
+what the "saves back to its own content" test means by parsed equality.
+
+**Why.** The spec's two passes, made concrete. Both passes batch every
+instance into one scratch World each, and each prefab is read once per
+call, so a save costs two scratch loads, not two per entity.
+
+**Consequences.** One limit, recorded rather than worked around: an
+instance that lost a component FinishLoad derives while keeping its source
+(ActiveEffects without Stats) saves the derived one as null, and the load
+derives it again. Neither the Inspector (ActiveEffects and PairCooldowns
+are not kEditorVisible) nor RemovedWith's groups produce that state.
+kFlatten is M3's writer unchanged (the same code, PrefabInstance dropped
+as reserved). A prefab that cannot be read fails a kPrefabs save
+(ADR-114).
+
+**Checked by.** `rampage.scene.Load, save and load again give identical
+Worlds for every scene fixture` (both modes), `rampage.scene.The sandbox
+scene saves back to its own content`, `rampage.scene.A mid-game World saves
+with prefabs and loads back` (600 ticks in: path progress, effects,
+cooldowns), `rampage.scene.Instances changed in the World save as their
+overrides`, `rampage.scene.Flatten mode writes what M3's writer wrote`,
+`rampage.Merge diffs turn one value into another`.
+
+**Amended (M11/M13 review fix F1, 2026-11-17).** The writer's scene form
+of an instance's component uses its World's stat and texture names and,
+for an id the World does not name, the bare instances' (the prefabs')
+names: a component that came from the prefab (a rebase that brought a new
+stat) is written as the prefab writes it, so pass 1's diff against the
+prefab is empty and no registry-form override is invented. Before, an id
+the scene World lacked kept the registry form ({"values": [...]}), whose
+diff against the named prefab form was a whole Stats override that pinned
+the instances' Stats for good. Checked by `editor.A stat a prefab gains is
+not written as an override`.
+
+## ADR-116 Prefab documents keep their file's form; rebases and baselines load scratch Worlds (2026-11-17)
+
+**Decision.**
+
+- **LoadPrefabDocument** creates the root (PrefabRootGuid(ref), the
+  prefab's "name" as its Name) from the prefab's components through the
+  scene loader's entity path (stats and textures by name, R12, FinishLoad),
+  with the default settings and |options.rules| in the ctx. The root has
+  no PrefabInstance: it is the prefab. The loaded components object is
+  kept in the World's ctx (`PrefabDocumentSource`, private to scene.cc).
+- **SavePrefabDocument** writes `{"format", "name", "components"}` with the
+  root's components in scene form, except FinishLoad's derived ones unless
+  the file itself wrote them. Where the World has its source, each
+  component the file wrote is the file's own value with the merge diff of
+  (what that value loads to, what the root holds) applied over it: an
+  untouched component keeps its text (`"Path": {"points": [], "loop":
+  true}`, `"ready_on_start": true`), an edit changes only its members. A
+  component the file did not write is written whole. A World without the
+  root fails with kNotFound.
+- **PrefabBaseline** loads one bare instance (the entity's Guid and
+  prefab) into a scratch World. **RebasePrefabInstances** computes every
+  instance's overrides with the writer's two passes against |old_text|
+  (the resolver answers |ref| with it), loads them all over |new_text| in
+  one scratch World, and returns the instances whose EntityComponentsJson
+  changed, in spawn order. Merge patches are applied as written: a null
+  for a component the new prefab lacks is a no-op (it stays removed), an
+  override of a member the new prefab renamed stays as an added member (a
+  stat by its old name), and a component whose hook rejects the merged
+  JSON fails the rebase with that error.
+- **Scratch Worlds.** The writer, the baseline and the rebase create
+  Worlds of the source World's registry on the calling thread, fill them
+  with LoadScene and drop them. `ScratchLoad` is marked
+  SE_NO_THREAD_SAFETY_ANALYSIS: g_sim_owner is the ownership of the
+  running Worlds, and a World this call created and nothing else can reach
+  is not one of them; the World's own owner-thread check still runs.
+  Scratch loads never call on_prefab.
+- **NameTable::Remove(id)** forgets a name (false when there is none), for
+  M11b's undo of a stat name it added.
+- **RemovedWith and Removable** read one table written beside FinishLoad
+  (Path: PathCache; Stats: ActiveEffects; EffectSource: PairCooldowns) and
+  the five fixed names.
+
+**Why.** The spec's test that a prefab document "saves back to its file"
+with parsed JSON equality cannot pass if the writer writes components
+whole (the files are minimal: `"Transform": {}`) or as diffs against the
+defaults (`"ready_on_start": true` equals the default yet is in the
+file). Keeping the text it was loaded from is the one rule that gives the
+file back unchanged and keeps a saved edit's diff to the members it
+touched, as a user expects of a file under version control. The source
+lives in the ctx because SavePrefabDocument receives only the World.
+
+**Consequences.** A prefab document's ctx carries its source; World::Clone
+does not copy ctx, so a clone saves its components whole (equal on load,
+not in form). A rebase or a baseline costs one or two scratch loads per
+call, not per instance.
+
+**Checked by.** `rampage.scene.A prefab document saves back to its file`
+(both prefabs; an edit touches only its members; a World built in place),
+`rampage.scene.A prefab root's Guid is fixed`, `rampage.scene.Overrides
+survive a prefab change` (also the renamed stat), `rampage.scene.A removed
+prefab component saves as null and stays removed` (also across two
+rebases), `rampage.scene.A prefab baseline is a bare instance`,
+`rampage.scene.Every component FinishLoad adds is removed with its
+source`, `rampage.scene.A stat name can be forgotten`.
+
+**Amended (M11/M13 review fixes F1 and F3, 2026-11-17).**
+- A rebase brings the prefab's names with its components: EditorGame gains
+  `prefab_names` (additive; rampage: se_editor_panels' MakePrefabNames over
+  game_rampage's new PrefabNames(text, ref)), a command that records the
+  stat and texture names the new text writes and the document's tables
+  lack (PrefabNamesCommand: Apply adds them, Revert removes the ones it
+  added, ToSession none). RebaseDocument applies it in the rebase's one
+  undo step, before the components, so undo takes the names back with
+  them and the hashes stay the identity.
+- `rampage::TextsFirst(texts, asset_root)`: a resolver that serves
+  recorded prefab texts and reads only a reference they lack.
+
+## ADR-117 Several documents: the DocumentSet, the close prompt, the content hash, files with prefab references (2026-11-17)
+
+**Context.** Decision 1 of 2026-11-17: the editor holds several documents,
+so a scene and the prefabs it uses can be open together. M10a's Editor held
+one EditDocument and kept its autosave timer, recovery state and "initial"
+hash itself; its Save wrote the flattened scene, losing the prefabs.
+
+**Decision.**
+- `se_editor/documents.h`: `DocumentSet` holds every open document as a
+  `DocumentEntry`: the EditDocument, an id that is never reused (a counter
+  from 1; a reload or a recovery replaces a document under a new id at the
+  same place, so commands made for the old one find nothing), the hashes
+  it opened with, its own `AutosaveTimer`, last change, last completed save
+  revision and save error, and its reload prompt. One document is active;
+  `SetFrozen(true)` (while a Play session exists) refuses every open, close
+  and switch. `DocumentDesc` gains `kind` (kScene, kPrefab) and a prefab
+  document's `ref` (relative to the asset root); the editor takes the kind
+  from the file's "format" (`se-prefab-v1`), so `--scene FILE` and File >
+  Open take either.
+- File > Open adds a document or activates the one open on that path. File
+  > Close closes the active one; M10a's open prompt (ADR-113, R4) became the
+  close prompt: Save (closes once its Durable save completed), Don't Save,
+  Cancel. The Document panel shows a strip of document tabs (disabled while
+  frozen). File > Save All, and the quit prompt lists every dirty document:
+  Save All submits each as a Durable lane job; a failure keeps that document
+  dirty with its error and cancels the quit while the others are saved.
+  Play plays the active scene and is disabled on a prefab document.
+- `EditDocument::ContentHash()` is the hash of the flattened text
+  (`EditorGame::save_scene`): the World hash covers kHashed components only,
+  so SpriteRenderer, Camera2D, IdComponent and the ctx name tables are
+  invisible to it. Stop asserts that both hashes are unchanged. The
+  flattened text drops PrefabInstance (ADR-114), so a change of an
+  entity's prefab link alone is in neither hash; the editor changes a link
+  only by creating or destroying the entity, which both hashes see.
+- Files: `EditDocument::SerializeFile()` writes `save_scene_file`
+  (kPrefabs) for a scene and `save_prefab` for a prefab; Save, Save As,
+  autosave and recovery use it. `Serialize()` stays flattened and is what
+  the Play-start bytes, fault files and dump streams hold: a replay or a
+  dump never depends on prefab files that may change after it was written.
+  se-recovery-v1 gains "kind" and "ref"; a file without them is a scene, so
+  M10 files read unchanged (the format string stays).
+- `EditorGame` gains the spec's members (EntityJson, `load_scene`'s
+  `on_prefab` callback, `save_scene_file`, `load_prefab`, `save_prefab`,
+  `prefab_baseline`, `rebase_instances`, `removed_with`, `removable`);
+  simple_editor fills them from M11a's functions.
+
+**Why.** The spec's M11b "Documents". A new id for a replaced document is
+what "an id that is never reused" needs once a reload can swap a World
+under queued commands. Comparing a prefab change's result with the file as
+JSON, not as bytes (ADR-120), lets a hand-written file stay clean.
+
+**Consequences.** The editor may have no document at all (after closing
+the last one): the panels draw "No document" and Play is disabled. The
+script verbs `answer-open` and `expect-open-prompt` are now `answer-close`
+and `expect-close-prompt`; `editor.script.open_dirty` became
+`editor.script.close_dirty`.
+
+**Checked by.** `editor.The document set: ids are never reused, one is
+active`, `editor.Recovery files keep the document's kind; v1 files are
+scenes`, `editor.Recovery files with prefab references round-trip`,
+`editor.Play-start bytes stay flattened`, `editor.A prefab document saves
+its file and edits its root`, `editor.script.documents`,
+`editor.script.close_dirty`.
+
+**Amended (M11/M13 review fixes F3 and F7, 2026-11-17).**
+- **Recovery never depends on a prefab file.** EditorGame::save_scene_file
+  takes the document's recorded prefab texts (`const PrefabTextMap*`; null:
+  every prefab from the asset root, as Save does). Autosaves and recovery
+  files (TERMINATING, session end) use EditDocument::SerializeRecovery:
+  the kPrefabs file text, else, when a prefab file cannot be read (deleted
+  or broken by another program), the overrides against the prefab texts
+  the document recorded, else the document flattened. Save and Save As keep
+  ADR-114's rule (a kPrefabs save fails when a prefab cannot be read).
+  Checked by `editor.A recovery file survives a broken prefab file` and
+  `editor.script.terminate_broken_prefab`.
+- **One file, one document.** DocumentSet::FindByPath compares
+  fs::Canonical paths (se_platform, additive: the file system's own
+  spelling, absolute, links resolved, on Windows the file's case through
+  GetFinalPathNameByHandleW; Normalize when the file does not exist), so a
+  path that differs only in case opens no second document; Editor::RefOf
+  derives a prefab's reference from canonical paths too. Checked by
+  `editor.A file opens as one document whatever its path's spelling`.
+
+## ADR-118 Commands are bound to their document; coalesce scopes end with their panel's frame (2026-11-17)
+
+**Context.** The M10/M12/M14 review carry-overs: a document change
+mid-press sent the stress generator's remaining batches to the new
+document, and a coalesce scope opened by a panel stayed open while its
+dock tab was hidden (its Draw does not run) (ADR-112, Consequences).
+
+**Decision.**
+- `se_editor/edit_queue.h`: `EditQueue` holds the frame's Edit-mode items.
+  The editor's EditorCommands records with each Submit, BeginCoalesce and
+  EndCoalesce the active document's id and the panel being drawn
+  (`Editor::drawing_panel_`). The frame's apply step (after ImGui::Render)
+  applies each item to the document it was made for; an item whose
+  document was closed is dropped and logged. A change of the active
+  document never redirects an edit. Play edits keep their own queue
+  (PlayEdits, the SessionLog).
+- A coalesce scope belongs to its document and its panel. The apply step
+  ends it when that panel did not draw in the frame; the editor ends it
+  when its document is closed, deactivated, replaced or saved, when a
+  prefab change rebases it, at an undo or redo, and at Play. Ending one is
+  logged ("coalesce scope 'X' of 'Panel' of document N ended: why"). A
+  scope with no panel (the script's `coalesce-begin`, one action a frame)
+  is ended by the document and Play rules only.
+- `PanelContext` gains (additively) `game` (the EditorGame), `asset_root`,
+  `prefab_document`, `document` (the active document's id) and `revision`
+  (the active document's revision, 0 in Play): what a panel computes from
+  the document (a baseline, a marker) can be kept until the revision or
+  the document changes.
+
+- `CreateEntityCommand` keeps the Spawned record its first Apply got
+  (when its components give none) and gives it again on redo: before, a
+  redo created the entity with the next spawn serial, so undo then redo of
+  a create (the stress press, the Hierarchy's Create) changed the World
+  hash and the saved entity order, against commands.h's own contract.
+
+**Why.** Binding at submission is the only point where "the document the
+command was made for" is known; the panel's draw record already exists
+(`PanelDrewLastFrame`), so the scope rule costs one lookup a frame and
+closes the hidden-tab case for every panel, the gizmo's drag included.
+
+**Checked by.** `editor.Commands apply to the document they were made
+for`, `editor.A coalesce scope ends when its panel stops drawing` (a hidden
+tab, a deactivated or closed document, Play, the script's scope).
+
+## ADR-119 Prefab-aware commands and panels: removal with what derives, Revert to prefab, override markers, stat names (2026-11-17)
+
+**Decision.**
+- `se_editor/prefab_commands.h` (game-agnostic, over EditorGame and the
+  registry's JSON hooks): `MakeRemoval` is a CommandGroup "Remove X" of
+  RemoveComponentCommands for X and every component `removed_with(X)`
+  names that the entity holds (undo restores all of them); a component
+  `removable` refuses is an error naming the reason. The Inspector's close
+  button submits it and is absent for such components; the script's
+  `remove` uses it too. On a prefab instance the saved file then holds the
+  removal as null in the overrides (M11a's writer). The ledger row
+  "Component removal in the inspector" is ported.
+- "Revert to prefab": `MakeRevertToPrefab` sets the component to the
+  baseline's value (`prefab_baseline`; an add when the instance removed
+  it) or removes it when the prefab lacks it. Override markers:
+  `OverriddenComponents` lists the editor-visible, serialized components
+  (IdComponent, Name, Spawned, PrefabInstance and DestroyRequest aside)
+  whose JSON differs from the baseline or that only one of the two holds.
+  Transform counts: an instance placed by R12 at its own path's first point
+  shows Transform as differing, which is what a revert would change.
+- The Inspector shows an instance's prefab on a line of its own (not as a
+  component), marks each differing component ("[override]", "Differs from
+  the prefab", a Revert button) and lists removed prefab components with
+  their own Revert. Its baseline is computed at most once a frame for the
+  selected entity, and kept while the document's revision holds.
+- The Hierarchy gains a Prefab column (the reference's file name, "-" for
+  none; no column in a prefab document) whose cell ends in " *" for an
+  instance with overrides. The marker is computed only for the rows on
+  screen, in Edit mode, cached per document revision. In Play there are
+  no markers (a baseline per visible row each frame would cost
+  milliseconds), and the play World, loaded from the flattened Play-start
+  bytes (kFlatten drops PrefabInstance, ADR-114), has no prefab links: the
+  column shows "-".
+- Stat names: `se_editor_panels/stat_name_command.h`. `StatNameCommand`
+  (`CommandKind::kGame`, a new enumerator for commands a game-aware module
+  defines) records a name in the World's StatNames under the command gate
+  (remembering whether it was new; a name whose id another name has is an
+  error), its Revert removes a name it added, its ToSession has no entries.
+  The Stats and effect drawers submit a typed stat as one CommandGroup
+  {StatNameCommand, SetComponentCommand}; `StatsDrawer::typed_names_` is
+  gone and `StatName()` reads the World's StatNames only. In Play the play
+  World shows such a stat as "#id" (stat ids are name hashes; the
+  Play-start bytes carry the scene's own names).
+
+**Checked by.** `editor.Removing a component removes what derives from
+it`, `editor.A stat typed in the Stats drawer is saved by name`,
+`editor_panels.The Hierarchy shows each entity's prefab and marks
+overrides`, `editor_panels.A prefab document's root has no prefab column`,
+`editor_panels.The Inspector marks overrides and reverts them to the
+prefab`, `editor_panels.The Inspector's removal takes what derives from a
+component`, `editor_panels.The Stats drawer edits a stat by name, adds and
+drops stats` and `editor_panels.The effect drawer's stat is typed as text
+and set on Enter` (the group), `editor.script.stat_names`,
+`editor.script.prefabs`.
+
+**Amended (M11/M13 review fix F8, 2026-11-17).** EditorGame::
+prefab_baseline takes the document's recorded prefab texts (`const
+PrefabTextMap*`, as save_scene_file), and PanelContext gains `prefab_texts`
+(the active scene document's, in Edit mode). The Hierarchy's markers and
+the Inspector share one cache, PrefabBaselines (panel_support.h): a bare
+instance's components depend only on its prefab's text, so one baseline is
+kept per prefab reference and recorded text, and drawing the panels reads
+no prefab file on main and loads one scratch World per prefab and text, not
+one per row and revision (a gizmo drag made a new revision every frame).
+The script's expect-override resolves the same way. Checked by
+`editor.Prefab baselines are kept per prefab, not per row`.
+
+## ADR-120 Hot reload into documents: a foreign watch tag, reads by content, a prefab change as one undo step (2026-11-17)
+
+**Context.** Decision 2 of 2026-11-17: a prefab change applied to an open
+document is an undo step, so the content hash is always explained by the
+stack; it marks the document dirty only when the document's own file text
+would change.
+
+**Decision.**
+- se_assets: `kForeignWatchTag` (bit 63 of a watch tag). The
+  AssetRegistry hands a FileChange whose tag has it to its foreign handler
+  (the AssetRuntime's, then the editor's foreign listener) instead of its
+  own reload; the registry's tags keep a store kind below 8 in their top
+  four bits. This is the only change outside the editor's modules.
+- Each open document watches its file and the prefab files its load
+  reported (`MakeWatchJob` with the editor's tag `kEditorWatchTag`); the
+  editor counts watchers per path, so a prefab used by two documents is
+  watched once and unwatched with the last. Save As moves the watch.
+- A change is read on the lane (an Urgent read job) and compared by
+  content: a document's own file whose text equals what it last loaded or
+  saved is ignored (our own save, a touch); a clean document reloads (a new
+  id, its undo stack starts again, logged); a dirty one asks (Reload, Keep
+  mine; the script's `answer-reload`). Keep mine records the new text as
+  the file's, leaving the document dirty so the next save wins.
+- A prefab whose text differs from what a scene document recorded:
+  `RebaseDocument` calls `rebase_instances` (old text: the recorded one)
+  and applies the set, add and remove commands that turn each instance
+  into the result, as one undo step "Prefab changed: <ref>"
+  (`EditDocument::ApplyPrefabChange`), then records the new text (not part
+  of undo). Reserved components are left alone, and a component the result
+  lacks is removed only when it is serialized (a previous pose or a path
+  cache the loader derives stays). The document stays clean when it was
+  clean and its kPrefabs text equals its file's as JSON (member order and
+  layout aside: a hand-written file is not the writer's text byte for
+  byte). Saving a prefab document rebases the other open documents at once
+  from the save's completion; the scan's later report of the same content
+  is a no-op.
+- During Play the changes (and reads that complete) are kept and handled at
+  Stop, in order.
+
+**Consequences.** An instance added to a document that never loaded its
+prefab (a stress press in a scene without enemies) has no recorded text,
+so a later change of that prefab is not rebased into it; it is rebased
+after the document is reopened. The hot-reload scan's settling rule
+(ADR-094) makes a change visible 0.5-1.5 s after it is written.
+
+**Checked by.** `editor.A saved prefab updates its instances in an open
+scene`, `editor.A prefab changed on disk is one undo step per document`,
+`editor.A changed document file reloads when clean and asks when dirty`,
+`editor.Undo then redo is the identity on the document hash and content
+hash` (the rebase among every kind), `editor.script.hot_reload`
+(`write-file` on a prefab and on the document, during Play too),
+`editor.desktop.prefabs`.
+
+## ADR-121 The stress generator's Edit-mode press is one command group of prefab instances (2026-11-17; amends ADR-102)
+
+**Decision.** In Edit mode a press is one CommandGroup "Generate N
+enemies" of create-entity commands submitted in the frame of the press:
+one undo step, and no coalesce scope spans frames (ADR-102's per-frame
+batches inside one scope are gone, and with them the hidden-tab and
+document-change cases). Play keeps its spread over ticks through the
+SessionLog. Each spawn carries `PrefabInstance{"prefabs/enemy.prefab.json"}`
+beside the full components (as M10b built them), so a saved scene writes it
+as the prefab plus its Path and, where R12 does not place it, Transform.
+`MakeStressPress` is the same press for the script (`stress-press N`).
+A spawn made by a command has no PrevTransform until its first tick (a
+load's FinalizeSpawns gives one), so a document with spawns has a
+different World hash after a save and a reopen; its content hash, the
+flattened text's, is the same.
+
+**Why.** The editor applies a frame's commands after ImGui::Render, so a
+press of n creates costs one frame of n creates; measured below.
+
+**Measured** (2026-11-17, msvc-dev, CPU load 11% from other processes):
+`editor_panels.A 1000-enemy press applies in one frame` applied the
+press's 1000 creates in 2.20 to 4.09 ms over five runs (median 2.47 ms),
+far below the 250 ms bound and well inside one frame at 60 Hz.
+
+**Checked by.** `editor_panels.The stress generator's press is one command
+group in its frame` (the tab hidden in the next frames leaves nothing
+open), `editor_panels.A 1000-enemy press applies in one frame` (label slow;
+the time is logged, msvc-dev fails above 250 ms), `editor.A stress press
+saves as prefab instances`, `editor.script.stress_prefabs`.
+
+## ADR-122 The content contract's details (2026-11-17)
+
+**Context.** docs/milestone-specs.md "The content contract (between M13a
+and M13b)" gives the declarations; M13b copies them. These are the details
+it leaves open, fixed in the first M13a commit.
+
+**Decision.**
+- **Placement.** Every new member goes at the end of its struct:
+  `GameModule::game_start_state` after `actions` (modules use designated
+  initializers, which must follow declaration order: rampage writes
+  `.actions = ..., .game_start_state = "title"`), `StateEnv::content` after
+  `world_kind`, and `GameSetup::start_state`, `text_dependencies` and
+  `on_focus_lost` after `raw_keyboard`. `StateAssets::texts` follows
+  `all_sounds`. `ModuleInstance` does not check `game_start_state` (a
+  module may name a state only its runtime registers); the App rejects an
+  unregistered start state at boot step 10 as before.
+- **Paths.** A ContentSource path is content-relative with forward
+  slashes ("assets/scenes/title.scene.json"), compared as given (no
+  normalisation in se_sim); the runtime's source normalises before it
+  looks a text up. A returned view is valid while the source lives; the
+  runtime's views stay valid while the state that loaded the text is on
+  the stack (a hot reload never frees a version a running state holds).
+  `CachedContentSource` keeps the first text a path read (later changes on
+  disk are not seen) and fills in the path of a reader's Error that has
+  none.
+- **The gate.** `GameStateStack::ApplyPending` asks the gate for the front
+  command only, before it creates the state: pops never wait, and a
+  command naming an unregistered state is not asked about (Apply rejects
+  it as before). The gate is asked again at every ApplyPending until it
+  answers true, so `Ready` must be idempotent and cheap. `Waiting()` is
+  the front command's state while the last ApplyPending stopped at the
+  gate; a `Request` behind it does not change it; `Clear()` ends the wait.
+- **Focus loss.** `on_focus_lost` returns at most one command; the App
+  queues it as `MakeGameStateCommand` (op and state id), so a replay
+  carries it like any other state command.
+
+**Why.** Appending keeps every existing aggregate initializer and golden
+unchanged; the gate's rules are the smallest ones under which "the same
+commands apply before the same tick either way" holds without asking
+the gate about commands that cannot create a state.
+
+## ADR-123 Content through the lane: the gate, pinned texts, kAssetSwap and the content bundle (2026-11-17)
+
+**Context.** docs/milestone-specs.md "M13a": scenes and prefabs load as
+text through the background lane (decision 6), a GameState is created only
+once its texts are loaded and its assets resident, no World steps early,
+replays get the same ticks, and multi-state sessions replay from a content
+bundle. ADR-122 fixed the contract's shape; this records how the engine
+keeps it.
+
+**Decision.**
+- **The Text store.** `AssetRegistry::RequestText(scope, path)` reads a file
+  on the lane with `MakeTextJob` (SteppedRead: an opening step, then at most
+  `kReadStepBytes`, 1 MB, per step) into a `TextPayload`; main keeps it as a
+  `shared_ptr<const std::string>` (`Text(handle)`). The hot-reload scan
+  watches it; a reload replaces the registry's string and every holder of
+  the old one keeps it. `SetGameplayFrozen` defers text changes like prefab
+  and scene-chunk changes. The Prefab and SceneChunk stores stay, unused,
+  for M19's importer (a ledger row).
+- **The gate.** `AssetRuntime` is the stack's `StateContentGate`. The first
+  `Ready(id)` creates the waiting state's AssetScope (StateAssets: textures,
+  sounds, prefabs, scene chunks and `texts`) as a *pending* scope; each
+  later call requests the dependencies `text_dependencies` names for every
+  text that has landed, and answers true once every text has landed and
+  been expanded and the scope is resident. Then it pins the texts (the
+  scope keeps the `shared_ptr` of each version) and logs the familiar
+  "state 'X': its N assets are resident after ... ms (... ; T texts); its
+  Worlds step". `SyncScopes` adopts the pending scope when the state
+  appears on the stack and releases a pending scope whose state no longer
+  waits. A text that fails to load is the state's error (`StateError`):
+  `Ready` never answers true, and the App takes the fault path (game build:
+  dump, message box, quit) with the error's path, line and column.
+- **No tick before the state.** `Hold()` holds while `Waiting()` is not
+  empty (logged once: "sim held (no ticks planned): state 'X' waits at the
+  content gate for N of its M assets") and `HoldTicks` holds a frame's
+  remaining ticks while it is. At every iterate where a state waits the App
+  completes the boundary again (`SimDriver::CompleteBoundary`: the stack's
+  pending commands, then the SessionLog's due entries), so the push applies
+  at the boundary before the same tick as in a replay, where no tick ran
+  meanwhile. `SessionLog::ApplyDue` stops while a state waits (an entry
+  that pushes a state not yet ready leaves the entries behind it pending, so
+  they apply to the new top, as in a replay), and `Enqueue` while a state
+  waits queues the entry against the next tick instead of applying it.
+  `TickInline` with a TickGate calls `CompleteBoundary` (it called
+  `ApplyPending` only) before asking the gate.
+- **The ContentSource.** `AssetRuntime::Text(path)` serves pinned versions,
+  newest scope first (the state being created reads its own), from the
+  normalised content-relative path; anything else is kNotFound with a hint.
+  A running World never sees a changed text: the next state that loads the
+  path gets the version the registry holds then; when it differs from the
+  version the path served before, the App logs
+  `MakeAssetSwap(next_tick, ContentPathGuid(path), ContentTextHash(text))`
+  with `AddScheduled` and the log says "a changed text applies to the next
+  state that loads it".
+- **The content bundle.** `se-content-bundle-v1` as the spec gives it, plus
+  two choices: `"hash"` is 16 lower-case hex digits (a JSON number loses
+  bits above 2^53 in most readers), and an optional `"start_state"` member
+  records the state the session started in. Texts are in the order first
+  served. `ContentBundleSource` serves each path's *first* version until a
+  kAssetSwap entry selects another by hash; as a `StateContentGate` it is
+  always ready and, before each state is created, selects every swap of the
+  session's log due by the driver's next tick (`Follow(log, driver)`). The
+  spec's "a path's newest version" would give a replay's first states the
+  text a later state read; the first version, then the swaps in order, is
+  what the live session read. The runtime's bundle is
+  `AssetRuntime::LoadedTexts()` with the start state set.
+- **Start bytes.** The App's replay and dump start bytes are the scene file
+  (`GameSetup::replay_start`) unless the states loaded a text that differs
+  from it; then the bundle. A rampage sandbox session (which loads no text
+  in M13a) keeps its scene file, so every existing replay and golden is
+  unchanged. `ReplayRecorder::SetStart` replaces the start bytes and the
+  header's hash at the save.
+- **se_replay.** A replay whose start bytes are a bundle (or any
+  `--start-state`) runs the module's states through a
+  `ContentBundleSource` from `--start-state`, default the bundle's start
+  state, else the module's game_start_state (the spec's default is the
+  module's game_start_state; the bundle's own start state is the one the
+  session started in, which a `--start-state sandbox` session needs).
+  `--module content_test` runs the content test module.
+- **Headless windows.** A headless App takes window events of window 0 as
+  its own, so tests push focus events with `SDL_PushEvent` without a
+  window.
+
+**Why.** The gate and the hold together keep the spec's rule that the same
+commands apply before the same tick with and without a gate: the gate
+only ever delays a boundary at which no tick runs. Pinning is what makes
+"gameplay content never changes under a running World" hold for views a
+state keeps, and the swap entry is what lets a replay read what each state
+read.
+
+**Amended (M11/M13 review fix F2, 2026-11-17).** A state whose text was
+read but whose content does not load (not JSON, an unknown component, a
+missing or bad prefab, a content line its module cannot parse) is a state
+error too. GameState gains `EnterError()` (additive, default null): a state
+whose OnEnter could not build its Worlds sets it. GameStateStack::Apply
+then exits and destroys the state again (a push resumes the state below),
+keeps the error (EnterError, EnterErrorState; Clear resets it) and applies
+nothing more; SimDriver::TickInline runs no tick after it. The App takes the
+same fault path as for a failed read, with the error's path, line and
+column (App::StateContentFault, at the boundary check and after the
+frame's ticks, before an emptied stack could end the game cleanly; at boot
+a start state that cannot enter fails the boot), and the editor's 'Play
+game' faults ("content") as for a failed read. rampage's flow states and
+sandbox state and the content test module's states report it. Checked by
+`runtime.A state whose content does not load takes the fault path`,
+`rampage.bad_scene_faults` and `A state that cannot enter is not kept`.
+
+## ADR-124 The game's quit, focus loss, the empty stack and its dumps (2026-11-17)
+
+**Decision.**
+- **Replays at QuitPending.** A game's `--record` replay is submitted to the
+  lane (a Durable save, ADR-089) at the first iterate that sees the quit
+  pending, before the providers are polled, so QuitPending lasts until its
+  rename ("quit waits for 1 Durable lane job"); the ticks of the drain are
+  not recorded. A quit that is ready at once (session end, TERMINATING)
+  still submits it at the start of the shutdown. The editor's replay path is
+  unchanged.
+- **A failed Durable save at quit (decision 5).**
+  `LaneQuitProvider::SetCancelOnFailure(false)`, the App's setting without
+  an extension, logs "N Durable job(s) failed during the quit; the game's
+  quit goes on" and waits only for the Durable jobs still pending; the
+  editor (an extension) keeps M10a's cancel.
+- **The empty stack.** After a frame's ticks, a game whose stack is empty
+  with nothing waiting or queued requests the quit with the new
+  `QuitReason::kGameEnded` ("the game ended: no state left").
+- **Focus loss.** `SDL_EVENT_WINDOW_FOCUS_LOST` of the App's window calls
+  `GameSetup::on_focus_lost(top)` while a state is on the stack; a command
+  is enqueued as `MakeGameStateCommand` against the next tick (logged
+  "focus lost on 'X': GameState command push 'Y' logged before tick N").
+- **The game's dumps carry the SessionLog.** The App attaches ADR-111's
+  stream (`integration::PlayStartStream`, the same stream type: the
+  session's replay file without frames) at boot step 10 and again before a
+  frame's ticks when the log's entries or the loaded texts grew; the
+  extension (the editor) attaches its own. The session header keeps flags
+  0. `se_replay --from-dump` applies a game stream's SessionLog and, when
+  its start bytes are a bundle, runs the module's states from it (rampage
+  or the content test module). `crash.rampage_hang` now expects the stream
+  in a game's dump (it checked that a game's dump had none).
+- **Test hooks.** `--push-event FRAME:quit|terminating|focus-lost|
+  focus-gained` (SDL_PushEvent at the end of iterate FRAME),
+  `--fs-faults write-ms=N,read-ms=N,busy-ms=N` (the se::fs injector for
+  the whole run, set at boot step 9) and `--expect-no-threads` (after the teardown,
+  "engine threads left at exit: N"; a thread left fails the run). The
+  deadline hook logs "shutdown deadline started: the quit drain is over".
+- **Main's breadcrumb carries the session tick.** `Schedule::Step` sets
+  the breadcrumb's tick from the InputFrame (the SimDriver's tick) instead
+  of the World's clock, which starts at 0 for a state pushed later: a dump
+  of a multi-state session names the tick a replay runs to. For a session
+  of one World from tick 1 (every rampage and editor session so far) the
+  two are equal; a frame without a tick (unit tests) keeps the World's.
+- **The content test module and content_probe.** rampage's own states are
+  M13b's, so the engine's runtime tests run `tests/support/
+  content_test_module.h` (title, play and pause Worlds built from texts in
+  tests/fixtures/content, with includes as dependencies) in a headless App
+  (`runtime.*`), and `content_probe` (tests/crash) is that module as a game
+  executable for the dump test, `crash.runtime_dump_with_session_log` (the
+  spec's `crash.rampage_dump_with_session_log` needs rampage's Pause; the
+  integration adds that variant on the same script).
+
+**Why.** Submitting the replay when the quit starts is the only way the
+drain can wait for it; the drain's ticks were never part of what a replay
+promises. Decision 5 is the game's side of ADR-089: a game has nothing a
+user could save again, so a failed write must not keep it running.
+
+**Amended (M11/M13 review fix F6, 2026-11-17).** The focus loss's command
+is decided where it applies. StateCommand gains `only_if_top` (and
+GameStateStack::Request a third, defaulted parameter): a command whose
+state is not on top when it reaches the front of the queue (the commands
+before it applied, before the content gate is asked) is dropped
+(DroppedCount, logged). The App logs the focus loss's command with the top
+state it was computed for; the SessionLog entry carries it after the state
+id (written only when set, so older entries read as before), so a replay
+drops it exactly where the live session did. Escape and a focus loss in
+one frame give one Pause, and a death and a focus loss give GameOver
+alone. Checked by `A conditional command applies only over its state`.
+
+## ADR-125 rampage's game flow: four sprite states, a FlowSystem that acts only where a state put a role (2026-11-17)
+
+**Context.** M13b gives rampage a player's session: the Title (the legacy
+MainMenu), Gameplay, Pause and GameOver. The module's start state
+"sandbox" is what the editor's Play (ADR-097), se_replay and every rampage
+golden run, and none of that may change. Until M19 there is no text or UI,
+and decision 3 of the M11/M13/M17b specs settles that Pause returns to the
+Title with Jump and resumes with Exit. Decision 4: rampage persists no game
+save.
+
+**Decision.**
+- **Each flow state is one World from a sprite scene.** games/rampage/src/
+  flow_states.cc: "title" (assets/scenes/title.scene.json, the "bg"
+  wallpaper scaled over the 1920x1080 arena, nothing else), "gameplay"
+  (the configured scene, by default the sandbox's), "pause"
+  (assets/scenes/pause.scene.json: the wallpaper tinted to a dark veil at
+  alpha 160) and "game_over" (assets/scenes/game_over.scene.json: the
+  wallpaper tinted red). Pause is pushed over Gameplay, so the stack's
+  push semantics pause Gameplay's World while Pause's steps, and both draw
+  (RenderSources, Gameplay at alpha 1). GameOver replaces Gameplay; its
+  Enter replaces it with a fresh Gameplay, the scene loaded again with the
+  same seed.
+- **The rules are FlowSystem's, gated by a FlowContext.** FlowSystem is the
+  last system of GameRules (after DeathRule) and acts only in a World
+  whose ctx holds a `FlowContext` with a role; the four states put one
+  there, the sandbox state does not. The ctx is not hashed (the World hash
+  covers entities), so the flow's Worlds hash as their scenes do, and
+  every existing golden and reference comparison runs exactly as before.
+  `FlowRules(role, input, player_alive)` is the pure decision; the system
+  queues it with RequestGameState, so it applies at the next tick
+  boundary.
+- **One transition per tick, the first matching rule wins.** A key counts
+  in the tick whose InputFrame has its press (a held key does not repeat).
+  Title: Enter, then Exit (a pop that empties the stack: M13a ends the
+  game). Gameplay: the death (no PlayerControl entity without a
+  DestroyRequest) before Exit, so a pause pressed in the dying tick does
+  not freeze a lost game. Pause: Exit (pop), then Jump (pop, then replace
+  with "title": two commands of one transition, FIFO at one boundary, so
+  Gameplay never ticks again). GameOver: Enter (retry), then Exit (the
+  Title). The ids and scenes are in game_rampage/flow.h; the declared rule
+  is R14 in docs/rules/gameplay-rules.md, which closes the ledger's Escape
+  row as re-specified.
+- **No save.** No state writes or reads a game save (decision 4); the
+  runtime's durability tests use the `--record` replay.
+
+**Why.** Gating on a ctx role keeps the flow's rules out of every World
+that existed before M13 without a second schedule or a per-module switch,
+and lets the editor's Play and se_replay keep running the sandbox
+unchanged. Making the rules a pure function of the role, the tick's input
+and one World query keeps them testable without a stack and keeps the
+replay of a session a function of its InputFrames.
+
+**Consequences.** The window title shows the top state's id first
+(`App::UpdateTitle`: "rampage | gameplay | tick N | Running"). A Gameplay
+scene without a PlayerControl entity ends at its first tick (GameOver):
+the flow needs a player. Until M19's menus there is no on-screen text: the
+keys are in the README and in the gates.md row for a person at the
+keyboard.
+
+**Checked by.** `rampage.flow.*` (each rule from synthetic InputFrames; one
+transition per tick; GameOver on the player's death and on a destroy
+request alone; Pause's two-command return; the sandbox state's World has
+no FlowContext), `determinism_rampage_flow` (ADR-127), and through the
+executable `rampage.headless_flow` (the log's state sequence; se_replay
+reproduces the recorded hashes from the replay's content bundle),
+`rampage.desktop.flow` (an unfocused window read back in each state: the
+Title, Pause and GameOver images differ from the Gameplay's and from each
+other) and `rampage.frames_300_title`.
+
+## ADR-126 The flow's content: scenes and prefabs through StateEnv::content, rampage's state assets (2026-11-17)
+
+**Context.** M13a's content contract (docs/milestone-specs.md, "The
+content contract") gives a state its files through `StateEnv::content`
+(the AssetRuntime's lane-loaded texts in the runtime, a
+CachedContentSource or a content bundle in tools and tests) and asks the
+game what a loaded text needs besides itself
+(`GameSetup::text_dependencies`) and what to do when the focus is lost
+(`GameSetup::on_focus_lost`).
+
+**Decision.**
+- **Content paths are relative to the content root; prefab references to
+  `assets/`.** A scene names its prefabs relative to the asset directory
+  ("prefabs/enemy.prefab.json"), as before; the flow states resolve them
+  through the same ContentSource as `assets/<ref>` (flow.h's
+  `kContentAssetDir`), so a state built from the runtime's texts never
+  reads a file. `SceneDependencies(path, text, asset_dir)`
+  (game_rampage/content.h) lists a scene's prefab references as those
+  paths, each once, and nothing for a prefab or a malformed text (the
+  scene's load reports the error).
+- **The sandbox reads through the content source when it has one.**
+  `SceneRequest::content_path` (the scene relative to the content root)
+  and a non-null `StateEnv::content` make the sandbox load the scene and
+  its prefabs through the source; otherwise it reads `path` as before
+  (the editor's Play, se_replay and the tests that set no content).
+- **A null content source reads files.** The flow states fall back to
+  reading from `FlowConfig::content_root` when `StateEnv::content` is
+  null, so a host without M13a's texts (the editor until the integration
+  wires 'Play game') still runs them.
+- **The executable.** games/rampage/app/main.cc starts at
+  `--start-state` (default "title"; "gameplay" or "sandbox" for tests),
+  with `--scene` the Gameplay's and the sandbox's scene. The flow states'
+  StateAssets: the state's scene as a text (the lane adds its prefabs
+  through `text_dependencies`) and every texture and sound of the tables.
+  The Title, Pause and GameOver draw only the wallpaper, but naming "bg"
+  alone is an error in a headless App (it reads no texture table, and a
+  texture named outside the table is a state error), and the table's three
+  textures are small; the Gameplay's scene is configurable anyway.
+- **GameSetup::text_dependencies reaches the AssetRuntime.** M13a's App
+  (commit cc195a039) did not copy it into AssetRuntimeConfig, so a scene's
+  prefabs were never requested and the Gameplay state failed to build its
+  World; `App::StartAssets` now sets it (one line).
+  With it the content test module's start state also waits for its
+  text's include, and `crash.runtime_dump_with_session_log` (M13a's
+  tests/crash/session_log_dump_test.py), whose focus loss at iterate 60
+  only raced the lane before, now always arrived before "play" existed:
+  the test pushes it at iterate 3000 and dumps after tick 6000 (the
+  InputFrame ring holds 7200), its only change.
+  `on_focus_lost` pushes "pause" when "gameplay" is on top and asks for
+  nothing otherwise.
+- **The executable's sandbox reads its scene file as before.** Its
+  StateAssets stay M9's (every texture and sound, no text) and its
+  SceneRequest has no content_path, so the runtime's sandbox state is
+  exactly the one before M13. A sandbox that loaded its scene and prefabs
+  as texts would make M13a's App start every sandbox replay and dump from
+  a content bundle (ADR-123: the start bytes are the bundle whenever a
+  loaded text differs from the scene file, and the prefabs do), which
+  se_replay's bundle run cannot start the sandbox from (it sets no
+  SceneRequest), and which would change the meaning of the M4/M12 crash
+  tests and `input.pushed_keys_replay_*`. The content path stays
+  available (tests, the integration's editor).
+
+**Why.** Keeping prefab references relative to the asset directory leaves
+every scene and prefab file unchanged; one rule for the asset directory is
+all the source needs to serve them. A fallback that reads files keeps the
+states usable by every host the integration has not yet moved onto the
+lane.
+
+**Consequences.** The tests that check the sandbox's ticks, hashes or
+images through the executable pass `-- --start-state sandbox` (the M4 and
+M12 crash tests, `rampage.frames_300`, `input.pushed_keys_replay_*`,
+`render.fault.*`).
+
+**Checked by.** `rampage.flow.The scenes load the same through content as
+from files`, `rampage.flow.The sandbox reads through StateEnv::content`,
+`rampage.flow.Scene dependencies are its prefabs under the asset dir`.
+
+**Note (M11/M13 review finding F9, 2026-11-17).** The 'sandbox' state
+still reads its scene file on main in OnEnter (`--start-state sandbox`,
+which M4/M12's tests use): its SceneRequest has no content_path and its
+StateAssets name no text, because a sandbox session whose texts went
+through the lane would start from a content bundle, which the sandbox
+replays and dumps (se_replay's scene-file path, the M12 hang dumps) do not
+read yet. Kept as decided here; the remaining synchronous read is a ledger
+row until se_replay runs sandbox sessions from bundles.
+
+## ADR-127 The flow's recorded session and its golden (2026-11-17)
+
+**Context.** M13b's determinism test replays a session through every state
+under 30, 60, 144 and 160 Hz synthetic clocks and FMA3 on and off, from a
+recorded input file written by a checked-in generator through
+StampedInput.
+
+**Decision.**
+- **StampedInput plays a given script.** A second constructor takes a list
+  of edges (tick, action, down) and stamps each at the middle of its
+  tick's window, `epoch + (t - 1/2) * dt`; the seeded script is unchanged.
+- **The generator and the fixture.** tests/rampage/flow_input_gen.cc
+  writes tests/fixtures/flow/flow.seinput from the script in
+  tests/rampage/support/flow_session.cc (360 ticks at 120 Hz): Enter at
+  tick 20, Right held 30-60, Escape at 50 and 80, the death on
+  tests/fixtures/flow/doomed.scene.json (the player at HP 10, a hunter with
+  an instant -10 effect on a path through it), Enter at 240 (a retry),
+  Escape at 280 and Jump at 310. `rampage.flow_input_fixture` runs the
+  generator and compares its output with the checked-in file (newlines
+  aside), and a Catch2 case compares the parsed frames.
+- **The golden.** `determinism_rampage_flow` (tests/golden/<platform>/)
+  holds the 360 per-tick stack hashes (GameStateStack::Hash, tagged with
+  the state ids) of the session started at "title" with the doomed scene
+  as the Gameplay scene, one tick per frame; the same hashes and the same
+  state per tick are required at every clock and with FMA3 on and off, and
+  a recording at 144 Hz replays at 30 Hz to them.
+
+**Why.** A scripted list keeps the session's transitions on known ticks, so
+the test names them (Gameplay at 21, Pause at 51 and 281, the Title at
+311) and fails on a transition that moves, while StampedInput keeps the
+edges placed the way the runtime's InputService places them.
+
+**Checked by.** `rampage.determinism_rampage_flow: every state, independent
+of the clock`, `rampage.A recorded flow session replays at another rate`,
+`rampage.The flow's recorded session is its generator's output`,
+`rampage.flow_input_fixture`.
+
+## ADR-128 The M11/M13 integration: the merges, the editor and the runtime on one World, se_replay's state runs (2026-11-17)
+
+**Context.** docs/milestone-specs.md "Integration (M11a + M11b + M13a +
+M13b)" merges four tracks and asks that the editor and the runtime load a
+scene into identical Worlds in both directions, and that the runtime's dump
+with a session log is shown on rampage itself.
+
+**Decision.**
+- **The merges.** m11a-formats, m11b-editor-docs, m13a-runtime-engine and
+  m13b-game-states, in that order, each with --no-ff. m11b already held
+  m11a and m13b already held m13a, so only docs/README.md (the se_assets,
+  game_rampage, se_editor, se_editor_panels, simple_editor and rampage rows:
+  both sides' additions kept in one row each) and docs/decisions.md (ADR-114
+  to ADR-121 before ADR-122 to ADR-127) conflicted. The contract headers
+  were the owners' on both sides (M11b and M13b copied them verbatim); the
+  se_assets change of each side (M11b's kForeignWatchTag, bit 63 of a watch
+  tag; M13a's Text store, kind 4 in bits 60-62) merged without a conflict
+  and do not overlap. Each merge commit builds; the m13b merge passes the
+  whole msvc-dev suite.
+- **The editor against the runtime.** `editor.The editor and the runtime
+  load identical Worlds` (tests/editor/runtime_worlds_test.cc, in
+  se_editor_tests, which now links se_platform_test_support) boots the
+  real App headless with rampage's runtime setup (the flow states' scenes
+  as texts, SceneDependencies as text_dependencies, start state
+  "gameplay", the scene through FlowConfig) for each of the seven
+  tests/fixtures/scenes fixtures and the sandbox, and compares the
+  Gameplay World, taken in the first frame after the content gate created
+  it, with EditDocument::Open on the same file: Hash, Digests, the kFlatten
+  text, StatNames, TextureNames and the entity count. The App runs a 1 us
+  synthetic frame so no tick runs before the comparison (the test checks
+  that the World was taken before tick 1).
+- **The reverse direction.** `rampage.plays_an_editor_saved_scene`
+  (tests/rampage/editor_saved_test.py): the editor, headless on a copy of
+  the content, presses the Stress generator for 20 enemy-prefab instances,
+  saves (kPrefabs) and plays 5 ticks; se_replay writes the Play session's
+  start bytes from its replay. The per-tick hash is the stack's hash, which
+  is tagged with the state ids (GameStateStack::Hash), so "se_replay's on
+  the editor's Play-start bytes" is read as the "gameplay" state run on
+  those bytes (`se_replay --module rampage --start-state gameplay --scene
+  PLAY_START --root CONTENT --seed 1 --ticks 600`): the sandbox state on
+  the same bytes gives the same Worlds under another tag. rampage runs
+  `-- --start-state gameplay --scene assets/scenes/sandbox.scene.json` on
+  the saved file with `--record`; se_replay replays that recording from its
+  content bundle (the recorded hashes checked tick by tick), and the first
+  600 hashes of both must be equal.
+- **se_replay** (tools/se_replay, M13a's): `--module rampage --start-state
+  ID` without `--inputs` runs the module's states for `--ticks N` without
+  input, reading texts from `--root` through a CachedContentSource (an
+  absolute path as it is), and `--scene FILE` sets rampage's Gameplay scene
+  (FlowConfig::gameplay_scene) for these runs and for a replay that starts
+  from a content bundle. The second closes M13b's open issue: a session
+  recorded with `rampage -- --scene X` now replays from its bundle with
+  `se_replay --inputs R --scene X`.
+- **crash.rampage_dump_with_session_log** runs M13a's
+  tests/crash/session_log_dump_test.py on rampage (`--module rampage
+  --play-state gameplay --game-arg=--start-state --game-arg=gameplay`): a
+  focus loss pushed at iterate 3000 pushes rampage's Pause over its
+  Gameplay as a logged state command, the dump after tick 6000 carries the
+  session stream (a bundle of the sandbox and its prefabs), and se_replay
+  --from-dump replays it, the pause included, to the dump's hash.
+  crash.runtime_dump_with_session_log keeps running on content_probe.
+- **Release.** `runtime.The start state is created once its texts are
+  resident` (M13a) passed `--fs-faults`, a test hook Release builds
+  reject at boot; the integration's msvc-release run found it. It now
+  skips in builds without kRuntimeTestHooks.
+
+**Why.** Booting the real App (lane, gate, AssetRuntime as the content
+source) is the only way the comparison covers what the runtime does; a
+headless stack with a CachedContentSource would compare the loader with
+itself. Comparing the stack's hashes under the same state id keeps the
+reverse test about the Worlds, not about the tag.
+
+**Consequences.** The two Worlds are compared at their creation; their
+ticks are compared through the reverse test (600 ticks). Release builds
+have no --editor-script and skip the reverse test.
+
+**Checked by.** `editor.The editor and the runtime load identical Worlds`,
+`rampage.plays_an_editor_saved_scene`, `crash.rampage_dump_with_session_log`,
+`crash.runtime_dump_with_session_log`, `rampage.headless_flow`.
+
+## ADR-129 The editor's content through the AssetRuntime: 'Play game' from the Title through the content gate (2026-11-17)
+
+**Context.** The integration asks that the editor read documents and Play
+game's content through the AssetRuntime's texts where M13a made them
+available, and that 'Play game' start at game_start_state with the Gameplay
+scene pointed at the Play-start bytes, its states loading through the gate
+like the runtime's. Until now Play game pushed the module's start state
+("sandbox") on the Play-start file, reading it on main.
+
+**Decision.**
+- **Play game.** PlaySession::Start takes the content gate and the content
+  source (both the AssetRuntime, for Play game only; additive parameters
+  with null defaults). It pushes GameModule::game_start_state (else
+  start_state) onto a stack whose StateEnv::content is the AssetRuntime and
+  whose content gate is set, so the push waits at the gate; Start accepts a
+  stack that waits for its first state. The Editor calls
+  PlaySession::CompleteBoundary at every frame start (BeginFrame, after
+  the Play request), which finishes the boundary as the runtime's iterate
+  does; while a state waits the App's AssetRuntime::Hold holds the frame's
+  ticks (it already looked at the extension's stack).
+- **The Gameplay scene.** EditorGame::set_play_game_scene (apps/editor)
+  still writes the Play-start bytes to <pref>play-game.scene.json and now
+  also sets rampage's FlowConfig: the Gameplay scene is that file's
+  absolute path (the AssetRuntime's text keys are normalised paths, and
+  fs::Join keeps an absolute one), the content root the editor's. The
+  editor's GameSetup gives the same state_assets (each flow state's scene
+  as a text, besides every texture and sound) and text_dependencies
+  (SceneDependencies) as rampage's executable; the document's state and
+  Play's one-World state name no text.
+- **A text that does not load.** The AssetRuntime's StateError is sticky;
+  the editor turns it into Play.Faulted with where = "content" (the fault
+  files are written as for a tick fault) and clears it
+  (AssetRuntime::ClearStateError, additive), so the editor goes on and the
+  next Play game starts clean. The game build keeps M13a's fault path.
+- **Documents stay synchronous reads.** File > Open, a reload and a
+  recovery read the document's file on main, as known long work to the
+  watchdog (M12), and hot reload's reads of changed files stay the lane's
+  Urgent reads (ADR-120). The AssetRuntime's Text store keeps texts per
+  state scope: an editor document is no state, an open must produce its
+  document in the frame that asked, and the main thread must not wait on
+  the lane. This is where M13a's texts are "not available".
+
+**Why.** The editor's Play game is the game's session: it must hold no
+tick before its content is resident and read its scenes from the same
+source as the runtime, or a scene that plays in the editor might not play
+in rampage.
+
+**Consequences.**
+- Play game's replay (<pref>sessions/last-play.sereplay) and its dump
+  stream start from a content bundle: the session's states read through a
+  recording ContentSource over the AssetRuntime, which keeps every text it
+  served (keyed by its normalised path; start_state the game's), and
+  PlaySession::SessionStartBytes gives that bundle once a text was read
+  (ReplayRecorder::SetStart at Stop). The Gameplay scene's key is the
+  Play-start file's absolute path under <pref>, so se_replay needs it as
+  `--scene` (run_editor.py passes it when <pref>play-game.scene.json
+  exists); se_replay also writes `--edges-out` for bundle replays now. The
+  session header written when Play game starts still hashes the Play-start
+  bytes, so a Play game dump's `--from-dump` replay is not covered; open.
+- The App's text swap listener (StartGame) logs the editor's text swaps
+  into the App's own unused SessionLog; a Play game session does not see
+  them (gameplay texts are frozen during Play, so none happens inside a
+  session).
+- tests/editor/scripts/play_game.editor now goes Title, Enter, Gameplay
+  (17 entities) and back; play_game_input.editor's keys reach the Title.
+
+**Checked by.** `editor.script.play_game` (the Title waits at the gate,
+"play game: 'title' waits at the content gate", then Gameplay from the
+Play-start bytes; se_replay reproduces the session from its bundle),
+`editor.desktop.play_game_input` (its four edges from the bundle replay),
+`editor.desktop.play_session`, `editor.Play-start bytes stay flattened`.
+
+**Amended (M11/M13 review fix F4, 2026-11-17).** A Play game dump replays.
+The bundle no longer keys the Gameplay scene by the per-user absolute
+Play-start path: PlayStart gains `scene_key` (EditorGame::
+play_game_scene_key, rampage's kPlayGameSceneKey "play-game.scene.json"),
+and the recording content source records the Play-start file's text under
+it. se_replay points rampage's Gameplay state at that key when a bundle
+holds it (replay::PointGameplayAtBundle), so a Play game replay needs no
+`--scene` (run_editor.py passes none), and `--from-dump` of an editor Play
+session whose stream starts from a bundle runs it through the game's
+states (RunModuleSession) instead of the Play-start file, after checking
+that the bundle's Gameplay text is the Play-start bytes the session header
+hashes. The header keeps hashing the Play-start bytes. Checked by
+`crash.editor_play_game_hang` (a hang inside Gameplay's tick 240 after the
+Title: the dump replays Title then Gameplay to tick 240 and matches the
+published hash).
+
+## ADR-130 The editor's quit durability test: one file held, documents checked against their files (2026-11-17)
+
+**Context.** The design's quit durability test, editor side
+(`editor.script.quit_durability`): three dirty documents on a throttled
+disk, the quit pending until all three are renamed, the files equal to
+what each document saves, one save failed by the injector, a second quit
+that exits, the shutdown deadline after the drain. M9's injector refused
+every rename, so one failure out of three was not possible, and the
+script's throttle-disk and disk-busy each replaced the other's setting.
+
+**Decision.**
+- **se::fs's injector** (se_platform, test builds) gains
+  FsFaults::rename_busy_suffix: when set, only renames whose destination
+  ends with it are refused (internal::RefuseReplace takes the
+  destination), and GetFsFaults() returns the settings. Release builds
+  still compile the injector out.
+- **Script verbs** (se_editor, test builds): `disk-busy MS [FILE]` limits
+  the refusal to FILE; throttle-disk and disk-busy now keep each other's
+  setting; `expect-saved NAME` (the document is clean and its file's bytes
+  are its SerializeFile text); `write-document NAME FILE` (that text to a
+  file under the content root, for a comparison after the editor exited);
+  `expect-top-state ID` and `wait-top-state ID` (the play session's top
+  state, for Play game).
+- **run_editor.py** takes `--expect-files-equal A B` (after the first run),
+  `--then-expect-files-equal A B` (after --then-script) and
+  `--expect-order TEXT...`.
+- **The test** is two runs on one content copy.
+  tests/editor/scripts/quit_durability.editor: the sandbox, enemy and
+  player documents dirty, write-document for each, a 400 ms write step,
+  quit with Save All; the log has "quit pending", "quit waits for", "the
+  lane's Durable jobs are done", "shutdown deadline started: the quit drain
+  is over" and "quit ready after" in that order, and each file equals its
+  write-document copy. quit_durability_fails.editor: the three dirty again,
+  the player prefab's renames refused for 3 s (past the lane's 2 s retry):
+  its save fails, the quit is cancelled with the error shown, the sandbox
+  and the enemy prefab are saved (expect-saved), the player stays dirty;
+  a second quit without the refusal saves it (its file equals its
+  write-document copy) and exits.
+
+**Why.** "One save failed while the other two are saved" needs a fault on
+one file; a path suffix is the smallest addition to the injector, and the
+comparison with the document's own text is the spec's "the bytes on disk
+equal each document's Serialize" (for an editor document, SerializeFile:
+the scene with prefab references, the prefab document's own form).
+
+**Checked by.** `editor.script.quit_durability`, `editor.script.quit_save`,
+`editor.script.quit_save_fails`, `assets.*` (the lane's busy-rename tests),
+`platform.quit_durability.*`.

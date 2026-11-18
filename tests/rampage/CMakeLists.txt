@@ -3,7 +3,9 @@
 #   se_rampage_tests      Catch2: serialization, broadphase, effects, path,
 #                         boundary, JSON, scenes, the legacy scenarios, the
 #                         projection, sprites and the view, and
-#                         determinism (golden determinism_rampage)
+#                         determinism (golden determinism_rampage); the
+#                         game flow (rampage.flow.*, M13b) and its golden
+#                         determinism_rampage_flow
 #   replay.rampage.*      se_replay runs the module (tools)
 #   ref.sandbox.NAME      label reference: se_replay runs the legacy scenario
 #                         NAME with its inputs for 3600 ticks, and
@@ -41,6 +43,20 @@ target_include_directories(rampage_test_support PUBLIC
 target_compile_definitions(rampage_test_support PRIVATE
   SE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 
+# M13b: the game flow headless (FlowHarness, RunFlowSession) and the
+# recorded session's script (StampedInput, from se_test_support).
+se_add_module(rampage_flow_support KIND STATIC
+  SOURCES
+    support/flow_session.cc
+  PUBLIC_DEPS
+    game_rampage
+    rampage_test_support
+    se_core
+    se_sim
+    se_test_support
+  DETERMINISTIC
+  TEST)
+
 se_add_module(se_rampage_tests KIND EXECUTABLE
   SOURCES
     audio_events_test.cc
@@ -48,9 +64,12 @@ se_add_module(se_rampage_tests KIND EXECUTABLE
     broadphase_test.cc
     determinism_test.cc
     effects_test.cc
+    flow_determinism_test.cc
+    flow_test.cc
     json_test.cc
     legacy_scenario_test.cc
     path_test.cc
+    prefab_test.cc
     projection_test.cc
     scene_test.cc
     serialization_test.cc
@@ -58,6 +77,7 @@ se_add_module(se_rampage_tests KIND EXECUTABLE
     ../support/tracy_inert_listener.cc
   PRIVATE_DEPS
     game_rampage
+    rampage_flow_support
     rampage_test_support
     se_core
     se_render_core
@@ -75,6 +95,83 @@ catch_discover_tests(se_rampage_tests
   TEST_PREFIX "rampage."
   ADD_TAGS_AS_LABELS
   PROPERTIES LABELS rampage)
+
+# The flow's recorded session (tests/fixtures/flow/flow.seinput) is this
+# generator's output; rampage.flow_input_fixture checks that it still is
+# (newlines aside: the checkout may have CRLF).
+se_add_module(rampage_flow_input_gen KIND EXECUTABLE
+  SOURCES
+    flow_input_gen.cc
+  PRIVATE_DEPS
+    rampage_flow_support
+  TEST)
+add_test(NAME rampage.flow_input_fixture
+  COMMAND Python3::Interpreter -c
+          "import sys,subprocess;subprocess.run([sys.argv[1],sys.argv[2]],check=True);a=open(sys.argv[2]).read();b=open(sys.argv[3]).read();print('same' if a==b else 'DIFFERENT');sys.exit(a!=b)"
+          $<TARGET_FILE:rampage_flow_input_gen>
+          "${_se_rampage_out}/flow.seinput"
+          "${CMAKE_SOURCE_DIR}/tests/fixtures/flow/flow.seinput")
+set_tests_properties(rampage.flow_input_fixture PROPERTIES
+  LABELS "rampage;tools")
+
+# M13b: the game flow through the executable (flow_app_test.py): the keys
+# pushed with the --push-key test hook (SDL events, never OS input; not in
+# Release) on the doomed scene: Title, Gameplay, Pause, Gameplay, the
+# player's death, GameOver, Title. rampage.headless_flow records the session
+# and se_replay reproduces its hashes from the replay's content bundle;
+# rampage.desktop.flow reads the composite back in each state in an
+# unfocused window (label desktop).
+if(TARGET rampage AND NOT CMAKE_BUILD_TYPE STREQUAL "Release")
+  set(_se_flow_app "${CMAKE_CURRENT_SOURCE_DIR}/flow_app_test.py")
+  add_test(NAME rampage.headless_flow
+    COMMAND Python3::Interpreter "${_se_flow_app}"
+            --rampage $<TARGET_FILE:rampage>
+            --se-replay $<TARGET_FILE:se_replay>
+            --mode headless --out "${_se_rampage_out}/headless_flow")
+  set_tests_properties(rampage.headless_flow PROPERTIES
+    LABELS "unit;rampage" TIMEOUT 120)
+  add_test(NAME rampage.desktop.flow
+    COMMAND Python3::Interpreter "${_se_flow_app}"
+            --rampage $<TARGET_FILE:rampage>
+            --mode desktop --out "${_se_rampage_out}/desktop_flow")
+  set_tests_properties(rampage.desktop.flow PROPERTIES
+    LABELS "desktop;gpu;rampage" TIMEOUT 120)
+endif()
+
+# M11/M13 integration: a scene the editor saved with prefab references
+# plays in rampage (--start-state gameplay --scene, through the lane), and
+# its first 600 tick hashes equal se_replay's on the editor's Play-start
+# bytes of the same document (editor_saved_test.py; headless).
+if(TARGET rampage AND TARGET simple_editor AND
+   NOT CMAKE_BUILD_TYPE STREQUAL "Release")
+  add_test(NAME rampage.plays_an_editor_saved_scene
+    COMMAND Python3::Interpreter
+            "${CMAKE_CURRENT_SOURCE_DIR}/editor_saved_test.py"
+            --editor $<TARGET_FILE:simple_editor>
+            --rampage $<TARGET_FILE:rampage>
+            --se-replay $<TARGET_FILE:se_replay>
+            --content "${CMAKE_SOURCE_DIR}"
+            --script
+            "${CMAKE_SOURCE_DIR}/tests/editor/scripts/saved_for_rampage.editor"
+            --out "${_se_rampage_out}/editor_saved")
+  set_tests_properties(rampage.plays_an_editor_saved_scene PROPERTIES
+    LABELS "unit;rampage" TIMEOUT 180)
+endif()
+
+# Review fix F2 (M13a): a Gameplay scene that is read but does not load (not
+# JSON, an unknown component, a missing prefab) is a state error: rampage
+# logs it with its path, line and column and takes the fault path
+# (bad_scene_test.py; headless).
+if(TARGET rampage AND NOT CMAKE_BUILD_TYPE STREQUAL "Release")
+  add_test(NAME rampage.bad_scene_faults
+    COMMAND Python3::Interpreter
+            "${CMAKE_CURRENT_SOURCE_DIR}/bad_scene_test.py"
+            --rampage $<TARGET_FILE:rampage>
+            --content "${CMAKE_SOURCE_DIR}"
+            --out "${_se_rampage_out}/bad_scene")
+  set_tests_properties(rampage.bad_scene_faults PROPERTIES
+    LABELS "unit;rampage" TIMEOUT 180)
+endif()
 
 set(_se_ref "${CMAKE_SOURCE_DIR}/tests/fixtures/reference")
 set(_se_refcmp "${CMAKE_SOURCE_DIR}/tools/refcmp/refcmp.py")

@@ -1,0 +1,2 @@
+# content_test: the pause overlay
+entity veil 0 0 0 0

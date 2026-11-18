@@ -91,6 +91,8 @@ def main():
         command += ["--inject-device-lost", str(DEVICE_LOST_FRAME)]
     elif args.step != "none":
         command += ["--inject-frame-fault", f"{args.step}:1:{FAULT_UNTIL}"]
+    # The sandbox's image (M13b: rampage starts at the Title).
+    command += ["--", "--start-state", "sandbox"]
     status, output = run(command)
 
     failures = []

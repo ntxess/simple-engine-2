@@ -142,6 +142,10 @@ const AssetRegistry::Common* AssetRegistry::CommonOf(
       const auto* e = Lookup(chunks_, index, ref.generation);
       return e != nullptr ? &e->common : nullptr;
     }
+    case Kind::kText: {
+      const auto* e = Lookup(texts_, index, ref.generation);
+      return e != nullptr ? &e->common : nullptr;
+    }
   }
   return nullptr;
 }
@@ -276,6 +280,11 @@ void AssetRegistry::Remove(const Ref& ref) {
       chunks_.by_key.erase(key);
       chunks_.free.push_back(ref.slot);
       break;
+    case Kind::kText:
+      texts_.slots[ref.slot].text.reset();
+      texts_.by_key.erase(key);
+      texts_.free.push_back(ref.slot);
+      break;
   }
 }
 
@@ -383,6 +392,12 @@ void AssetRegistry::SubmitFileLoad(Kind kind, std::uint32_t slot, bool reload) {
              MakeJsonJob(entry.common.key, JsonKind::kSceneChunk));
       break;
     }
+    case Kind::kText: {
+      TextEntry& entry = texts_.slots[slot];
+      Submit(Ref{kind, slot, entry.common.generation}, reload,
+             MakeTextJob(entry.common.key));
+      break;
+    }
     case Kind::kTexture:
       break;
   }
@@ -445,6 +460,25 @@ Handle<SceneChunkAsset> AssetRegistry::RequestSceneChunk(
   return MakeHandle<Handle<SceneChunkAsset>>(slot, generation);
 }
 
+Handle<TextAsset> AssetRegistry::RequestText(AssetScope scope,
+                                             std::string_view path) {
+  SE_ASSERT_MAIN_THREAD();
+  Scope* target = ScopeOf(scope);
+  if (target == nullptr || path.empty()) return {};
+  ++stats_.requests;
+  bool created = false;
+  const std::string key = fs::Normalize(path);
+  const std::uint32_t slot = Acquire(texts_, key, created);
+  const std::uint32_t generation = texts_.slots[slot].common.generation;
+  const Ref ref{Kind::kText, slot, generation};
+  AddRef(*target, ref);
+  if (created) {
+    SubmitFileLoad(Kind::kText, slot, /*reload=*/false);
+    WatchPath(ref, key);
+  }
+  return MakeHandle<Handle<TextAsset>>(slot, generation);
+}
+
 void AssetRegistry::ReloadTexture(Handle<TextureAsset> handle,
                                   std::string_view file) {
   SE_ASSERT_MAIN_THREAD();
@@ -474,6 +508,11 @@ AssetState AssetRegistry::State(Handle<PrefabAsset> handle) const {
 
 AssetState AssetRegistry::State(Handle<SceneChunkAsset> handle) const {
   const auto* e = Lookup(chunks_, handle.index, handle.generation);
+  return e != nullptr ? e->common.state : AssetState::kNone;
+}
+
+AssetState AssetRegistry::State(Handle<TextAsset> handle) const {
+  const auto* e = Lookup(texts_, handle.index, handle.generation);
   return e != nullptr ? e->common.state : AssetState::kNone;
 }
 
@@ -522,6 +561,27 @@ std::shared_ptr<const SceneChunkPayload> AssetRegistry::SceneChunk(
     Handle<SceneChunkAsset> handle) const {
   const auto* e = Lookup(chunks_, handle.index, handle.generation);
   return e != nullptr ? e->payload : nullptr;
+}
+
+std::shared_ptr<const std::string> AssetRegistry::Text(
+    Handle<TextAsset> handle) const {
+  const auto* e = Lookup(texts_, handle.index, handle.generation);
+  return e != nullptr ? e->text : nullptr;
+}
+
+std::string_view AssetRegistry::TextPath(Handle<TextAsset> handle) const {
+  const auto* e = Lookup(texts_, handle.index, handle.generation);
+  return e != nullptr ? std::string_view(e->common.key) : std::string_view();
+}
+
+std::uint32_t AssetRegistry::Version(Handle<TextAsset> handle) const {
+  const auto* e = Lookup(texts_, handle.index, handle.generation);
+  return e != nullptr ? e->common.version : 0;
+}
+
+const Error* AssetRegistry::LastError(Handle<TextAsset> handle) const {
+  const auto* e = Lookup(texts_, handle.index, handle.generation);
+  return e != nullptr && e->common.error ? &*e->common.error : nullptr;
 }
 
 std::uint32_t AssetRegistry::Version(Handle<TextureAsset> handle) const {
@@ -577,6 +637,12 @@ void AssetRegistry::Failed(Common& common, bool reload, Error error) {
 void AssetRegistry::OnCompletion(LaneCompletion&& completion) {
   if (completion.result &&
       std::holds_alternative<FileChange>(*completion.result)) {
+    if ((std::get<FileChange>(*completion.result).tag & kForeignWatchTag) !=
+        0) {
+      // A watch of the registry's user (the editor's documents).
+      if (foreign_) foreign_(std::move(completion));
+      return;
+    }
     OnFileChange(std::get<FileChange>(*completion.result));
     return;
   }
@@ -633,6 +699,12 @@ void AssetRegistry::OnCompletion(LaneCompletion&& completion) {
       if (auto* chunk = std::get_if<SceneChunkPayload>(&payload)) {
         chunks_.slots[pending.ref.slot].payload =
             std::make_shared<const SceneChunkPayload>(std::move(*chunk));
+      }
+      break;
+    case Kind::kText:
+      if (auto* text = std::get_if<TextPayload>(&payload)) {
+        texts_.slots[pending.ref.slot].text =
+            std::make_shared<const std::string>(std::move(text->text));
       }
       break;
   }
@@ -733,7 +805,8 @@ void AssetRegistry::OnFileChange(const FileChange& change) {
     return;
   }
   if (frozen_) {
-    if (ref.kind == Kind::kPrefab || ref.kind == Kind::kSceneChunk) {
+    if (ref.kind == Kind::kPrefab || ref.kind == Kind::kSceneChunk ||
+        ref.kind == Kind::kText) {
       // Editor Play: gameplay assets wait for Stop (M10a).
       SE_LOG_INFO("asset '{}': {} changed during Play; reloaded at Stop",
                   common->key, change.path);

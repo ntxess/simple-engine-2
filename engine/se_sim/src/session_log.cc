@@ -180,10 +180,12 @@ SessionEntry MakeDestroyEntity(Tick apply_before, Guid target) {
 }
 
 SessionEntry MakeGameStateCommand(Tick apply_before, StackOp op,
-                                  std::string_view state_id) {
+                                  std::string_view state_id,
+                                  std::string_view only_if_top) {
   ByteWriter out;
   out.U8(static_cast<std::uint8_t>(op));
   out.String(state_id);
+  if (!only_if_top.empty()) out.String(only_if_top);
   SessionEntry entry;
   entry.apply_before = apply_before;
   entry.op = SessionOp::kGameStateCommand;
@@ -219,6 +221,13 @@ void SessionLog::Insert(SessionEntry entry) {
 void SessionLog::Enqueue(SessionEntry entry, Tick next_tick,
                          GameStateStack& states) {
   entry.seq = next_seq_++;
+  if (!states.Waiting().empty()) {
+    // M13: a state waits at the content gate; the entry applies after it,
+    // at the boundary before next_tick.
+    entry.apply_before = std::max(entry.apply_before, next_tick);
+    Insert(std::move(entry));
+    return;
+  }
   if (!states.SimRunning()) {
     // Paused at the boundary before next_tick. Finish that boundary's
     // pending work in RunTick's order, which is also a replay's order, then
@@ -242,9 +251,14 @@ void SessionLog::AddScheduled(SessionEntry entry) {
 void SessionLog::ApplyDue(Tick tick, GameStateStack& states) {
   std::size_t due = 0;
   while (due < pending_.size() && pending_[due].apply_before <= tick) {
-    if (!Apply(pending_[due], states)) ++failures_;
-    applied_.push_back(std::move(pending_[due]));
+    // M13: nothing applies while a state waits at the content gate.
+    if (!states.Waiting().empty()) break;
+    // Moved out first: applying may queue entries (a text swap logged as a
+    // state is created), which only ever land behind this one.
+    SessionEntry entry = std::move(pending_[due]);
     ++due;
+    if (!Apply(entry, states)) ++failures_;
+    applied_.push_back(std::move(entry));
   }
   pending_.erase(pending_.begin(),
                  pending_.begin() + static_cast<std::ptrdiff_t>(due));
@@ -260,11 +274,13 @@ bool SessionLog::Apply(const SessionEntry& entry, GameStateStack& states) {
     ByteReader in(entry.payload);
     std::uint8_t op = 0;
     std::string state_id;
+    std::string only_if_top;
     if (!in.U8(&op) || !in.String(&state_id) ||
-        op > static_cast<std::uint8_t>(StackOp::kPop)) {
+        op > static_cast<std::uint8_t>(StackOp::kPop) ||
+        (!in.AtEnd() && (!in.String(&only_if_top) || !in.AtEnd()))) {
       return false;
     }
-    states.Request(static_cast<StackOp>(op), state_id);
+    states.Request(static_cast<StackOp>(op), state_id, only_if_top);
     states.ApplyPending();
     return true;
   }

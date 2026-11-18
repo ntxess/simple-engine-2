@@ -17,6 +17,7 @@
 #include <utility>
 #include <vector>
 
+#include "game_rampage/flow.h"
 #include "game_rampage/module.h"
 #include "rampage/support/rampage_session.h"
 #include "rampage/support/seinput.h"
@@ -27,7 +28,11 @@
 #include "se_core/sim_clock.h"
 #include "se_core/thread_role.h"
 #include "se_core/types.h"
+#include "se_sim/content_bundle.h"
+#include "se_sim/game_module.h"
 #include "se_sim/replay.h"
+#include "support/content_test_module.h"
+#include "support/module_session.h"
 
 namespace se::replay {
 namespace {
@@ -263,9 +268,18 @@ std::vector<std::byte> WriteMinidump(std::span<const MinidumpStream> streams) {
   return out;
 }
 
+bool PointGameplayAtBundle(const ContentBundle& bundle) {
+  if (bundle.Latest(rampage::kPlayGameSceneKey) == nullptr) return false;
+  rampage::FlowConfig flow = rampage::GetFlowConfig();
+  flow.gameplay_scene = std::string(rampage::kPlayGameSceneKey);
+  rampage::SetFlowConfig(std::move(flow));
+  return true;
+}
+
 FromDumpResult ReplayDumpedRampage(const DumpedSession& session,
                                    const std::string& root,
-                                   const std::string& start_scene) {
+                                   const std::string& start_scene,
+                                   const std::string& start_state) {
   FromDumpResult result;
   const SessionHeaderRecord& header = session.header;
   if ((header.flags & kSessionFlagNoSession) != 0) {
@@ -274,9 +288,15 @@ FromDumpResult ReplayDumpedRampage(const DumpedSession& session,
         "nothing to replay";
     return result;
   }
-  if (Text(header.module) != "rampage") {
+  const GameModule* module = nullptr;
+  if (Text(header.module) == "rampage") {
+    module = &rampage::RampageModule();
+  } else if (Text(header.module) == "content_test") {
+    module = &testing::ContentTestModule();
+  } else {
     result.error = std::format(
-        "the dump's session runs module '{}'; --from-dump replays rampage",
+        "the dump's session runs module '{}'; --from-dump replays rampage "
+        "(and the content test module)",
         Text(header.module));
     return result;
   }
@@ -292,6 +312,34 @@ FromDumpResult ReplayDumpedRampage(const DumpedSession& session,
   const bool editor_play = (header.flags & kSessionFlagPlayStart) != 0;
   std::string scene = root + "/" + std::string(Text(header.scene));
   std::vector<std::byte> session_log;
+  // M13: a game's session stream (the replay file without frames): its
+  // SessionLog, and its start bytes when they are a content bundle.
+  std::optional<ContentBundle> bundle;
+  if (!editor_play && !session.play_start.empty()) {
+    auto file = ReplayReader::Open(session.play_start);
+    if (!file) {
+      result.error =
+          "the dump's session stream: " + std::move(file.error().message);
+      return result;
+    }
+    const std::span<const std::byte> log = file->SessionBytes();
+    session_log.assign(log.begin(), log.end());
+    if (ContentBundle::IsBundle(file->StartBytes())) {
+      auto read = ContentBundle::Read(file->StartBytes());
+      if (!read) {
+        result.error = "the dump's content bundle: " + read.error().message;
+        return result;
+      }
+      bundle = std::move(*read);
+    }
+  }
+  if (!bundle && module != &rampage::RampageModule()) {
+    result.error = std::format(
+        "a '{}' session replays only from a content bundle in its session "
+        "stream",
+        Text(header.module));
+    return result;
+  }
   if (editor_play) {
     if (session.play_start.empty()) {
       result.error =
@@ -299,6 +347,40 @@ FromDumpResult ReplayDumpedRampage(const DumpedSession& session,
           "Play-start stream (0x53450006)";
       return result;
     }
+    auto file = ReplayReader::Open(session.play_start);
+    if (!file) {
+      result.error =
+          "the dump's Play-start stream: " + std::move(file.error().message);
+      return result;
+    }
+    const std::span<const std::byte> start = file->StartBytes();
+    const std::span<const std::byte> log = file->SessionBytes();
+    session_log.assign(log.begin(), log.end());
+    if (ContentBundle::IsBundle(start)) {
+      // 'Play game' (M13 integration): the stream starts from the content
+      // bundle of every text its states read, the Gameplay scene (the
+      // Play-start bytes the header hashes) under rampage's Play game key
+      // (review fix F4).
+      auto read = ContentBundle::Read(start);
+      if (!read) {
+        result.error = "the dump's content bundle: " + read.error().message;
+        return result;
+      }
+      const ContentText* scene = read->Latest(rampage::kPlayGameSceneKey);
+      if (scene != nullptr &&
+          MakeReplayHeader(std::as_bytes(std::span<const char>(scene->text)),
+                           header.seed, header.tick_rate)
+                  .scene_hash != header.scene_hash) {
+        result.error = std::format(
+            "the dump's Play game scene differs from the dumped session's "
+            "Play-start bytes (hash {:016x})",
+            header.scene_hash);
+        return result;
+      }
+      bundle = std::move(*read);
+    }
+  }
+  if (editor_play && !bundle) {
     if (start_scene.empty()) {
       result.error =
           "an editor Play session needs a file for its Play-start "
@@ -321,16 +403,19 @@ FromDumpResult ReplayDumpedRampage(const DumpedSession& session,
       return result;
     }
     scene = start_scene;
-    const std::span<const std::byte> log = file->SessionBytes();
-    session_log.assign(log.begin(), log.end());
   }
-  const std::optional<std::vector<std::byte>> bytes = ReadFile(scene);
+  const std::optional<std::vector<std::byte>> bytes =
+      bundle ? std::optional<std::vector<std::byte>>(std::vector<std::byte>())
+             : ReadFile(scene);
   if (!bytes) {
     result.error = "cannot read the session's scene " + scene;
     return result;
   }
-  if (MakeReplayHeader(*bytes, header.seed, header.tick_rate).scene_hash !=
-      header.scene_hash) {
+  // A bundle carries its own texts (each checked against its hash); a
+  // scene file must be the one the session started from.
+  if (!bundle &&
+      MakeReplayHeader(*bytes, header.seed, header.tick_rate).scene_hash !=
+          header.scene_hash) {
     result.error =
         std::format("{} differs from the dumped session's scene (hash {:016x})",
                     scene, header.scene_hash);
@@ -357,22 +442,45 @@ FromDumpResult ReplayDumpedRampage(const DumpedSession& session,
         session.frames.size(), target, result.last_tick);
     return result;
   }
-  testing::RampageSessionOptions options;
-  options.scene.format = rampage::SceneRequest::Format::kScene;
-  options.scene.path = scene;
-  options.scene.asset_root = root + "/assets";
-  options.scene.legacy_root = root;
-  options.seed = header.seed;
-  options.ticks = result.last_tick;
-  options.session = std::move(session_log);
-  testing::FrameListInput input(session.frames);
-  options.input = &input;
-  testing::RampageSessionResult run = testing::RunRampageSession(options);
-  if (!run.error.empty()) {
-    result.error = run.error;
-    return result;
+  if (bundle) {
+    if (module == &rampage::RampageModule()) PointGameplayAtBundle(*bundle);
+    ContentBundleSource source(std::move(*bundle));
+    testing::FrameListInput frames(session.frames);
+    testing::ModuleSessionOptions run;
+    run.module = module;
+    run.start_state =
+        !start_state.empty() ? start_state : source.Bundle().StartState();
+    run.bundle = &source;
+    run.seed = header.seed;
+    run.tick_rate = header.tick_rate;
+    run.ticks = result.last_tick;
+    run.input = &frames;
+    run.session = std::move(session_log);
+    testing::ModuleSessionResult replayed = testing::RunModuleSession(run);
+    if (!replayed.error.empty()) {
+      result.error = std::move(replayed.error);
+      return result;
+    }
+    result.hashes = std::move(replayed.hashes);
+    result.top_states = std::move(replayed.top_states);
+  } else {
+    testing::RampageSessionOptions options;
+    options.scene.format = rampage::SceneRequest::Format::kScene;
+    options.scene.path = scene;
+    options.scene.asset_root = root + "/assets";
+    options.scene.legacy_root = root;
+    options.seed = header.seed;
+    options.ticks = result.last_tick;
+    options.session = std::move(session_log);
+    testing::FrameListInput input(session.frames);
+    options.input = &input;
+    testing::RampageSessionResult run = testing::RunRampageSession(options);
+    if (!run.error.empty()) {
+      result.error = run.error;
+      return result;
+    }
+    result.hashes = std::move(run.hashes);
   }
-  result.hashes = std::move(run.hashes);
   if (header.last_tick >= 1 && header.last_tick <= result.hashes.size()) {
     result.checked_tick = header.last_tick;
     const std::uint64_t replayed = result.hashes[header.last_tick - 1];

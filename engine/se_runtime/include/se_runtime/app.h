@@ -99,6 +99,25 @@
 // (app_config.h); M9 --lane-step-trace; M12 --hang-test (main loops inside
 // a system at tick N) and --watchdog-period-ms.
 //
+// M13 (ADR-123, ADR-124): the App pushes GameSetup::start_state (else the
+// module's game_start_state, else its start_state) at boot step 10 with the
+// AssetRuntime as the stack's content gate and the states' ContentSource:
+// a state is created once its texts and assets are resident, and no tick
+// runs before (the hold is logged; while a state waits, each iterate
+// completes the tick boundary again). After a frame's ticks an empty stack
+// starts the two-phase quit ("the game ended: no state left"). Focus lost
+// while a session runs asks GameSetup::on_focus_lost for a GameState
+// command, queued in the SessionLog against the next tick. A text that
+// does not load, or a state whose content does not (GameState::EnterError),
+// is a state error: the fault path. The game's dumps carry
+// the session's replay file without frames (ADR-111's stream: header,
+// start bytes, SessionLog), attached again before a frame's ticks when the
+// log or the loaded texts grew; the start bytes are the scene file, or the
+// content bundle once the states loaded any other text. A --record replay
+// is submitted when the quit becomes pending (the drain waits for its
+// rename); a Durable save that fails during the quit is logged and the
+// game's quit goes on (the editor's cancels it, ADR-089).
+//
 // The watchdog (M12): main's iterate counter, the Suspended and Modal flags,
 // the heartbeat (KnownLongWork) and the in-driver flag (se_platform/
 // driver_wait.h, raised around SDL_GPU and pacer waits) are its inputs; a
@@ -262,6 +281,22 @@ struct GameSetup {
   // SDL's raw keyboard (the editor turns it off: IME, hotkeys); also
   // --no-raw-keyboard.
   bool raw_keyboard = true;
+
+  // M13: the game's states and their content (ADR-122).
+  // The state the App pushes at boot (empty: the module's
+  // game_start_state, else its start_state).
+  std::string start_state;
+  // The files a loaded text needs too (rampage: a scene's prefabs), by
+  // path relative to the content root.
+  std::function<std::vector<std::string>(std::string_view path,
+                                         std::string_view text)>
+      text_dependencies;
+  // Focus lost while a session runs: the GameState command the game wants
+  // (rampage: push "pause" when "gameplay" is on top), queued in the
+  // SessionLog against the next tick, so a replay pauses where the live
+  // session did.
+  std::function<std::optional<StateCommand>(std::string_view top_state)>
+      on_focus_lost;
 };
 
 using GameFactory =
@@ -316,6 +351,9 @@ class App final : public WindowListener {
   // step 6), for an extension's sessions; null outside them.
   [[nodiscard]] ModuleInstance* GameInstance() noexcept;
   [[nodiscard]] jobs::ForkJoinPool* GamePool() noexcept;
+  // M13: the game's GameStateStack (boot step 10 to shutdown step 6; null
+  // outside them), for tests and tools; main thread.
+  [[nodiscard]] const GameStateStack* GameStates() const noexcept;
   // The log worker (boot step 2 to shutdown step 16), or null.
   [[nodiscard]] integration::Logging* Logs() noexcept {
     return logging_ ? &*logging_ : nullptr;
@@ -472,6 +510,18 @@ class App final : public WindowListener {
       SE_REQUIRES(g_main);
   // The --record replay, through the lane as a Durable save (ADR-089).
   void WriteReplay() SE_REQUIRES(g_main);
+  // M13: the start state's id, the start bytes of a replay or a dump (the
+  // scene file, or the content bundle), focus loss, the empty stack, the
+  // dump's session stream, and the test hooks that push events.
+  [[nodiscard]] std::string_view StartStateId() const noexcept;
+  // The game build's state error, described with its path, line and column:
+  // a state's text that did not load, or a state whose content did not
+  // (GameStateStack::EnterError); nullopt when none.
+  [[nodiscard]] std::optional<std::string> StateContentFault() const;
+  [[nodiscard]] std::vector<std::byte> SessionStartBytes() const;
+  void OnFocusLost() SE_REQUIRES(g_main);
+  void SyncSessionDump() SE_REQUIRES(g_main);
+  void RunPushEvents() SE_REQUIRES(g_main);
   // --durable-save-test (ADR-089).
   void RunDurableSaveTest() SE_REQUIRES(g_main);
   // Records a teardown step for the shutdown-order log (ADR-088).
@@ -523,6 +573,16 @@ class App final : public WindowListener {
   bool replay_submitted_ = false;
   std::uint64_t replay_failures_before_ = 0;
   std::size_t replay_ticks_ = 0;
+  // M13: the start bytes from boot (GameSetup::replay_start), the state
+  // the session started in, and the dump's session stream with the log
+  // and text counts it was last attached with.
+  std::vector<std::byte> start_bytes_;
+  std::string start_state_;
+  integration::PlayStartStream session_stream_;
+  std::size_t session_stream_entries_ = 0;
+  std::size_t session_stream_texts_ = 0;
+  bool session_stream_attached_ = false;
+  bool game_ended_logged_ = false;
   // --durable-save-test.
   bool durable_save_test_done_ = false;
   std::string durable_save_test_path_;

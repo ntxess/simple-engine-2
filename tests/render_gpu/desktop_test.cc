@@ -427,6 +427,8 @@ TEST_CASE("A texture reloaded while minimized is correct after restore",
 
   GameSetup setup;
   setup.module = &rampage::RampageModule();
+  // The sandbox (M13b: rampage's session starts at the Title).
+  setup.start_state = std::string(rampage::kSandboxState);
   setup.title = "se_render_gpu_tests minimized reload";
   setup.org = "simple-engine-tests";
   setup.app = "render_gpu";

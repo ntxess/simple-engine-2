@@ -22,8 +22,11 @@
 #include "se_core/schedule.h"
 #include "se_core/thread_role.h"
 #include "se_core/world.h"
+#include "se_platform/fs.h"
 #include "se_render_core/render_list.h"
 #include "se_sim/audio_events.h"
+#include "se_sim/content_bundle.h"
+#include "se_sim/content_source.h"
 #include "se_sim/game_module.h"
 #include "se_sim/game_state.h"
 #include "se_sim/replay.h"
@@ -62,6 +65,39 @@ std::string_view TextOf(const std::vector<std::byte>& bytes) {
 
 }  // namespace
 
+class PlaySession::RecordingContent final : public ContentSource {
+ public:
+  // |scene_path|'s text is recorded under |scene_key| (both empty: none).
+  RecordingContent(const ContentSource& inner, std::string_view start_state,
+                   std::string_view scene_path, std::string_view scene_key)
+      : inner_(&inner),
+        scene_path_(scene_path.empty() ? std::string()
+                                       : fs::Normalize(scene_path)),
+        scene_key_(scene_key) {
+    bundle_.SetStartState(start_state);
+  }
+
+  [[nodiscard]] std::expected<std::string_view, Error> Text(
+      std::string_view path) const override {
+    auto text = inner_->Text(path);
+    // Keyed as se_replay reads it: the normalised path, or for the
+    // Play-start file (a per-user path) its key.
+    std::string key = fs::Normalize(path);
+    if (!scene_key_.empty() && key == scene_path_) key = scene_key_;
+    if (text) bundle_.Add(key, *text);
+    return text;
+  }
+
+  [[nodiscard]] const ContentBundle& Bundle() const noexcept { return bundle_; }
+
+ private:
+  const ContentSource* inner_;
+  std::string scene_path_;
+  std::string scene_key_;
+  // Text() is const (ContentSource); the bundle is what it served.
+  mutable ContentBundle bundle_;
+};
+
 std::string_view PlayStateName(PlayState state) noexcept {
   switch (state) {
     case PlayState::kPlaying:
@@ -85,7 +121,8 @@ PlaySession::PlaySession(ModuleInstance& instance, jobs::ForkJoinPool& pool,
 
 std::expected<std::unique_ptr<PlaySession>, Error> PlaySession::Start(
     ModuleInstance& instance, jobs::ForkJoinPool& pool, const EditorGame& game,
-    PlayStart start, TickGate* gate) {
+    PlayStart start, TickGate* gate, StateContentGate* content_gate,
+    const ContentSource* content) {
   AssertMainThread();
   const std::string_view start_state = instance.Module().start_state;
   if (start_state.empty()) {
@@ -100,6 +137,9 @@ std::expected<std::unique_ptr<PlaySession>, Error> PlaySession::Start(
   env.tick_rate = s.start_.tick_rate;
   env.world_kind = WorldKind::kPlay;
   const InlineOwnerScope owner(OnMainThread());
+  // Play pushes the one-World start state; 'Play game' the state a
+  // player's session starts in (M13: rampage's Title).
+  std::string_view first = start_state;
   if (s.kind_ == PlayKind::kPlay) {
     // The serializer round trip: the document's bytes into a fresh World.
     if (!game.load_scene) {
@@ -113,8 +153,9 @@ std::expected<std::unique_ptr<PlaySession>, Error> PlaySession::Start(
     auto world = std::make_unique<World>(instance.Registry(), std::move(desc));
     {
       const MutationGate gate_open = world->OpenGate(GateReason::kLoad);
+      // The Play-start bytes are flattened: no prefab is read.
       if (auto loaded = game.load_scene(*world, TextOf(s.start_.bytes),
-                                        s.start_.asset_root);
+                                        s.start_.asset_root, {});
           !loaded) {
         return std::unexpected(std::move(loaded.error()));
       }
@@ -129,14 +170,37 @@ std::expected<std::unique_ptr<PlaySession>, Error> PlaySession::Start(
     if (game.set_play_game_scene) {
       game.set_play_game_scene(s.start_.scene_path, s.start_.asset_root);
     }
+    const std::string_view game_start = instance.Module().game_start_state;
+    if (!game_start.empty()) first = game_start;
+    // The runtime's rules (M13): texts from the content source, every push
+    // through the content gate; what the states read is kept for the
+    // session's replay and dump (a content bundle).
+    if (content != nullptr) {
+      s.recording_ = std::make_unique<RecordingContent>(
+          *content, first, s.start_.scene_path, s.start_.scene_key);
+      env.content = s.recording_.get();
+    }
     s.states_ = std::make_unique<GameStateStack>(instance.Factory(), env);
+    s.states_->SetContentGate(content_gate);
   }
-  s.states_->Request(StackOp::kPush, start_state);
+  s.states_->Request(StackOp::kPush, first);
   s.states_->ApplyPending();
-  if (s.states_->Depth() != 1) {
-    return Fail(
-        ErrorCode::kInvalidArgument,
-        std::format("the start state '{}' could not be pushed", start_state));
+  if (const Error* error = s.states_->EnterError()) {
+    Error out = *error;
+    out.message = std::format("the start state '{}' cannot be created: {}",
+                              first, error->message);
+    return std::unexpected(std::move(out));
+  }
+  if (s.states_->RejectedCount() != 0 ||
+      (s.states_->Depth() != 1 && s.states_->Waiting() != first)) {
+    return Fail(ErrorCode::kInvalidArgument,
+                std::format("the start state '{}' could not be pushed", first));
+  }
+  if (s.states_->Waiting() == first) {
+    SE_LOG_INFO(
+        "play game: '{}' waits at the content gate (no tick before its "
+        "texts and assets are resident)",
+        first);
   }
   s.driver_.SetTickGate(gate);
   s.recorder_.Begin(
@@ -153,6 +217,30 @@ PlaySession::~PlaySession() {
 }
 
 void PlaySession::SetRunning(bool running) noexcept { play_running_ = running; }
+
+void PlaySession::CompleteBoundary() {
+  AssertMainThread();
+  if (!states_ || states_->Waiting().empty() || Faulted()) return;
+  {
+    const InlineOwnerScope owner(OnMainThread());
+    driver_.CompleteBoundary(*states_, log_);
+  }
+  FaultOnEnterError();
+}
+
+void PlaySession::FaultOnEnterError() {
+  if (!states_ || Faulted() || states_->EnterError() == nullptr) return;
+  // A state whose content did not load (M13a): the session faults as for a
+  // text that did not load; the editor goes on.
+  const Error& error = *states_->EnterError();
+  PlayFault fault;
+  fault.where = "content";
+  fault.what = std::format("state '{}' cannot be created: {} ({}:{}:{})",
+                           states_->EnterErrorState(), error.message,
+                           error.path, error.line, error.column);
+  fault.tick = LastTick();
+  Fault(std::move(fault));
+}
 
 void PlaySession::Marker(SessionOp op) {
   const InlineOwnerScope owner(OnMainThread());
@@ -221,6 +309,8 @@ int PlaySession::TickFrame(const StepPlan& plan, InputSource& input,
     Fault(std::move(info));
     return ran;
   }
+  FaultOnEnterError();
+  if (Faulted()) return ran;
   if (stepping && ran > 0) {
     state_ = PlayState::kPaused;
     SetRunning(false);
@@ -317,15 +407,30 @@ ReplayHeader PlaySession::Header() const {
   return MakeReplayHeader(start_.bytes, start_.seed, start_.tick_rate);
 }
 
+std::vector<std::byte> PlaySession::SessionStartBytes() const {
+  if (!recording_ || recording_->Bundle().Empty()) return start_.bytes;
+  return recording_->Bundle().Write();
+}
+
+std::size_t PlaySession::LogEntries() const noexcept {
+  const std::size_t texts =
+      recording_ ? recording_->Bundle().Texts().size() : 0;
+  return log_.Applied().size() + log_.PendingCount() + texts;
+}
+
 std::vector<std::byte> PlaySession::DumpBytes() const {
+  const std::vector<std::byte> start = SessionStartBytes();
   ReplayRecorder file;
-  file.Begin(Header(), start_.bytes);
+  file.Begin(MakeReplayHeader(start, start_.seed, start_.tick_rate), start);
   file.RecordSession(log_);
   return file.Finish();
 }
 
 std::vector<std::byte> PlaySession::FinishReplay() {
   if (!recorder_.Active()) return {};
+  if (recording_ && !recording_->Bundle().Empty()) {
+    recorder_.SetStart(recording_->Bundle().Write());
+  }
   recorder_.RecordSession(log_);
   return recorder_.Finish();
 }

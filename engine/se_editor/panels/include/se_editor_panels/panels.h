@@ -8,14 +8,22 @@
 // or PlayEdits (Play), via EditSink. In Play.Faulted every panel draws the
 // frozen World read-only.
 //
-//   Hierarchy        every entity (name, Guid, parent), in spawn order, with
-//                    a filter; a click selects (EditorCommands::Select,
-//                    ctrl-click toggles); create and destroy commands.
+//   Hierarchy        every entity (name, Guid, prefab, parent), in spawn
+//                    order, with a filter; a click selects
+//                    (EditorCommands::Select, ctrl-click toggles); create
+//                    and destroy commands. The prefab column shows the
+//                    reference's file name ("-" for none; no column in a
+//                    prefab document) and marks an instance with overrides
+//                    ("*", Edit mode).
 //   Inspector        the selection's components: the reflection drawer and
 //                    the ported custom drawers (component_drawers.h), the
 //                    Path's points and its waypoint canvas window (the
 //                    legacy "WayPoint Editor", waypoint_canvas.h,
-//                    path_commands.h); add and remove a component.
+//                    path_commands.h); add and remove a component (the
+//                    removal takes what derives from it; what the game keeps
+//                    has no close button). On a prefab instance: the
+//                    prefab, a marker on each component that differs from
+//                    the prefab baseline, and "Revert to prefab".
 //   Viewport         the World through an editor camera into an M7
 //                    ViewportTarget shown with ImGui::Image through
 //                    TextureIds; right or middle drag pans, the wheel zooms
@@ -89,14 +97,29 @@ class HierarchyPanel final : public Panel, public Probed {
   [[nodiscard]] const std::vector<Guid>& Rows() const noexcept { return rows_; }
   // How many of them the last Draw submitted.
   [[nodiscard]] std::size_t RowsDrawn() const noexcept { return drawn_; }
+  // What the last Draw showed in a drawn row's prefab column ("-", the
+  // file name, with " *" for an instance with overrides); empty when the
+  // row was not drawn or there was no prefab column.
+  [[nodiscard]] std::string PrefabCell(const Guid& guid) const;
 
  private:
   void DrawRow(const PanelContext& context, EditSink& sink, const Guid& row,
-               entt::entity entity);
+               entt::entity entity, bool prefab_column);
+  // Whether the instance |guid| has overrides (cached per document
+  // revision; Edit mode only).
+  [[nodiscard]] bool HasOverrides(const PanelContext& context,
+                                  const Guid& guid);
 
   std::string filter_;
   std::vector<Guid> rows_;
   std::size_t drawn_ = 0;
+  std::map<Guid, std::string> cells_;
+  // The overrides cache: valid for one document's revision.
+  const World* cache_world_ = nullptr;
+  std::uint64_t cache_document_ = 0;
+  std::uint64_t cache_revision_ = 0;
+  std::map<Guid, bool> overrides_;
+  PrefabBaselines baselines_;
 };
 
 class InspectorPanel final : public Panel, public Probed {
@@ -107,6 +130,11 @@ class InspectorPanel final : public Panel, public Probed {
   // Opens the waypoint canvas of |guid| (the "Set New Path" button).
   void OpenCanvas(const Guid& guid) { canvases_[guid].open = true; }
   [[nodiscard]] std::optional<CanvasView> CanvasViewOf(const Guid& guid) const;
+  // The components the last Draw marked as differing from the selected
+  // instance's prefab (empty for an entity that is no instance).
+  [[nodiscard]] const std::vector<std::string>& Overridden() const noexcept {
+    return overridden_;
+  }
 
  private:
   struct Canvas {
@@ -116,6 +144,11 @@ class InspectorPanel final : public Panel, public Probed {
 
   void DrawEntity(const PanelContext& context, EditSink& sink,
                   entt::entity entity, Guid guid);
+  // The selected instance's prefab baseline: one per prefab and recorded
+  // text (PrefabBaselines; null: not an instance, or the game has no
+  // baseline).
+  [[nodiscard]] const EntityJson* Baseline(const PanelContext& context,
+                                           Guid guid);
   void DrawComponent(const DrawTarget& target, const ComponentInfo& info);
   void DrawPath(const DrawTarget& target);
   void DrawCanvasWindow(const DrawTarget& target, const PanelContext& context,
@@ -123,9 +156,13 @@ class InspectorPanel final : public Panel, public Probed {
 
   ReflectionDrawer reflection_;
   StatsDrawer stats_;
-  EffectSourceDrawer effects_{&stats_};
+  EffectSourceDrawer effects_;
   TextEdits text_;
   std::map<Guid, Canvas> canvases_;
+  // The baseline cache: one per prefab and recorded text.
+  PrefabBaselines baselines_;
+  // The components the last Draw marked as differing from the prefab.
+  std::vector<std::string> overridden_;
 };
 
 class ViewportPanel final : public Panel, public Probed {
@@ -237,30 +274,39 @@ class StressPanel final : public Panel, public Probed {
   }
   void Draw(const PanelContext& context) override;
 
-  // Spawns still to submit in Edit mode (one batch per frame).
-  [[nodiscard]] std::size_t Pending() const noexcept;
   [[nodiscard]] std::uint32_t Presses() const noexcept { return press_; }
   void SetAmount(int amount) noexcept { amount_ = amount; }
   void SetPerTick(int per_tick) noexcept { per_tick_ = per_tick; }
 
  private:
-  struct Job {
-    std::vector<StressSpawn> spawns;
-    std::vector<SpawnBatch> batches;
-    std::size_t next = 0;
-    std::string label;
-  };
-
   void Generate(const PanelContext& context, EditSink& sink);
   void RemoveEnemies(const PanelContext& context, EditSink& sink);
-  void SubmitBatch(EditSink& sink, Job& job, std::size_t batch,
-                   Tick apply_before);
 
   int amount_ = 60;
   int per_tick_ = static_cast<int>(kStressDefaultPerTick);
   std::uint32_t press_ = 0;
-  std::optional<Job> job_;
 };
+
+// The create-entity commands of an Edit-mode press, as one CommandGroup
+// labelled |label| (one undo step, submitted in the frame of the press).
+[[nodiscard]] std::unique_ptr<EditorCommand> StressPressGroup(
+    std::string label, const std::vector<StressSpawn>& spawns);
+
+// The spawns of press |press| of |count| enemies in |world|'s arena (its
+// ArenaBounds, else 1920 x 1080), with |world|'s seed.
+[[nodiscard]] std::vector<StressSpawn> PlanStressFor(const World& world,
+                                                     std::uint32_t press,
+                                                     std::uint32_t count);
+
+// The first press whose Guids |world| does not hold (an earlier session's
+// saved spawns are skipped).
+[[nodiscard]] std::uint32_t FreeStressPress(const World& world,
+                                            std::uint32_t from = 0);
+
+// An Edit-mode press of |count| enemies as the panel makes it (the
+// script's stress-press): one CommandGroup "Generate N enemies".
+[[nodiscard]] std::unique_ptr<EditorCommand> MakeStressPress(
+    const World& world, std::uint32_t count);
 
 class SceneSettingsPanel final : public Panel, public Probed {
  public:

@@ -15,16 +15,22 @@ se_add_module(se_editor KIND STATIC
   SOURCES
     src/commands.cc
     src/dialog_mailbox.cc
+    src/documents.cc
     src/edit_document.cc
+    src/edit_queue.cc
     src/editor.cc
     src/editor_actions.cc
+    src/editor_documents.cc
     src/editor_dump.cc
+    src/editor_reload.cc
+    src/editor_script.cc
     src/editor_ui.cc
     src/json_value.cc
     src/log_view.cc
     src/play_fault_boundary.cc
     src/play_session.cc
     src/play_states.cc
+    src/prefab_commands.cc
     src/recovery.cc
     src/selection.cc
   PUBLIC_DEPS

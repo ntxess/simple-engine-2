@@ -1,0 +1,18 @@
+# A stat typed by name (M11b, headless): the drawer's command group
+# (a StatNameCommand and a SetComponentCommand) puts the name in the World's
+# StatNames (undo takes it away, redo puts it back) and the file has it by
+# name. The document is a copy of the sandbox (--scene-copy).
+expect-stat-name Armor no
+stat-name 5a4db0c5-0000-4000-8000-000000000001 Armor 7
+wait-frames 1
+expect-stat-name Armor yes
+expect-undo-label Add stat Armor
+undo
+expect-stat-name Armor no
+expect-hash document initial
+expect-content-hash document initial
+redo
+expect-stat-name Armor yes
+save
+wait-saves
+quit discard

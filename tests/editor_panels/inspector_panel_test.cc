@@ -32,6 +32,7 @@
 #include "se_editor_panels/panel_support.h"
 #include "se_editor_panels/panels.h"
 #include "se_editor_panels/path_commands.h"
+#include "se_editor_panels/stat_name_command.h"
 #include "se_editor_panels/waypoint_canvas.h"
 #include "support/test_roles.h"
 
@@ -360,20 +361,38 @@ TEST_CASE("The Stats drawer edits a stat by name, adds and drops stats",
     REQUIRE(rampage::FindStat(stats, rampage::kStatSpeed) == nullptr);
   }
 
-  SECTION("a new stat is typed, then added with +") {
+  SECTION("a new stat is typed, then added with +: one group with its name") {
     ui.Click(inspector, context, Center(probe, "Stats.new.name"));
     ui.Type("Armor");
     ui.Frame(inspector, context);
     ui.Click(inspector, context, Center(probe, "Stats.new.add"));
+    // {StatNameCommand, SetComponentCommand}: one undo step (M11b).
     REQUIRE(commands.commands.size() == 1);
+    REQUIRE(commands.commands[0]->Kind() == CommandKind::kGroup);
+    const auto& group = static_cast<const CommandGroup&>(*commands.commands[0]);
+    REQUIRE(group.size() == 2);
+    REQUIRE(group.At(0).Kind() == CommandKind::kGame);
+    REQUIRE(static_cast<const StatNameCommand&>(group.At(0)).StatName() ==
+            "Armor");
+    REQUIRE(group.At(1).Kind() == CommandKind::kSetComponent);
+    REQUIRE_FALSE(HasStatName(w.CGet(), "Armor"));
     REQUIRE(commands.ApplyPending(w.Get()));
     const auto& stats = w.CGet().CReg().get<rampage::Stats>(e);
     REQUIRE(rampage::FindStat(stats, rampage::StatIdOf("Armor")) != nullptr);
-    // The typed name labels the new stat although the World's names do not
-    // have it.
+    // The name is the World's now: the drawer labels the stat with it.
+    REQUIRE(HasStatName(w.CGet(), "Armor"));
     probe.Clear();
     ui.Frame(inspector, context);
     REQUIRE(probe.Find("Stats.value.Armor").has_value());
+    // Undo takes the name away with the stat.
+    {
+      const MutationGate gate = w.Get().OpenGate(GateReason::kEditorCommand);
+      REQUIRE(commands.commands[0]->Revert(w.Get()).has_value());
+    }
+    REQUIRE_FALSE(HasStatName(w.CGet(), "Armor"));
+    REQUIRE(HasStatName(w.CGet(), "HP"));
+    REQUIRE(rampage::FindStat(w.CGet().CReg().get<rampage::Stats>(e),
+                              rampage::StatIdOf("Armor")) == nullptr);
   }
 }
 
@@ -420,14 +439,20 @@ TEST_CASE("The effect drawer's stat is typed as text and set on Enter",
   ui.Key(ImGuiKey_Enter, false);
   ui.Frame(inspector, context);
   REQUIRE(commands.commands.size() == 1);
-  const auto& set =
-      static_cast<const SetComponentCommand&>(*commands.commands.front());
+  // The typed name goes with the edit (M11b): {StatNameCommand, set}.
+  REQUIRE(commands.commands.front()->Kind() == CommandKind::kGroup);
+  const auto& group =
+      static_cast<const CommandGroup&>(*commands.commands.front());
+  REQUIRE(group.size() == 2);
+  REQUIRE(group.At(0).Kind() == CommandKind::kGame);
+  const auto& set = static_cast<const SetComponentCommand&>(group.At(1));
   REQUIRE(set.Component() == "EffectSource");
   REQUIRE(set.Before() == *before);
   REQUIRE(commands.ApplyPending(w.Get()));
   const auto& source = w.CGet().CReg().get<rampage::EffectSource>(e);
   REQUIRE(source.effects.front().stat == rampage::StatIdOf("Speed"));
   REQUIRE(source.effects.front().value == -10.0F);
+  REQUIRE(HasStatName(w.CGet(), "Speed"));
 }
 
 // R9 of the M10-M14 review: in the docked layout the Inspector is narrow,

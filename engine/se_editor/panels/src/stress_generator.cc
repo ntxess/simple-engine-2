@@ -67,6 +67,9 @@ StressSpec DefaultStressSpec(float width, float height) {
       // What rampage's FinishLoad adds to a loaded entity.
       {"PathCache", "{}"},
       {"ActiveEffects", "{}"},
+      // The prefab link (M11b): a spawn is an instance of the enemy
+      // prefab, which these components are.
+      {"PrefabInstance", std::format(R"({{"prefab":"{}"}})", kStressPrefab)},
   };
   return spec;
 }

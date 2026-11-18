@@ -89,6 +89,35 @@ catch_discover_tests(se_platform_tests
     ENVIRONMENT SE_NO_MESSAGE_BOX=1
     TIMEOUT 60)
 
+# M13a (test names start with "runtime."): the App with the content test
+# module (tests/support/content_test_module.h) headless: the start state
+# and the content gate, a changed text and kAssetSwap, focus loss through
+# the SessionLog, the empty stack and a state's failed text. Label unit.
+se_add_module(se_runtime_content_tests KIND EXECUTABLE
+  SOURCES
+    runtime_content_test.cc
+    ../support/no_dialogs_listener.cc
+    ../support/tracy_inert_listener.cc
+  PRIVATE_DEPS
+    se_core
+    se_platform
+    se_platform_test_support
+    se_content_test_support
+    se_runtime
+    se_sim
+    Catch2::Catch2WithMain
+  TEST)
+target_compile_definitions(se_runtime_content_tests PRIVATE
+  SE_TEST_OUT_DIR="${_se_platform_out}")
+catch_discover_tests(se_runtime_content_tests
+  DISCOVERY_MODE PRE_TEST
+  TEST_PREFIX "runtime."
+  ADD_TAGS_AS_LABELS
+  PROPERTIES
+    LABELS unit
+    ENVIRONMENT SE_NO_MESSAGE_BOX=1
+    TIMEOUT 120)
+
 # A failed SDL assertion prints and aborts, never opening SDL's dialog
 # (ADR-070): with a dialog the test would hang until its timeout. CTest
 # counts a signal as a failure whatever the output, so run_app.py checks
@@ -100,7 +129,8 @@ add_test(NAME platform.sdl_assertion_aborts
 set_tests_properties(platform.sdl_assertion_aborts PROPERTIES
   LABELS unit TIMEOUT 60)
 
-# The rampage executable (label desktop): it runs the sandbox for 300
+# The rampage executable (label desktop): it runs the sandbox
+# (--start-state sandbox: M13b's rampage starts at the Title) for 300
 # presented frames and quits through the two-phase quit, and a failure at
 # every boot step exits with SDL_APP_FAILURE, no app state and no engine
 # thread left (scripts/ci.ps1 -Desktop runs these in msvc-dev and, for ASan,
@@ -121,8 +151,21 @@ if(TARGET rampage)
             --expect "shutdown order: input-sampler, event-filter [(]4[)], worlds [(]6[)], audio [(]7[)], bg-lane [(]8[)], vblank-sampler [(]9[)], asset-scopes [(]10[)]"
             --reject "SE_ASSERT failed|ERROR|E t=[0-9]+ | [EF] [a-z-]+ t=[0-9]+ "
             -- $<TARGET_FILE:rampage> --frames 300 --no-activate
-            --pref-dir "${_se_rampage_pref}")
+            --pref-dir "${_se_rampage_pref}" -- --start-state sandbox)
   set_tests_properties(rampage.frames_300 PROPERTIES
+    LABELS "desktop;gpu;rampage" TIMEOUT 120)
+  # M13b: once more from the Title (rampage's default start state), whose
+  # scene loads as a text through the lane before its World steps.
+  add_test(NAME rampage.frames_300_title
+    COMMAND Python3::Interpreter "${_se_run_app}" --expect-exit 0
+            --expect "start state 'title' pushed at boot"
+            --expect "state 'title': its 6 assets are resident after [0-9.]+ ms [(]0 failed: placeholders; 1 texts[)]"
+            --expect "flow: entered 'title' [(]assets/scenes/title[.]scene[.]json: 1 entities[)]"
+            --expect "shutdown [(]success[)]: [0-9]+ iterates, 300 presented frames, ran [1-9][0-9][0-9]+ ticks"
+            --reject "SE_ASSERT failed|ERROR|E t=[0-9]+ | [EF] [a-z-]+ t=[0-9]+ "
+            -- $<TARGET_FILE:rampage> --frames 300 --no-activate
+            --pref-dir "${_se_rampage_pref}_title")
+  set_tests_properties(rampage.frames_300_title PROPERTIES
     LABELS "desktop;gpu;rampage" TIMEOUT 120)
   # The integration (ADR-089): rampage quits with a Durable save in flight
   # through the lane on the throttled-disk injector, and the quit waits for
@@ -166,6 +209,32 @@ if(TARGET rampage)
       set_tests_properties(input.pushed_keys_replay_${_se_mode} PROPERTIES
         LABELS "${_se_mode_labels}" TIMEOUT 120)
     endforeach()
+  endif()
+  # M13a: the runtime's quit durability with rampage headless and its
+  # --record replay as the Durable save (quit_durability_test.py; the
+  # --fs-faults injector is a test hook, so not in Release), and the
+  # shutdown stress: 100 headless runs quitting by --frames, a pushed
+  # SDL_EVENT_QUIT and SDL_EVENT_TERMINATING (label slow).
+  if(NOT CMAKE_BUILD_TYPE STREQUAL "Release")
+    foreach(_se_scenario replay_throttled deadline_after_drain
+                         failed_durable_save)
+      add_test(NAME platform.quit_durability.${_se_scenario}
+        COMMAND Python3::Interpreter
+                "${CMAKE_CURRENT_SOURCE_DIR}/quit_durability_test.py"
+                --rampage $<TARGET_FILE:rampage>
+                --se-replay $<TARGET_FILE:se_replay>
+                --work "${_se_platform_out}/quit_durability_${_se_scenario}"
+                --scenario ${_se_scenario})
+      set_tests_properties(platform.quit_durability.${_se_scenario}
+        PROPERTIES LABELS "unit;rampage" TIMEOUT 120)
+    endforeach()
+    add_test(NAME platform.shutdown_stress
+      COMMAND Python3::Interpreter
+              "${CMAKE_CURRENT_SOURCE_DIR}/shutdown_stress_test.py"
+              --rampage $<TARGET_FILE:rampage>
+              --work "${_se_platform_out}/shutdown_stress")
+    set_tests_properties(platform.shutdown_stress PROPERTIES
+      LABELS "slow;rampage" TIMEOUT 3600)
   endif()
   if(NOT CMAKE_BUILD_TYPE STREQUAL "Release")
     foreach(_se_step RANGE 1 10)

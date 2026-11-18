@@ -1,6 +1,17 @@
-# 'Play game': the module's own GameStateStack from its start state, on the
-# document as Play serialized it; Pause, Step and Stop as for Play (M10a).
+# 'Play game': the module's own GameStateStack from its game start state
+# (rampage's Title), its states loaded through the content gate as the
+# runtime's are, the Gameplay state on the document as Play serialized it;
+# Pause, Step and Stop as for Play (M10a; M11/M13 integration).
 play-game
+wait-top-state title
+wait-ticks 30
+expect-state playing
+expect-entities play 1
+# Enter at the Title: the Gameplay state, on the Play-start bytes.
+push-key enter
+wait-frames 2
+push-key enter up
+wait-top-state gameplay
 wait-ticks 120
 expect-state playing
 expect-entities play 17

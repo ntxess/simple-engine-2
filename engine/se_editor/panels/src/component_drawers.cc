@@ -26,6 +26,7 @@
 #include "se_core/world.h"
 #include "se_editor/commands.h"
 #include "se_editor_panels/panel_support.h"
+#include "se_editor_panels/stat_name_command.h"
 
 namespace se::editor {
 namespace {
@@ -109,6 +110,26 @@ void SubmitValue(const DrawTarget& target, std::string_view component,
                  std::string before, const auto& after) {
   target.sink->Submit(SetFromValue(*target.world, target.guid, component,
                                    std::move(before), after));
+}
+
+// Submits the set of |component| from |before| to |after|'s JSON with the
+// stat names typed in the edit (|names|): one undo step (ADR-119).
+template <class T>
+void SubmitWithNames(const DrawTarget& target, std::string_view component,
+                     std::string before, const T& after,
+                     const std::vector<std::string>& names) {
+  auto set = SetFromValue(*target.world, target.guid, component,
+                          std::move(before), after);
+  if (!set) {
+    EditSink::ReportError(set.error());
+    return;
+  }
+  if (names.empty()) {
+    target.sink->Submit(std::move(*set));
+    return;
+  }
+  target.sink->Submit(WithStatNames(std::format("Add stat {}", names.front()),
+                                    names, std::move(*set)));
 }
 
 }  // namespace
@@ -279,15 +300,10 @@ void ReflectionDrawer::Draw(const DrawTarget& target,
       target.guid, std::string(info.name), std::move(*before), *after));
 }
 
-std::string StatName(const World& world, rampage::StatId id,
-                     const std::map<rampage::StatId, std::string>* typed) {
+std::string StatName(const World& world, rampage::StatId id) {
   if (const auto* names = world.CReg().ctx().find<rampage::StatNames>()) {
     const std::string_view name = names->Name(id);
     if (!name.empty()) return std::string(name);
-  }
-  if (typed != nullptr) {
-    const auto it = typed->find(id);
-    if (it != typed->end()) return it->second;
   }
   return std::format("#{}", id);
 }
@@ -300,6 +316,7 @@ void StatsDrawer::Draw(const DrawTarget& target) {
   if (!before) return;
   rampage::Stats stats = *current;
   bool changed = false;
+  std::vector<std::string> names;
 
   ImGui::BeginDisabled(target.read_only);
   const float divider = ImGui::GetContentRegionAvail().x / 3.0F;
@@ -309,7 +326,7 @@ void StatsDrawer::Draw(const DrawTarget& target) {
   std::optional<std::size_t> discard;
   for (std::size_t i = 0; i < stats.values.size(); ++i) {
     rampage::StatValue& stat = stats.values[i];
-    const std::string name = StatName(world, stat.id, &typed_names_);
+    const std::string name = StatName(world, stat.id);
     ImGui::PushID(static_cast<int>(stat.id));
     ImGui::TextUnformatted(name.c_str());
     ImGui::SameLine(divider);
@@ -340,7 +357,7 @@ void StatsDrawer::Draw(const DrawTarget& target) {
   ImGui::SameLine();
   if (ImGui::SmallButton("+") && !new_name_.empty()) {
     const rampage::StatId id = rampage::StatIdOf(new_name_);
-    typed_names_[id] = new_name_;
+    names.push_back(new_name_);
     rampage::SetStat(stats, id, new_value_);
     new_name_.clear();
     new_value_ = 0.0F;
@@ -348,7 +365,9 @@ void StatsDrawer::Draw(const DrawTarget& target) {
   }
   Probe(target, "Stats.new.add");
   ImGui::EndDisabled();
-  if (changed) SubmitValue(target, "Stats", std::move(*before), stats);
+  if (changed) {
+    SubmitWithNames(target, "Stats", std::move(*before), stats, names);
+  }
 }
 
 void EffectSourceDrawer::Draw(const DrawTarget& target) {
@@ -361,8 +380,7 @@ void EffectSourceDrawer::Draw(const DrawTarget& target) {
   if (!before) return;
   rampage::EffectSource source = *current;
   bool changed = false;
-  std::map<rampage::StatId, std::string>* typed =
-      names_ != nullptr ? &names_->typed_names_ : nullptr;
+  std::vector<std::string> names;
 
   ImGui::BeginDisabled(target.read_only);
   const float column = ImGui::GetContentRegionAvail().x / 6.0F;
@@ -394,9 +412,9 @@ void EffectSourceDrawer::Draw(const DrawTarget& target) {
     Probe(target, key + "kind");
     ImGui::SameLine(column + 10.0F);
     if (const std::optional<std::string> stat = target.text->Input(
-            "##stat", StatName(world, effect.stat, typed), column)) {
+            "##stat", StatName(world, effect.stat), column)) {
       effect.stat = rampage::StatIdOf(*stat);
-      if (typed != nullptr) (*typed)[effect.stat] = *stat;
+      names.push_back(*stat);
       changed = true;
     }
     Probe(target, key + "stat");
@@ -448,7 +466,7 @@ void EffectSourceDrawer::Draw(const DrawTarget& target) {
     rampage::EffectDef effect;
     effect.kind = static_cast<rampage::EffectKind>(new_kind_);
     effect.stat = rampage::StatIdOf(new_stat_);
-    if (typed != nullptr) (*typed)[effect.stat] = new_stat_;
+    names.push_back(new_stat_);
     effect.value = new_value_;
     effect.duration_ms = new_duration_ms_;
     effect.interval_ms = new_interval_ms_;
@@ -478,7 +496,9 @@ void EffectSourceDrawer::Draw(const DrawTarget& target) {
   if (ImGui::Checkbox("Ready on start", &source.ready_on_start)) changed = true;
   Probe(target, "EffectSource.ready_on_start");
   ImGui::EndDisabled();
-  if (changed) SubmitValue(target, "EffectSource", std::move(*before), source);
+  if (changed) {
+    SubmitWithNames(target, "EffectSource", std::move(*before), source, names);
+  }
 }
 
 void DrawTeam(const DrawTarget& target) {

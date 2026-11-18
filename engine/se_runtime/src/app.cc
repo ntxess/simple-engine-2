@@ -22,6 +22,7 @@
 #include <format>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -74,6 +75,7 @@
 #include "se_runtime/sound_assets.h"
 #include "se_runtime/user_settings.h"
 #include "se_sim/audio_events.h"
+#include "se_sim/content_bundle.h"
 #include "se_sim/game_module.h"
 #include "se_sim/game_state.h"
 #include "se_sim/replay.h"
@@ -234,6 +236,10 @@ ModuleInstance* App::GameInstance() noexcept {
 
 jobs::ForkJoinPool* App::GamePool() noexcept {
   return game_ ? &game_->pool : nullptr;
+}
+
+const GameStateStack* App::GameStates() const noexcept {
+  return game_ ? &game_->states : nullptr;
 }
 
 const GameStateStack& App::ActiveStates() const {
@@ -399,6 +405,25 @@ std::expected<void, Error> App::Boot() {
   if (auto assets = StartAssets(); !assets) {
     return assets;
   }
+  // M13: --fs-faults (test builds): a throttled disk or a held destination
+  // for every save of the run (the quit durability tests).
+  if (kRuntimeTestHooks &&
+      (config_.fs_write_delay_ms > 0 || config_.fs_read_delay_ms > 0 ||
+       config_.fs_rename_busy_ms > 0)) {
+    if constexpr (!fs::kFsFaultHooks) {
+      SE_LOG_ERROR("--fs-faults: the se::fs injector is compiled out");
+    } else {
+      fs::SetFsFaults(
+          fs::FsFaults{.write_step_delay_ms = config_.fs_write_delay_ms,
+                       .read_step_delay_ms = config_.fs_read_delay_ms,
+                       .rename_busy_ms = config_.fs_rename_busy_ms});
+      SE_LOG_INFO(
+          "--fs-faults: {} ms per write step, {} ms per read step, renames "
+          "refused for {} ms",
+          config_.fs_write_delay_ms, config_.fs_read_delay_ms,
+          config_.fs_rename_busy_ms);
+    }
+  }
 
   // 10. The game: the settings file, then registry, storages, states.
   if (auto ok = BootStep(10); !ok) {
@@ -421,11 +446,16 @@ std::expected<void, Error> App::Boot() {
   quit_.SetRecoveryHook(setup_.recovery);
   quit_.SetDeadlineHook([this] {
     if (helpers_) helpers_->StartShutdownDeadline();
+    // M13: the quit durability tests check that it starts only now.
+    SE_LOG_INFO("shutdown deadline started: the quit drain is over");
   });
   for (QuitProvider* provider : setup_.quit_providers) {
     quit_.AddProvider(provider);
   }
-  // Durable lane jobs keep the quit pending until they are done.
+  // Durable lane jobs keep the quit pending until they are done. A failed
+  // one cancels the editor's quit (its document stays dirty, ADR-089); the
+  // game's quit goes on (M13 decision 5).
+  assets_->LaneQuit().SetCancelOnFailure(setup_.extension != nullptr);
   quit_.AddProvider(&assets_->QuitWaiter());
   // The pacer: the present port and the vblank sampler; it chooses the
   // mode (Standard until the sampler has measured, when Paced is possible).
@@ -497,6 +527,8 @@ std::expected<void, Error> App::StartGame() {
   StateEnv env;
   env.seed = setup_.seed;
   env.tick_rate = setup_.tick_rate;
+  // M13: the states read their scenes and prefabs from the lane's texts.
+  env.content = assets_.get();
   jobs::ForkJoinPool::Config pool_config;
   pool_config.max_workers = cpu_.fork_pool_size;
   // M14: the threaded pool's workers come from se_os, and only start when a
@@ -537,26 +569,37 @@ std::expected<void, Error> App::StartGame() {
       return configured;
     }
   }
-  const std::string_view start = setup_.module->start_state;
+  // M13: GameSetup::start_state, else the module's game_start_state, else
+  // its start_state; the AssetRuntime is the content gate.
+  start_state_ = std::string(StartStateId());
+  const std::string_view start = start_state_;
   if (start.empty()) {
     return Fail(ErrorCode::kInvalidArgument,
                 std::string(setup_.module->name) + " has no start state");
   }
-  if (setup_.push_start_state) {
-    const InlineOwnerScope owner(OnMainThread());
-    game_->states.Request(StackOp::kPush, start);
-    game_->states.ApplyPending();
-  }
-  if (setup_.push_start_state &&
-      (game_->states.Depth() != 1 || game_->states.RejectedCount() != 0)) {
+  if (!game_->instance.Factory().Contains(start)) {
     return Fail(ErrorCode::kInvalidArgument,
-                std::format("the start state '{}' could not be pushed", start));
+                std::format("the start state '{}' is not a state of {}", start,
+                            setup_.module->name));
   }
+  game_->states.SetContentGate(assets_.get());
+  assets_->SetTextSwapListener([this](std::string_view path,
+                                      std::uint64_t hash) {
+    AssertMainThread();
+    // A kAssetSwap entry against the tick before which the state that
+    // loads it is created (se_replay's bundle source selects by it).
+    const Tick next = game_->driver.NextTick();
+    game_->session.AddScheduled(
+        MakeAssetSwap(next, ContentPathGuid(path), hash));
+    SE_LOG_INFO("session log: kAssetSwap of {} (hash {:016x}) before tick {}",
+                path, hash, next);
+  });
   // --record: every tick's InputFrame (edges and their sources included)
   // and hash, written at shutdown (M8). The session header (M12) carries
   // the same header for replays from a dump.
   std::vector<std::byte> start_bytes;
   if (setup_.replay_start) start_bytes = setup_.replay_start(paths_);
+  start_bytes_ = start_bytes;
   const ReplayHeader replay_header =
       MakeReplayHeader(start_bytes, setup_.seed, setup_.tick_rate);
   if (!config_.record_path.empty()) {
@@ -576,11 +619,129 @@ std::expected<void, Error> App::StartGame() {
   session.start_tick = game_->driver.NextTick();
   session.first_frame = integration::DumpInputRing().Head();
   integration::DumpSessionHeader().Begin(session);
-  // The start state's scope requests its assets now; no tick runs until
-  // they are resident (M9).
+  // The start state, last: the gate creates its scope, which requests its
+  // assets now; it is created once they are resident (M13), and no tick
+  // runs before (M9).
+  if (setup_.push_start_state) {
+    const InlineOwnerScope owner(OnMainThread());
+    game_->states.Request(StackOp::kPush, start);
+    game_->states.ApplyPending();
+  }
+  if (setup_.push_start_state && game_->states.EnterError() != nullptr) {
+    // A boot error: the start state's content did not load (M13a).
+    return Fail(ErrorCode::kParse, *StateContentFault());
+  }
+  if (setup_.push_start_state &&
+      (game_->states.RejectedCount() != 0 ||
+       (game_->states.Depth() != 1 && game_->states.Waiting() != start))) {
+    return Fail(ErrorCode::kInvalidArgument,
+                std::format("the start state '{}' could not be pushed", start));
+  }
+  if (setup_.push_start_state && game_->states.Waiting() == start) {
+    SE_LOG_INFO(
+        "start state '{}' pushed at boot: it is created once its texts and "
+        "assets are resident (no tick before)",
+        start);
+  }
   game_->driver.SetTickGate(assets_.get());
   assets_->BeginFrame(game_->states);
+  // M13: the game's dumps carry the session's replay file (ADR-111's
+  // stream); the editor attaches its own Play session's.
+  if (!setup_.extension) SyncSessionDump();
   return {};
+}
+
+std::optional<std::string> App::StateContentFault() const {
+  // A text that did not load (the state was never created), or a state
+  // whose OnEnter could not load what it read (it was taken off again).
+  if (assets_ && assets_->StateError() != nullptr) {
+    const Error& error = *assets_->StateError();
+    return std::format("state '{}' cannot be created: {} ({}:{}:{})",
+                       assets_->StateErrorState(), error.message, error.path,
+                       error.line, error.column);
+  }
+  if (game_ && game_->states.EnterError() != nullptr) {
+    const Error& error = *game_->states.EnterError();
+    return std::format("state '{}' cannot be created: {} ({}:{}:{})",
+                       game_->states.EnterErrorState(), error.message,
+                       error.path, error.line, error.column);
+  }
+  return std::nullopt;
+}
+
+std::string_view App::StartStateId() const noexcept {
+  if (!setup_.start_state.empty()) return setup_.start_state;
+  if (!setup_.module->game_start_state.empty()) {
+    return setup_.module->game_start_state;
+  }
+  return setup_.module->start_state;
+}
+
+std::vector<std::byte> App::SessionStartBytes() const {
+  if (!assets_) return start_bytes_;
+  // The scene file, unless the states loaded a text other than it: then
+  // the content bundle of every text they loaded (M13).
+  const std::string_view start(
+      reinterpret_cast<const char*>(start_bytes_.data()), start_bytes_.size());
+  const ContentBundle& texts = assets_->LoadedTexts();
+  const bool more = std::ranges::any_of(
+      texts.Texts(),
+      [start](const ContentText& text) { return text.text != start; });
+  if (!more) return start_bytes_;
+  ContentBundle bundle = texts;
+  bundle.SetStartState(start_state_);
+  return bundle.Write();
+}
+
+void App::SyncSessionDump() {
+  if (!game_) return;
+  const std::size_t entries =
+      game_->session.Applied().size() + game_->session.PendingCount();
+  const std::size_t texts = assets_ ? assets_->LoadedTexts().Texts().size() : 0;
+  if (session_stream_attached_ && entries == session_stream_entries_ &&
+      texts == session_stream_texts_) {
+    return;
+  }
+  // The session's replay file without frames: the ring and the session
+  // header carry those (ADR-111).
+  const std::vector<std::byte> start = SessionStartBytes();
+  ReplayRecorder file;
+  file.Begin(MakeReplayHeader(start, setup_.seed, setup_.tick_rate), start);
+  file.RecordSession(game_->session);
+  const std::vector<std::byte> bytes = file.Finish();
+  if (auto attached = session_stream_.Attach(bytes); !attached) {
+    SE_LOG_WARN("the session's dump stream: {}", attached.error().message);
+  }
+  session_stream_attached_ = true;
+  session_stream_entries_ = entries;
+  session_stream_texts_ = texts;
+}
+
+void App::OnFocusLost() {
+  if (setup_.extension || !game_ || !booted_ || !setup_.on_focus_lost) return;
+  if (game_->states.Depth() == 0) return;
+  const std::string top(game_->states.TopId());
+  const std::optional<StateCommand> command = setup_.on_focus_lost(top);
+  if (!command) {
+    SE_LOG_DEBUG("focus lost on '{}': the game queues no state command", top);
+    return;
+  }
+  const Tick next = game_->driver.NextTick();
+  const InlineOwnerScope owner(OnMainThread());
+  // Applied only if |top| is still on top when it applies: a World's own
+  // request (Escape's Pause, a death's GameOver) of the same tick applies
+  // first (review fix F6).
+  game_->session.Enqueue(
+      MakeGameStateCommand(next, command->op, command->state_id, top), next,
+      game_->states);
+  SE_LOG_INFO(
+      "focus lost on '{}': GameState command {} '{}' logged before tick {} "
+      "(it applies if '{}' is still on top then)",
+      top,
+      command->op == StackOp::kPush
+          ? "push"
+          : (command->op == StackOp::kReplace ? "replace" : "pop"),
+      command->state_id, next, top);
 }
 
 std::expected<void, Error> App::StartAssets() {
@@ -595,6 +756,8 @@ std::expected<void, Error> App::StartAssets() {
     assets.trace_capacity = 1U << 18;
   }
   assets.state_assets = setup_.state_assets;
+  // M13: the files a loaded text needs too (a scene's prefabs).
+  assets.text_dependencies = setup_.text_dependencies;
   // The sound table: its files are every state's default sounds, decoded
   // on the lane (ADR-087). Without it the game runs silent, as in M8; with
   // --audio none no sound is requested, decoded or waited for.
@@ -757,6 +920,17 @@ void App::BeginAudioFrame(const StepPlan& plan, const FrameClock& clock) {
 
 void App::WriteReplay() {
   if (!game_ || !game_->recorder.Active()) return;
+  // M13: a multi-state session's start bytes are its content bundle, set
+  // before the save (the scene file otherwise, as before).
+  if (!setup_.extension) {
+    const std::vector<std::byte> start = SessionStartBytes();
+    if (start != start_bytes_) {
+      game_->recorder.SetStart(start);
+      SE_LOG_INFO("replay start bytes: the content bundle ({} texts, {} bytes)",
+                  assets_ ? assets_->LoadedTexts().Texts().size() : 0,
+                  start.size());
+    }
+  }
   game_->recorder.RecordSession(game_->session);
   const std::size_t frames = game_->recorder.FrameCount();
   std::vector<std::byte> bytes = game_->recorder.Finish();
@@ -831,6 +1005,40 @@ void App::MarkTeardown(std::string_view part) noexcept {
   if (teardown_mark_count_ < teardown_marks_.size()) {
     teardown_marks_[teardown_mark_count_++] = {.part = part,
                                                .end_ns = SDL_GetTicksNS()};
+  }
+}
+
+void App::RunPushEvents() {
+  for (const PushEventHook& hook : config_.push_events) {
+    if (hook.frame != static_cast<std::int64_t>(iterates_)) continue;
+    SDL_Event event{};
+    std::string_view name;
+    switch (hook.kind) {
+      case PushedEvent::kQuit:
+        event.type = SDL_EVENT_QUIT;
+        name = "quit";
+        break;
+      case PushedEvent::kTerminating:
+        event.type = SDL_EVENT_TERMINATING;
+        name = "terminating";
+        break;
+      case PushedEvent::kFocusLost:
+        event.type = SDL_EVENT_WINDOW_FOCUS_LOST;
+        event.window.windowID = window_ != nullptr ? window_->Id() : 0;
+        name = "focus-lost";
+        break;
+      case PushedEvent::kFocusGained:
+        event.type = SDL_EVENT_WINDOW_FOCUS_GAINED;
+        event.window.windowID = window_ != nullptr ? window_->Id() : 0;
+        name = "focus-gained";
+        break;
+    }
+    event.common.timestamp = SDL_GetTicksNS();
+    if (!SDL_PushEvent(&event)) {
+      SE_LOG_ERROR("--push-event: SDL_PushEvent failed");
+      continue;
+    }
+    SE_LOG_INFO("pushed event '{}' at frame {}", name, iterates_);
   }
 }
 
@@ -953,10 +1161,12 @@ SDL_AppResult App::HandleEvent(const SDL_Event& event) {
   const bool taken =
       setup_.extension && setup_.extension->OnEvent(*this, event);
   const std::uint64_t now = SDL_GetTicksNS();
-  const bool ours = window_ != nullptr &&
-                    event.type >= SDL_EVENT_WINDOW_FIRST &&
+  // M13: a headless App takes window events of window 0 as its own (the
+  // tests push them; SDL's dummy driver has no windows).
+  const bool ours = event.type >= SDL_EVENT_WINDOW_FIRST &&
                     event.type <= SDL_EVENT_WINDOW_LAST &&
-                    event.window.windowID == window_->Id();
+                    (window_ != nullptr ? event.window.windowID == window_->Id()
+                                        : event.window.windowID == 0);
   switch (event.type) {
     case SDL_EVENT_QUIT:
       quit_.Request(QuitReason::kQuitEvent);
@@ -1007,7 +1217,11 @@ SDL_AppResult App::HandleEvent(const SDL_Event& event) {
       if (ours) lifecycle_.OnWindow(WindowSignal::kFocusGained, now);
       break;
     case SDL_EVENT_WINDOW_FOCUS_LOST:
-      if (ours) lifecycle_.OnWindow(WindowSignal::kFocusLost, now);
+      if (ours) {
+        lifecycle_.OnWindow(WindowSignal::kFocusLost, now);
+        // M13: the game decides, through a logged state command.
+        OnFocusLost();
+      }
       break;
     case SDL_EVENT_WINDOW_DISPLAY_CHANGED:
     case SDL_EVENT_DISPLAY_CURRENT_MODE_CHANGED:
@@ -1300,6 +1514,13 @@ SDL_AppResult App::Iterate() {
   // completions (M9), then the two-phase quit.
   TakeInbox();
   if (assets_) assets_->BeginFrame(ActiveStates());
+  // M13: a game's --record replay goes to the lane as soon as the quit is
+  // pending, so the drain waits for its rename (QuitPending until then);
+  // the ticks after it are not recorded.
+  if (!setup_.extension && booted_ && quit_.Pending() && !quit_.ReadyToExit() &&
+      !replay_submitted_) {
+    WriteReplay();
+  }
   quit_.Poll();
   SyncQuitState();
   // M10a: the extension's frame start and this frame's session; the
@@ -1383,7 +1604,24 @@ SDL_AppResult App::Iterate() {
   // The N-L fence wait is GPU time, not CPU work: it stays out of R.
   const double fence_wait_sec =
       static_cast<double>(pacer_.LastFrame().fence_wait_ns) * kNsToSec;
-  // The sim holds while the top state's AssetScope is not resident (M9).
+  // M13: a state waiting at the content gate is asked again: its push
+  // applies at this boundary once it is ready (the same boundary a replay
+  // applies it at: no tick ran meanwhile).
+  if (!setup_.extension && !game_->states.Waiting().empty()) {
+    const InlineOwnerScope owner(OnMainThread());
+    game_->driver.CompleteBoundary(game_->states, game_->session);
+  }
+  if (!setup_.extension) {
+    if (const std::optional<std::string> what = StateContentFault()) {
+      SE_LOG_ERROR("{}", *what);
+      return OnCallbackFault("state content", *what);
+    }
+  }
+  // The dump's session stream before the frame's ticks (the editor's rule,
+  // ADR-111).
+  if (!setup_.extension) SyncSessionDump();
+  // The sim holds while the top state's AssetScope is not resident (M9),
+  // or while a state waits at the content gate (M13).
   const bool assets_held = assets_ && assets_->Hold(ActiveStates());
   const bool sim_running =
       setup_.extension ? ext_session_.running : game_->states.SimRunning();
@@ -1424,6 +1662,23 @@ SDL_AppResult App::Iterate() {
     costs_.AddTick(ticks_sec / ran);
   }
   report.next_tick = NextTick();
+  // M13a: a state a tick pushed whose content did not load (review fix F2):
+  // the fault path, before an emptied stack could end the game cleanly.
+  if (!setup_.extension) {
+    if (const std::optional<std::string> what = StateContentFault()) {
+      SE_LOG_ERROR("{}", *what);
+      return OnCallbackFault("state content", *what);
+    }
+  }
+  // M13: the game ends when its last state is gone.
+  if (!setup_.extension && booted_ && game_->states.Depth() == 0 &&
+      game_->states.Waiting().empty() && game_->states.PendingCount() == 0 &&
+      !quit_.Pending() && !game_ended_logged_) {
+    game_ended_logged_ = true;
+    SE_LOG_INFO("the game ended: no state left (after tick {})", LastTick());
+    quit_.Request(QuitReason::kGameEnded);
+    SyncQuitState();
+  }
   if (kRuntimeTestHooks) RunExitTests(report.next_tick);
   if (kRuntimeTestHooks && config_.late_frame_ms > 0.0 &&
       !late_frame_injected_ &&
@@ -1510,6 +1765,7 @@ SDL_AppResult App::Iterate() {
   ext_frame_ready_ = false;
   if (setup_.extension) setup_.extension->EndFrame(*this, report);
   if (kRuntimeTestHooks && !config_.push_keys.empty()) RunPushKeys(report);
+  if (kRuntimeTestHooks && !config_.push_events.empty()) RunPushEvents();
   if (kRuntimeTestHooks && config_.durable_save_test.frame > 0) {
     RunDurableSaveTest();
   }
@@ -1586,8 +1842,13 @@ void App::RunExitTests(Tick next_tick) {
 void App::UpdateTitle(std::uint64_t now_ns) {
   if (window_ == nullptr || now_ns - last_title_ns_ < kTitleIntervalNs) return;
   last_title_ns_ = now_ns;
-  std::string title = std::format("{} | tick {} | {}", setup_.title, LastTick(),
-                                  LifecycleStateName(lifecycle_.State()));
+  // M13: the top state's id first ("-" for an empty stack).
+  const std::string_view top =
+      game_ != nullptr ? ActiveStates().TopId() : std::string_view();
+  std::string title =
+      std::format("{} | {} | tick {} | {}", setup_.title,
+                  top.empty() ? std::string_view("-") : top, LastTick(),
+                  LifecycleStateName(lifecycle_.State()));
   // Test builds show the pacer's mode, rate, interval, latency and misses.
   if (kRuntimeTestHooks) title += " | " + pacer_.Summary();
   window_->SetTitle(title);
@@ -1744,6 +2005,18 @@ SDL_AppResult App::Shutdown(SDL_AppResult result) {
         "the vblank sampler was still in WaitForVBlank at shutdown: detached "
         "(it ends when the wait returns)");
   }
+  // M13: --expect-no-threads (test builds): no engine thread may be left
+  // once the teardown has run (the shutdown stress test).
+  if (kRuntimeTestHooks && config_.expect_no_threads) {
+    const std::uint32_t left = integration::EngineThreadsRunning();
+    if (left != 0) {
+      SE_LOG_ERROR("engine threads left at exit: {} (--expect-no-threads)",
+                   left);
+      shutdown_faulted_ = true;
+    } else {
+      SE_LOG_INFO("engine threads left at exit: 0");
+    }
+  }
   // M10a: an extension that failed (a test script) fails the process.
   if (setup_.extension && setup_.extension->ExitFailure()) {
     return SDL_APP_FAILURE;
@@ -1793,6 +2066,7 @@ void App::Teardown() {
       game_->states.Clear();
     };
     if (!RunGameHook("GameState::OnExit", clear)) shutdown_faulted_ = true;
+    session_stream_.Detach();
     game_.reset();
     NoteTeardown("worlds (6)");
   }

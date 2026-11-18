@@ -1,0 +1,47 @@
+# Hot reload into documents (M11b, headless): files written by "another
+# program" (write-file, under the content copy only). A prefab changed on
+# disk is one undo step in the open scene (which stays clean); the
+# document's own file reloads when clean and asks when dirty (Keep mine,
+# Reload); during Play a change waits for Stop. Runs on a copy of the
+# content (--content-copy).
+expect-dirty no
+write-file assets/prefabs/enemy.prefab.json {"format":"se-prefab-v1","name":"enemy","components":{"Transform":{},"Collider":{"half_extents":{"x":24,"y":24}},"SpriteRenderer":{"texture":"player","region":{"x":0,"y":0,"w":48,"h":48},"origin":{"x":24,"y":24}},"Team":{"id":"enemy"},"Stats":{"HP":300,"Speed":500},"Path":{"points":[],"loop":true}}}
+wait-reload
+expect-undo-label Prefab changed: prefabs/enemy.prefab.json
+expect-override 5a4db0c5-0000-4000-8000-000000000001 Stats no
+expect-dirty no
+# The document's own file, changed while it is clean: reloaded.
+write-file assets/scenes/sandbox.scene.json {"format":"se-scene-v1","name":"sandbox","settings":{"bounds":{"w":1920,"h":1080},"seed":1,"event_watchdog_ms":36000},"entities":[{"guid":"5a4db0c5-0000-4000-8000-000000000000","name":"player","prefab":"prefabs/player.prefab.json"},{"guid":"5a4db0c5-0000-4000-8000-000000000001","name":"enemy 1","prefab":"prefabs/enemy.prefab.json","overrides":{"Path":{"points":[{"x":1499,"y":345},{"x":107,"y":252}]}}}]}
+wait-reload
+expect-entities document 2
+expect-undo-label
+expect-dirty no
+# Changed while dirty: the prompt. Keep mine leaves it dirty.
+set 5a4db0c5-0000-4000-8000-000000000000 Transform {"pos":{"x":321,"y":250},"rot":0,"scale":{"x":1,"y":1},"teleport_tick":0}
+write-file assets/scenes/sandbox.scene.json {"format":"se-scene-v1","name":"sandbox","settings":{"bounds":{"w":1920,"h":1080},"seed":1,"event_watchdog_ms":36000},"entities":[{"guid":"5a4db0c5-0000-4000-8000-000000000000","name":"player","prefab":"prefabs/player.prefab.json"}]}
+wait-reload
+expect-reload-prompt yes
+answer-reload keep
+expect-reload-prompt no
+expect-dirty yes
+expect-entities document 2
+# Changed again: Reload this time.
+write-file assets/scenes/sandbox.scene.json {"format":"se-scene-v1","name":"sandbox","settings":{"bounds":{"w":1920,"h":1080},"seed":1,"event_watchdog_ms":36000},"entities":[{"guid":"5a4db0c5-0000-4000-8000-000000000000","name":"player","prefab":"prefabs/player.prefab.json"},{"guid":"5a4db0c5-0000-4000-8000-000000000002","name":"enemy 2","prefab":"prefabs/enemy.prefab.json"},{"guid":"5a4db0c5-0000-4000-8000-000000000003","name":"enemy 3","prefab":"prefabs/enemy.prefab.json"}]}
+wait-reload
+expect-reload-prompt yes
+answer-reload reload
+expect-reload-prompt no
+expect-dirty no
+expect-entities document 3
+# During Play the change waits for Stop, then rebases the scene.
+play
+wait-ticks 5
+write-file assets/prefabs/enemy.prefab.json {"format":"se-prefab-v1","name":"enemy","components":{"Transform":{},"Collider":{"half_extents":{"x":24,"y":24}},"SpriteRenderer":{"texture":"player","region":{"x":0,"y":0,"w":48,"h":48},"origin":{"x":24,"y":24}},"Team":{"id":"enemy"},"Stats":{"HP":400,"Speed":500},"Path":{"points":[],"loop":true}}}
+wait-ms 2500
+expect-state playing
+expect-undo-label
+stop
+wait-reload
+expect-undo-label Prefab changed: prefabs/enemy.prefab.json
+expect-override 5a4db0c5-0000-4000-8000-000000000002 Stats no
+quit discard

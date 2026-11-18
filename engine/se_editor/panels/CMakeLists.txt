@@ -33,6 +33,7 @@ se_add_module(se_editor_panels KIND STATIC
     src/profiler_panel.cc
     src/profiler_series.cc
     src/scene_settings_panel.cc
+    src/stat_name_command.cc
     src/stress_generator.cc
     src/stress_panel.cc
     src/viewport_math.cc

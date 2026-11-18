@@ -11,9 +11,14 @@
 //              one state of the session's GameStateStack, registered under
 //              the module's start-state id, so per-tick hashes equal a
 //              headless replay's of the same start bytes (se_replay).
-//   Play game  the module's own GameStateStack from its start state, the
-//              start state pointed at the Play-start bytes written to a
-//              file (EditorGame::set_play_game_scene).
+//   Play game  the module's own GameStateStack from its game start state
+//              (GameModule::game_start_state, else its start state), the
+//              game's Gameplay scene pointed at the Play-start bytes written
+//              to a file (EditorGame::set_play_game_scene). Its states load
+//              through the content gate and read their texts from the
+//              content source (the AssetRuntime) as the runtime's do: a
+//              push waits until its state's texts and assets are resident,
+//              and no tick runs meanwhile (M13 integration, ADR-129).
 // Both tick through their own SimDriver (from tick 1), SessionLog and
 // ReplayRecorder (header and start bytes: the Play-start bytes), with the
 // App's plan, the game's Schedule and fork pool, and the AssetRuntime as
@@ -56,6 +61,7 @@
 #include "se_editor/editor_game.h"
 #include "se_render_core/render_components.h"
 #include "se_render_core/render_list.h"
+#include "se_sim/content_source.h"
 #include "se_sim/game_module.h"
 #include "se_sim/game_state.h"
 #include "se_sim/replay.h"
@@ -83,13 +89,16 @@ struct PlayStart {
   std::string asset_root;
   // Play game: where the editor wrote |bytes| for the start state.
   std::string scene_path;
+  // Play game: the key the content bundle records |scene_path|'s text
+  // under (EditorGame::play_game_scene_key; empty: its normalised path).
+  std::string scene_key;
   std::uint64_t seed = 0;
   std::uint32_t tick_rate = kDefaultTickRate;
 };
 
 // Why a session faulted.
 struct PlayFault {
-  // "tick" or "render".
+  // "tick", "render" or "content" (a state's text or scene did not load).
   std::string where;
   std::string what;
   // The tick that faulted (a tick fault) or the last tick run.
@@ -103,11 +112,15 @@ struct PlayFault {
 class PlaySession {
  public:
   // |instance| and |pool| outlive the session; |gate| (the AssetRuntime)
-  // may be null.
+  // may be null. 'Play game' only: |content_gate| and |content| (the
+  // AssetRuntime too; null: the states read files themselves and pushes
+  // apply at once) outlive the session.
   [[nodiscard]] static std::expected<std::unique_ptr<PlaySession>, Error> Start(
       ModuleInstance& instance, jobs::ForkJoinPool& pool,
-      const EditorGame& game, PlayStart start, TickGate* gate)
-      SE_REQUIRES(g_main) SE_EXCLUDES(g_sim_owner);
+      const EditorGame& game, PlayStart start, TickGate* gate,
+      StateContentGate* content_gate = nullptr,
+      const ContentSource* content = nullptr) SE_REQUIRES(g_main)
+      SE_EXCLUDES(g_sim_owner);
 
   PlaySession(const PlaySession&) = delete;
   PlaySession& operator=(const PlaySession&) = delete;
@@ -147,6 +160,16 @@ class PlaySession {
   int TickFrame(const StepPlan& plan, InputSource& input, AudioSink& audio,
                 std::uint64_t now_ns) SE_REQUIRES(g_main)
       SE_EXCLUDES(g_sim_owner);
+  // 'Play game': the boundary before the next tick is finished (a state
+  // that waits at the content gate is asked again; its push, and the
+  // commands behind it, apply once it is ready). Call at frame start,
+  // before the frame's ticks are planned.
+  void CompleteBoundary() SE_REQUIRES(g_main) SE_EXCLUDES(g_sim_owner);
+  // The state a push waits for at the content gate; empty when none.
+  [[nodiscard]] std::string_view Waiting() const noexcept {
+    return states_ ? states_->Waiting() : std::string_view();
+  }
+
   // The results of the last TickFrame(), one per tick.
   [[nodiscard]] std::span<const TickResult> FrameResults() const noexcept {
     return driver_.FrameResults();
@@ -208,7 +231,12 @@ class PlaySession {
   [[nodiscard]] std::uint64_t DocumentHash() const noexcept {
     return start_.document_hash;
   }
-  // The replay so far (header, the Play-start bytes, every tick's frame
+  // What the session's replay and dump start from: the Play-start bytes,
+  // or for 'Play game' whose states read texts, the content bundle of every
+  // text they read (its start state the game's), so se_replay runs the
+  // game's states from it (ADR-129).
+  [[nodiscard]] std::vector<std::byte> SessionStartBytes() const;
+  // The replay so far (header, the start bytes, every tick's frame
   // and hash, the SessionLog). Ends the recording: call once, at Stop or
   // at the fault.
   [[nodiscard]] std::vector<std::byte> FinishReplay();
@@ -228,17 +256,22 @@ class PlaySession {
   // replay file without frames (the header, the Play-start bytes and the
   // SessionLog so far).
   [[nodiscard]] std::vector<std::byte> DumpBytes() const;
-  // Grows with every SessionLog entry (edits and markers): DumpBytes()
-  // changed.
-  [[nodiscard]] std::size_t LogEntries() const noexcept {
-    return log_.Applied().size() + log_.PendingCount();
-  }
+  // Grows with every SessionLog entry (edits and markers) and every text
+  // 'Play game' read: DumpBytes() changed.
+  [[nodiscard]] std::size_t LogEntries() const noexcept;
 
  private:
+  // 'Play game': the content source its states read through, which keeps
+  // every text it served in a content bundle.
+  class RecordingContent;
+
   PlaySession(ModuleInstance& instance, jobs::ForkJoinPool& pool,
               PlayStart start);
   void Marker(SessionOp op) SE_REQUIRES(g_main) SE_EXCLUDES(g_sim_owner);
   void SetRunning(bool running) noexcept;
+  // Faults the session ("content") when a state could not enter
+  // (GameStateStack::EnterError).
+  void FaultOnEnterError();
 
   ModuleInstance* instance_;
   PlayStart start_;
@@ -249,6 +282,7 @@ class PlaySession {
   SimDriver driver_;
   SessionLog log_;
   ReplayRecorder recorder_;
+  std::unique_ptr<RecordingContent> recording_;
   PlayFault fault_;
   // Whether the play World steps (its state's SimRunning); false while
   // Paused or Faulted, so SessionLog entries apply at once.

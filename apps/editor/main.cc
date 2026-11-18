@@ -12,7 +12,8 @@
 // Runtime options are AppConfig's (se_runtime/app_config.h); every test
 // and manual run passes --audio null or none (the default plays on the
 // real device). --scene opens a scene file relative to the content root
-// (default assets/scenes/sandbox.scene.json); --editor-script (test
+// (default assets/scenes/sandbox.scene.json; a prefab file opens as a
+// prefab document, its kind by its "format"); --editor-script (test
 // builds) runs a script of editor actions at frame boundaries
 // (se_editor/editor_script.h); --viewports turns on ImGui's
 // multi-viewports. The editor paces Standard with frame latency 2, keeps
@@ -20,11 +21,15 @@
 
 #include <cstddef>
 #include <expected>
+#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
+#include "game_rampage/content.h"
+#include "game_rampage/flow.h"
 #include "game_rampage/module.h"
 #include "game_rampage/scene.h"
 #include "game_rampage/view.h"
@@ -35,8 +40,11 @@
 #include "se_editor/editor_game.h"
 #include "se_editor/panel.h"
 #include "se_editor_panels/panels.h"
+#include "se_editor_panels/stat_name_command.h"
+#include "se_platform/fs.h"
 #include "se_runtime/app.h"
 #include "se_runtime/app_config.h"
+#include "se_runtime/asset_runtime.h"
 #include "se_runtime/integration.h"
 #include "se_runtime/pacer_policy.h"
 #include "se_runtime/quit.h"
@@ -48,23 +56,106 @@ namespace {
 
 constexpr const char* kDefaultScene = "assets/scenes/sandbox.scene.json";
 
+se::editor::EntityJson ToEntityJson(se::rampage::EntityComponentsJson entity) {
+  se::editor::EntityJson out;
+  out.guid = entity.guid;
+  out.components.reserve(entity.components.size());
+  for (auto& [name, json] : entity.components) {
+    out.components.push_back(
+        se::editor::ComponentJson{std::move(name), std::move(json)});
+  }
+  return out;
+}
+
 se::editor::EditorGame RampageForTheEditor() {
   se::editor::EditorGame game;
   game.module = &se::rampage::RampageModule();
   game.load_scene =
-      [](se::World& world, std::string_view text,
-         const std::string& asset_root) -> std::expected<void, se::Error> {
+      [](se::World& world, std::string_view text, const std::string& asset_root,
+         const std::function<void(std::string_view, std::string_view)>&
+             on_prefab) -> std::expected<void, se::Error> {
     // The editor calls it on main while it owns the World (inline mode).
     se::AssertMainThread();
     const se::InlineOwnerScope owner(se::OnMainThread());
     se::rampage::SceneLoadOptions options;
     options.asset_root = asset_root;
+    options.on_prefab = on_prefab;
     auto loaded = se::rampage::LoadScene(world, text, options);
     if (!loaded) return std::unexpected(std::move(loaded.error()));
     return {};
   };
   game.save_scene = [](const se::World& world, std::string_view name) {
+    // Flattened (kFlatten): the Play-start bytes, faults, the content hash.
     return se::rampage::SaveScene(world, name);
+  };
+  game.save_scene_file = [](const se::World& world, std::string_view name,
+                            const std::string& asset_root,
+                            const se::editor::PrefabTextMap* prefab_texts) {
+    // With prefab references (kPrefabs): Save, Save As, autosave,
+    // recovery.
+    se::rampage::SceneWriteOptions options;
+    options.mode = se::rampage::SceneWriteMode::kPrefabs;
+    options.asset_root = asset_root;
+    if (prefab_texts != nullptr) {
+      options.resolver = se::rampage::TextsFirst(*prefab_texts, asset_root);
+    }
+    return se::rampage::SaveScene(world, name, options);
+  };
+  game.load_prefab =
+      [](se::World& world, std::string_view text, const std::string& ref,
+         const std::string& asset_root) -> std::expected<void, se::Error> {
+    se::AssertMainThread();
+    const se::InlineOwnerScope owner(se::OnMainThread());
+    se::rampage::SceneLoadOptions options;
+    options.asset_root = asset_root;
+    auto loaded = se::rampage::LoadPrefabDocument(world, text, ref, options);
+    if (!loaded) return std::unexpected(std::move(loaded.error()));
+    return {};
+  };
+  game.save_prefab = [](const se::World& world, const std::string& ref,
+                        std::string_view name) {
+    return se::rampage::SavePrefabDocument(world, ref, name);
+  };
+  game.prefab_baseline = [](const se::World& world, se::Guid guid,
+                            const std::string& asset_root,
+                            const se::editor::PrefabTextMap* prefab_texts)
+      -> std::expected<se::editor::EntityJson, se::Error> {
+    se::rampage::SceneLoadOptions options;
+    options.asset_root = asset_root;
+    if (prefab_texts != nullptr) {
+      options.resolver = se::rampage::TextsFirst(*prefab_texts, asset_root);
+    }
+    auto baseline = se::rampage::PrefabBaseline(world, guid, options);
+    if (!baseline) return std::unexpected(std::move(baseline.error()));
+    return ToEntityJson(std::move(*baseline));
+  };
+  game.rebase_instances = [](const se::World& world, std::string_view ref,
+                             std::string_view old_text,
+                             std::string_view new_text,
+                             const std::string& asset_root)
+      -> std::expected<std::vector<se::editor::EntityJson>, se::Error> {
+    se::rampage::SceneLoadOptions options;
+    options.asset_root = asset_root;
+    auto rebased = se::rampage::RebasePrefabInstances(world, ref, old_text,
+                                                      new_text, options);
+    if (!rebased) return std::unexpected(std::move(rebased.error()));
+    std::vector<se::editor::EntityJson> out;
+    out.reserve(rebased->size());
+    for (se::rampage::EntityComponentsJson& entity : *rebased) {
+      out.push_back(ToEntityJson(std::move(entity)));
+    }
+    return out;
+  };
+  game.prefab_names = &se::editor::MakePrefabNames;
+  game.removed_with = [](std::string_view component) {
+    std::vector<std::string> out;
+    for (const std::string_view derived : se::rampage::RemovedWith(component)) {
+      out.emplace_back(derived);
+    }
+    return out;
+  };
+  game.removable = [](std::string_view component) {
+    return se::rampage::Removable(component);
   };
   game.set_play_game_scene = [](const std::string& scene_path,
                                 const std::string& asset_root) {
@@ -73,7 +164,16 @@ se::editor::EditorGame RampageForTheEditor() {
     request.path = scene_path;
     request.asset_root = asset_root;
     se::rampage::SetSandboxScene(std::move(request));
+    // M13 integration: 'Play game' starts at the Title, and the Gameplay
+    // state's scene is the Play-start bytes' file, read through the lane
+    // like every state's text (an absolute path; the prefabs it names, if
+    // any, stay content-relative).
+    se::rampage::FlowConfig flow;
+    flow.gameplay_scene = scene_path;
+    flow.content_root = se::fs::Parent(asset_root);
+    se::rampage::SetFlowConfig(std::move(flow));
   };
+  game.play_game_scene_key = std::string(se::rampage::kPlayGameSceneKey);
   game.camera = [](const se::World& world) {
     return se::rampage::SandboxCamera(world);
   };
@@ -105,6 +205,10 @@ std::expected<se::GameSetup, se::Error> MakeEditor(
                           "--viewports)");
     }
   }
+  // The script's stat-name verbs: the Stats drawer's command group.
+  options.script_hooks.stat_name_edit = &se::editor::MakeStatNameEdit;
+  options.script_hooks.has_stat_name = &se::editor::HasStatName;
+  options.script_hooks.stress_press = &se::editor::MakeStressPress;
   auto editor = std::make_shared<se::editor::Editor>(RampageForTheEditor(),
                                                      std::move(options));
   // The panels, in their dock order. The Profiler's button asks the crash
@@ -135,6 +239,20 @@ std::expected<se::GameSetup, se::Error> MakeEditor(
   setup.sound_table = "config/sound.json";
   setup.camera = [](const se::World& world) {
     return se::rampage::SandboxCamera(world);
+  };
+  // 'Play game' loads its states as rampage does (M13 integration): each
+  // flow state's scene as a text through the lane with the prefabs it
+  // names, besides every texture and sound of the tables. The document's
+  // states and Play's one-World state read no text.
+  setup.state_assets = [](std::string_view state_id) {
+    se::StateAssets assets;
+    const std::string scene = se::rampage::FlowSceneOf(state_id);
+    if (!scene.empty()) assets.texts.push_back(scene);
+    return assets;
+  };
+  setup.text_dependencies = [](std::string_view path, std::string_view text) {
+    return se::rampage::SceneDependencies(path, text,
+                                          se::rampage::kContentAssetDir);
   };
   // The editor's shell: it owns the session, starts in Edit mode, idles
   // after 1 s without input, paces Standard with frame latency 2 and

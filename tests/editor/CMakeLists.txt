@@ -14,16 +14,20 @@ se_add_module(se_editor_tests KIND EXECUTABLE
     commands_test.cc
     dialog_mailbox_test.cc
     document_test.cc
+    documents_test.cc
     idle_test.cc
     imgui_context_test.cc
     play_dump_test.cc
     play_session_test.cc
+    prefab_document_test.cc
     recovery_test.cc
+    runtime_worlds_test.cc
     script_test.cc
     ../support/no_dialogs_listener.cc
     ../support/tracy_inert_listener.cc
   PRIVATE_DEPS
     se_editor
+    se_editor_panels
     se_imgui
     game_rampage
     rampage_test_support
@@ -31,6 +35,9 @@ se_add_module(se_editor_tests KIND EXECUTABLE
     se_replay_dump
     se_runtime
     se_sim
+    # M11/M13 integration: a headless App boot of rampage
+    # (runtime_worlds_test.cc).
+    se_platform_test_support
     Catch2::Catch2WithMain
   TEST)
 target_include_directories(se_editor_tests PRIVATE "${CMAKE_SOURCE_DIR}/tests")
@@ -89,7 +96,10 @@ if(NOT CMAKE_BUILD_TYPE STREQUAL "Release" AND TARGET simple_editor)
   _se_editor_script(play_session_replays play_session
     --replay $<TARGET_FILE:se_replay>)
   # 'Play game': the module's own stack on the Play-start bytes.
-  _se_editor_script(play_game play_game --expect "play game: started")
+  # 'Play game' from the Title through the content gate; its replay starts
+  # from the content bundle of the texts its states read (ADR-129).
+  _se_editor_script(play_game play_game --expect "play game: started"
+    --replay $<TARGET_FILE:se_replay>)
   _se_editor_script(tick_fault tick_fault --expect-fault-files
     --expect "Play.Faulted: tick fault")
   _se_editor_script(render_fault render_fault --expect-fault-files
@@ -102,10 +112,10 @@ if(NOT CMAKE_BUILD_TYPE STREQUAL "Release" AND TARGET simple_editor)
   _se_editor_script(dialog_quit dialog_quit
     --expect "1 answered during the quit")
   _se_editor_script(dialog_open dialog_open)
-  # File > Open over a dirty document waits for the unsaved-changes prompt:
+  # File > Close of a dirty document waits for the unsaved-changes prompt:
   # Cancel keeps the changes, Save saves them first, Don't Save discards.
-  _se_editor_script(open_dirty open_dirty --scene-copy "${_se_sandbox}"
-    --expect-scene-contains "321" --expect "waits for the prompt")
+  _se_editor_script(close_dirty close_dirty --scene-copy "${_se_sandbox}"
+    --expect-scene-contains "321" --expect "the close waits for the prompt")
   # An autosave that lands after a newer save leaves no recovery file.
   _se_editor_script(autosave_after_save autosave_after_save
     --scene-copy "${_se_sandbox}" --expect-scene-contains "222")
@@ -117,6 +127,63 @@ if(NOT CMAKE_BUILD_TYPE STREQUAL "Release" AND TARGET simple_editor)
   _se_editor_script(terminate_writes_recovery terminate
     --scene-copy "${_se_sandbox}" --expect-recovery-file
     --expect "recovery file")
+
+  # M11b: several documents, prefabs, hot reload, stat names, the stress
+  # generator's prefab instances. --content-copy runs the editor on a copy
+  # of assets/ and config/, so saves and write-file never touch the
+  # repository.
+  set(_se_content "${CMAKE_SOURCE_DIR}")
+  # Review fix F2: a Pause scene that does not load faults 'Play game'.
+  _se_editor_script(play_game_bad_scene play_game_bad_scene
+    --content-copy "${_se_content}" --expect-fault-files
+    --expect "Play.Faulted: content fault")
+  # Review fix F3: a prefab broken on disk; the recovery file is still
+  # written, against the document's recorded prefab texts.
+  _se_editor_script(terminate_broken_prefab terminate_broken_prefab
+    --content-copy "${_se_content}" --expect-recovery-file
+    --expect "recovery takes the prefab texts the document recorded")
+  _se_editor_script(prefabs prefabs --content-copy "${_se_content}"
+    --expect-file-contains assets/prefabs/enemy.prefab.json "250"
+    --expect-file-contains assets/scenes/sandbox.scene.json
+      "prefabs/enemy.prefab.json"
+    --expect-file-contains assets/scenes/sandbox.scene.json "null"
+    --expect-file-lacks assets/scenes/sandbox.scene.json "\"components\""
+    --expect "follows it in one undo step")
+  _se_editor_script(documents documents --content-copy "${_se_content}"
+    --expect "the close waits for the prompt")
+  _se_editor_script(hot_reload hot_reload --content-copy "${_se_content}"
+    --expect "reloaded as document" --expect "asking (Reload, Keep mine)"
+    --expect "handled at Stop")
+  _se_editor_script(stat_names stat_names --scene-copy "${_se_sandbox}"
+    --expect-scene-contains "Armor")
+  # M11/M13 integration: the design's quit durability test, editor side.
+  # Run 1: three dirty documents (a scene, two prefabs) on a throttled disk;
+  # the quit waits until all three are renamed into place, the files hold
+  # what each document saves, the shutdown deadline starts after the drain.
+  # Run 2: one rename held past the lane's retry: that document stays dirty
+  # and the quit is cancelled while the other two are saved; a second quit
+  # exits.
+  _se_editor_script(quit_durability quit_durability
+    --content-copy "${_se_content}"
+    --then-script "${_se_scripts}/quit_durability_fails.editor"
+    --expect-files-equal assets/scenes/sandbox.scene.json
+      expected-sandbox.scene.json
+    --expect-files-equal assets/prefabs/enemy.prefab.json
+      expected-enemy.prefab.json
+    --expect-files-equal assets/prefabs/player.prefab.json
+      expected-player.prefab.json
+    --then-expect-files-equal assets/prefabs/player.prefab.json
+      expected-player.prefab.json
+    --expect-order "quit pending (" "quit waits for"
+      "the lane's Durable jobs are done"
+      "shutdown deadline started: the quit drain is over" "quit ready after"
+    --expect "editor: quit cancelled (save failed"
+    --expect "player.prefab.json failed")
+  _se_editor_script(stress_prefabs stress_prefabs
+    --content-copy "${_se_content}"
+    --expect-file-count assets/scenes/sandbox.scene.json
+      "prefabs/enemy.prefab.json" 36
+    --expect-file-lacks assets/scenes/sandbox.scene.json "\"components\"")
 
   # In a window shown without focus, the panels docked in it. The World is
   # drawn into the Viewport panel's ViewportTarget, so --readback reads that
@@ -132,6 +199,10 @@ if(NOT CMAKE_BUILD_TYPE STREQUAL "Release" AND TARGET simple_editor)
   _se_editor_desktop(play_game_input play_game_input
     --replay $<TARGET_FILE:se_replay> --expect-edges 4
     --expect "play game: the view has the input")
+  # The prefab script in a window: the Viewport's readback changes after
+  # the enemy prefab's sprite region change is saved (M11b).
+  _se_editor_desktop(prefabs prefabs_window --content-copy "${_se_content}"
+    --readback-frames 60 450 --expect "follows it in one undo step")
   _se_editor_desktop(tick_fault tick_fault --expect-fault-files)
   _se_editor_desktop(render_fault render_fault --expect-fault-files)
   _se_editor_desktop(quit_save quit_save --scene-copy "${_se_sandbox}"

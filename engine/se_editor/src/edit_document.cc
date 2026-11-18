@@ -5,6 +5,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <functional>
+#include <map>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -12,19 +14,34 @@
 
 #include "se_core/component_registry.h"
 #include "se_core/error.h"
+#include "se_core/hash.h"
 #include "se_core/log.h"
 #include "se_core/thread_role.h"
 #include "se_core/world.h"
 #include "se_editor/commands.h"
 #include "se_editor/editor_game.h"
+#include "src/json_value.h"
 
 namespace se::editor {
+
+std::string_view DocumentKindName(DocumentKind kind) noexcept {
+  switch (kind) {
+    case DocumentKind::kScene:
+      return "scene";
+    case DocumentKind::kPrefab:
+      return "prefab";
+  }
+  return "?";
+}
 
 std::expected<std::unique_ptr<EditDocument>, Error> EditDocument::Open(
     const ComponentRegistry& registry, const EditorGame& game,
     DocumentDesc desc, std::string_view text) {
-  if (!game.load_scene) {
-    return Fail(ErrorCode::kUnsupported, "the game has no scene loader");
+  const bool prefab = desc.kind == DocumentKind::kPrefab;
+  if (prefab ? !game.load_prefab : !game.load_scene) {
+    return Fail(ErrorCode::kUnsupported, prefab
+                                             ? "the game has no prefab loader"
+                                             : "the game has no scene loader");
   }
   WorldDesc world_desc;
   world_desc.name = desc.name.empty() ? std::string("document") : desc.name;
@@ -32,21 +49,36 @@ std::expected<std::unique_ptr<EditDocument>, Error> EditDocument::Open(
   world_desc.seed = desc.seed;
   world_desc.tick_rate = desc.tick_rate;
   auto world = std::make_unique<World>(registry, std::move(world_desc));
+  std::map<std::string, std::string, std::less<>> prefabs;
   {
     const MutationGate gate = world->OpenGate(GateReason::kLoad);
-    if (auto loaded = game.load_scene(*world, text, desc.asset_root); !loaded) {
+    std::expected<void, Error> loaded;
+    if (prefab) {
+      loaded = game.load_prefab(*world, text, desc.ref, desc.asset_root);
+    } else {
+      loaded = game.load_scene(
+          *world, text, desc.asset_root,
+          [&prefabs](std::string_view ref, std::string_view prefab_text) {
+            prefabs.insert_or_assign(std::string(ref),
+                                     std::string(prefab_text));
+          });
+    }
+    if (!loaded) {
       Error error = std::move(loaded.error());
       if (error.path.empty()) error.path = desc.path;
       return std::unexpected(std::move(error));
     }
     world->RecordHash();
   }
-  return std::unique_ptr<EditDocument>(
+  auto document = std::unique_ptr<EditDocument>(
       new EditDocument(game, std::move(desc), std::move(world)));
+  document->prefab_texts_ = std::move(prefabs);
+  document->file_text_ = std::string(text);
+  return document;
 }
 
 EditDocument::EditDocument(const EditorGame& game, DocumentDesc desc,
-                           std::unique_ptr<World> world) noexcept
+                           std::unique_ptr<World> world)
     : game_(&game), desc_(std::move(desc)), world_(std::move(world)) {}
 
 EditDocument::~EditDocument() = default;
@@ -75,6 +107,36 @@ void EditDocument::Record(std::unique_ptr<EditorCommand> command) {
     return;
   }
   done_.push_back(std::move(command));
+}
+
+std::expected<void, Error> EditDocument::ApplyPrefabChange(
+    std::unique_ptr<EditorCommand> command) {
+  EndCoalesce();
+  const bool was_clean = !Dirty();
+  if (auto applied = Apply(std::move(command)); !applied) {
+    return applied;
+  }
+  if (!was_clean) return {};
+  // Clean before: the change keeps it clean when the file it would write
+  // is the file it has (the instances now load as the file says): the
+  // same JSON, whatever the file's layout (a hand-written file is not the
+  // writer's text byte for byte).
+  auto text = SerializeFile();
+  if (!text) return {};
+  auto written = json::Parse(*text);
+  auto held = json::Parse(file_text_);
+  if (written && held && json::Equal(*written, *held)) {
+    saved_revision_ = revision_;
+  }
+  return {};
+}
+
+std::string_view EditDocument::CoalesceLabel() const noexcept {
+  return group_ != nullptr ? group_->Label() : std::string_view();
+}
+
+void EditDocument::SetPrefabText(std::string_view ref, std::string text) {
+  prefab_texts_.insert_or_assign(std::string(ref), std::move(text));
 }
 
 void EditDocument::BeginCoalesce(std::string_view label) {
@@ -158,6 +220,48 @@ std::expected<std::string, Error> EditDocument::Serialize() const {
   return game_->save_scene(*world_, desc_.name);
 }
 
+std::expected<std::string, Error> EditDocument::SerializeFile() const {
+  if (desc_.kind == DocumentKind::kPrefab) {
+    if (!game_->save_prefab) {
+      return Fail(ErrorCode::kUnsupported, "the game has no prefab writer");
+    }
+    return game_->save_prefab(*world_, desc_.ref, desc_.name);
+  }
+  if (!game_->save_scene_file) return Serialize();
+  return game_->save_scene_file(*world_, desc_.name, desc_.asset_root, nullptr);
+}
+
+std::expected<std::string, Error> EditDocument::SerializeRecovery() const {
+  auto file = SerializeFile();
+  if (file || desc_.kind != DocumentKind::kScene || !game_->save_scene_file) {
+    return file;
+  }
+  // A prefab file that cannot be read (deleted, or broken by another
+  // program) must not cost the unsaved edits: the overrides against the
+  // prefab texts the document recorded, else the document flattened
+  // (review fix F3).
+  SE_LOG_WARN(
+      "editor: '{}' as its file: {}; recovery takes the prefab texts the "
+      "document recorded",
+      desc_.name, file.error().message);
+  auto recorded = game_->save_scene_file(*world_, desc_.name, desc_.asset_root,
+                                         &prefab_texts_);
+  if (recorded) return recorded;
+  SE_LOG_WARN(
+      "editor: '{}' with its recorded prefabs: {}; recovery writes it "
+      "flattened (without prefab references)",
+      desc_.name, recorded.error().message);
+  return Serialize();
+}
+
 std::uint64_t EditDocument::Hash() const { return world_->Hash().Folded(); }
+
+std::uint64_t EditDocument::ContentHash() const {
+  auto text = Serialize();
+  if (!text) return 0;
+  Hasher hasher(0xC0B7E87ULL);
+  hasher.AddString(*text);
+  return hasher.Finish();
+}
 
 }  // namespace se::editor

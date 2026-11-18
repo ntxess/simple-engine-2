@@ -524,4 +524,56 @@ void MergePatch(Value& target, const Value& patch) {
   }
 }
 
+bool Equal(const Value& a, const Value& b) {
+  if (a.GetKind() != b.GetKind()) return false;
+  switch (a.GetKind()) {
+    case Kind::kNull:
+      return true;
+    case Kind::kBool:
+      return a.AsBool() == b.AsBool();
+    case Kind::kNumber: {
+      if (a.Text() == b.Text()) return true;
+      const std::optional<double> x = a.AsDouble();
+      const std::optional<double> y = b.AsDouble();
+      return x.has_value() && y.has_value() && *x == *y;
+    }
+    case Kind::kString:
+      return a.Text() == b.Text();
+    case Kind::kArray: {
+      if (a.Items().size() != b.Items().size()) return false;
+      for (std::size_t i = 0; i < a.Items().size(); ++i) {
+        if (!Equal(a.Items()[i], b.Items()[i])) return false;
+      }
+      return true;
+    }
+    case Kind::kObject: {
+      if (a.Members().size() != b.Members().size()) return false;
+      for (const Member& member : a.Members()) {
+        const Value* other = b.Find(member.key);
+        if (other == nullptr || !Equal(member.value, *other)) return false;
+      }
+      return true;
+    }
+  }
+  return false;
+}
+
+std::optional<Value> MergeDiff(const Value& from, const Value& to) {
+  if (Equal(from, to)) return std::nullopt;
+  if (!from.IsObject() || !to.IsObject()) return to;
+  Value patch = Value::Object();
+  for (const Member& member : to.Members()) {
+    const Value* old = from.Find(member.key);
+    if (old == nullptr) {
+      patch.Set(member.key, member.value);
+    } else if (std::optional<Value> inner = MergeDiff(*old, member.value)) {
+      patch.Set(member.key, std::move(*inner));
+    }
+  }
+  for (const Member& member : from.Members()) {
+    if (to.Find(member.key) == nullptr) patch.Set(member.key, Value());
+  }
+  return patch;
+}
+
 }  // namespace se::rampage::json

@@ -35,6 +35,14 @@
 // as its TextureKeyOf key, the names going to the World's TextureNames. An
 // entity loaded as moved (a legacy scenario's "moving" entities) is saved
 // with "Moved": {}, which marks it moved for its first tick (ADR-028).
+//
+// M11: the loader records an entity's "prefab" as its PrefabInstance. The
+// writer has two modes: kFlatten (M3's form, every component whole) and
+// kPrefabs, which writes an instance as its "prefab" and the "overrides"
+// that give it back on load (ADR-115). A prefab opened as a document is a
+// World with one root entity (PrefabRootGuid) and saves back in its file's
+// own form; instances are rebased on a prefab change by applying their
+// overrides over the new text (ADR-116).
 
 #ifndef GAME_RAMPAGE_SCENE_H_
 #define GAME_RAMPAGE_SCENE_H_
@@ -43,12 +51,17 @@
 #include <cstdint>
 #include <expected>
 #include <functional>
+#include <map>
+#include <span>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 #include "game_rampage/components.h"
 #include "game_rampage/json.h"
 #include "se_core/error.h"
+#include "se_core/guid.h"
 #include "se_core/thread_role.h"
 #include "se_core/thread_safety.h"
 #include "se_core/world.h"
@@ -62,11 +75,20 @@ inline constexpr std::string_view kPrefabFormat = "se-prefab-v1";
 using PrefabResolver =
     std::function<std::expected<std::string, Error>(std::string_view ref)>;
 
+// A resolver that serves |texts| (by reference; |texts| outlives it) and
+// reads <asset_root>/<ref> for a reference |texts| lacks.
+[[nodiscard]] PrefabResolver TextsFirst(
+    const std::map<std::string, std::string, std::less<>>& texts,
+    std::string asset_root);
+
 struct SceneLoadOptions {
   std::string asset_root;
   // Replaces reading <asset_root>/<ref> when set (tests).
   PrefabResolver resolver;
   RulesVersion rules = RulesVersion::kV2;
+  // Called once per prefab the load read, with its text (the editor
+  // keeps them: a later change of the file is rebased against them).
+  std::function<void(std::string_view ref, std::string_view text)> on_prefab;
 };
 
 struct SceneSummary {
@@ -83,10 +105,81 @@ std::expected<SceneSummary, Error> LoadSceneFile(
     World& world, const std::string& path, const SceneLoadOptions& options)
     SE_REQUIRES(g_sim_owner);
 
+enum class SceneWriteMode : std::uint8_t {
+  // Every entity's components whole (M3's SaveScene): the Play-start
+  // bytes, fault files and dumps, which must load without prefab files.
+  kFlatten,
+  // Prefab instances as "prefab" plus "overrides" (one RFC 7386 merge
+  // patch per component against what loading the bare instance gives;
+  // null removes a member, or the component), other entities as
+  // "components": Save, Save As, autosave and recovery files.
+  kPrefabs,
+};
+
+struct SceneWriteOptions {
+  SceneWriteMode mode = SceneWriteMode::kFlatten;
+  // kPrefabs: prefab references resolve here, or through |resolver|.
+  std::string asset_root;
+  PrefabResolver resolver;
+};
+
 // The World as an se-scene-v1 document: settings, then every entity in
-// spawn order with its serialized components (prefabs flattened).
+// spawn order (Spawned::spawn_serial), as |options.mode| says.
 [[nodiscard]] std::expected<std::string, Error> SaveScene(
-    const World& world, std::string_view name);
+    const World& world, std::string_view name,
+    const SceneWriteOptions& options = {});
+
+// Prefab documents: a prefab opened in the editor is a World with one
+// entity whose Guid is PrefabRootGuid(ref) (a fixed hash of the
+// reference, so a prefab document hashes the same everywhere).
+[[nodiscard]] Guid PrefabRootGuid(std::string_view ref) noexcept;
+std::expected<SceneSummary, Error> LoadPrefabDocument(
+    World& world, std::string_view text, std::string_view ref,
+    const SceneLoadOptions& options) SE_REQUIRES(g_sim_owner);
+// The root entity as se-prefab-v1 (its name, its components in the
+// scene form: stats and textures by name).
+[[nodiscard]] std::expected<std::string, Error> SavePrefabDocument(
+    const World& world, std::string_view ref, std::string_view name);
+
+// One entity's components in the registry's JSON form, by registered
+// name, in registration order.
+struct EntityComponentsJson {
+  Guid guid;
+  std::vector<std::pair<std::string, std::string>> components;
+};
+
+// What a bare instance of the entity's prefab loads to (the writer's
+// baseline, and the Inspector's "Revert to prefab").
+[[nodiscard]] std::expected<EntityComponentsJson, Error> PrefabBaseline(
+    const World& world, Guid guid, const SceneLoadOptions& options);
+
+// Every instance of |ref| in |world| as it loads once the prefab's text
+// changes from |old_text| to |new_text|: each instance's overrides,
+// taken against the old text, applied over the new one. Instances whose
+// result equals what they hold are left out.
+[[nodiscard]] std::expected<std::vector<EntityComponentsJson>, Error>
+RebasePrefabInstances(const World& world, std::string_view ref,
+                      std::string_view old_text, std::string_view new_text,
+                      const SceneLoadOptions& options);
+
+// The stat and texture names prefab |text| (|ref|) writes in its scene
+// form. A document whose instances take components from the prefab (the
+// editor's rebase) records them with those components, so the writer
+// names what the prefab names (ADR-116, review fix F1).
+struct PrefabNameSet {
+  std::vector<std::string> stats;
+  std::vector<std::string> textures;
+};
+[[nodiscard]] std::expected<PrefabNameSet, Error> PrefabNames(
+    std::string_view text, std::string_view ref);
+
+// The components removing |component| takes with it (those FinishLoad
+// derives from it: PathCache with Path; ActiveEffects with Stats;
+// PairCooldowns with EffectSource), and whether it may be removed at all
+// (IdComponent, Name, Spawned, PrefabInstance and Transform may not).
+[[nodiscard]] std::span<const std::string_view> RemovedWith(
+    std::string_view component) noexcept;
+[[nodiscard]] bool Removable(std::string_view component) noexcept;
 
 // The parts shared with the legacy scenario loader.
 

@@ -49,6 +49,12 @@ TickResult SimDriver::RunTick(GameStateStack& states, const InputFrame& frame,
   return result;
 }
 
+void SimDriver::CompleteBoundary(GameStateStack& states,
+                                 SessionLog& log) const {
+  states.ApplyPending();
+  log.ApplyDue(next_tick_, states);
+}
+
 void SimDriver::TickInline(GameStateStack& states, const StepPlan& plan,
                            InputSource& input, SessionLog& log,
                            ReplayRecorder& recorder, AudioSink& audio) {
@@ -67,9 +73,13 @@ void SimDriver::TickInline(GameStateStack& states, const StepPlan& plan,
   held_ = false;
   for (int i = 0; i < plan.steps; ++i) {
     if (gate_ != nullptr) {
-      // The state changes of the previous tick first (RunTick would apply
-      // them next): the gate sees the stack this tick runs on.
-      states.ApplyPending();
+      // The state changes of the previous tick and the log's entries due by
+      // this one first (RunTick would apply them next): the gate sees the
+      // stack this tick runs on.
+      CompleteBoundary(states, log);
+      // A state that could not enter: no tick runs on the stack it left;
+      // the owner takes the fault path.
+      if (states.EnterError() != nullptr) break;
       if (gate_->HoldTicks(states, next_tick_)) {
         held_ = true;
         break;
