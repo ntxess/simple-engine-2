@@ -170,6 +170,7 @@ void Editor::StartPlay(App& app, PlayKind kind) {
   if (kind == PlayKind::kPlayGame) {
     // The start state loads the document from a file.
     start.scene_path = app.Paths().pref + "play-game.scene.json";
+    start.scene_key = game_.play_game_scene_key;
     if (auto written = fs::WriteFileAtomic(start.scene_path, start.bytes);
         !written) {
       SE_LOG_ERROR("play game: {}: {}", start.scene_path,

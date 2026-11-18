@@ -10,6 +10,7 @@
 #include <fstream>
 #include <iterator>
 #include <memory>
+#include <optional>
 #include <span>
 #include <sstream>
 #include <string>
@@ -131,6 +132,9 @@ class ContentState final : public GameState {
       SE_LOG_ERROR("content_test: state '{}': {} ({}:{})", id_,
                    built.error().message, built.error().path,
                    built.error().line);
+      // Not created: the stack's owner takes the fault path (M13a).
+      error_ = built.error();
+      return;
     }
     const entt::entity e = world_->Create(Guid{0xC0C0, 0x57A3});
     world_->Reg().emplace<ContentStamp>(e, ContentStamp{stamp.Finish()});
@@ -149,9 +153,14 @@ class ContentState final : public GameState {
                   : std::span<World* const>();
   }
 
+  [[nodiscard]] const Error* EnterError() const noexcept override {
+    return error_ ? &*error_ : nullptr;
+  }
+
  private:
   StateEnv env_;
   std::string_view id_;
+  std::optional<Error> error_;
   std::unique_ptr<World> world_;
   std::array<World*, 1> worlds_{};
 };

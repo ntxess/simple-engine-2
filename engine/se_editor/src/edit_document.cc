@@ -228,7 +228,30 @@ std::expected<std::string, Error> EditDocument::SerializeFile() const {
     return game_->save_prefab(*world_, desc_.ref, desc_.name);
   }
   if (!game_->save_scene_file) return Serialize();
-  return game_->save_scene_file(*world_, desc_.name, desc_.asset_root);
+  return game_->save_scene_file(*world_, desc_.name, desc_.asset_root, nullptr);
+}
+
+std::expected<std::string, Error> EditDocument::SerializeRecovery() const {
+  auto file = SerializeFile();
+  if (file || desc_.kind != DocumentKind::kScene || !game_->save_scene_file) {
+    return file;
+  }
+  // A prefab file that cannot be read (deleted, or broken by another
+  // program) must not cost the unsaved edits: the overrides against the
+  // prefab texts the document recorded, else the document flattened
+  // (review fix F3).
+  SE_LOG_WARN(
+      "editor: '{}' as its file: {}; recovery takes the prefab texts the "
+      "document recorded",
+      desc_.name, file.error().message);
+  auto recorded = game_->save_scene_file(*world_, desc_.name, desc_.asset_root,
+                                         &prefab_texts_);
+  if (recorded) return recorded;
+  SE_LOG_WARN(
+      "editor: '{}' with its recorded prefabs: {}; recovery writes it "
+      "flattened (without prefab references)",
+      desc_.name, recorded.error().message);
+  return Serialize();
 }
 
 std::uint64_t EditDocument::Hash() const { return world_->Hash().Folded(); }

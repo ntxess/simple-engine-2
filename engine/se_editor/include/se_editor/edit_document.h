@@ -146,14 +146,18 @@ class EditDocument {
   // (save_scene_file, kPrefabs) or a prefab (save_prefab). Save, Save As,
   // autosave and recovery.
   [[nodiscard]] std::expected<std::string, Error> SerializeFile() const;
+  // Autosaves and recovery files: SerializeFile(), or when a prefab file
+  // it reads cannot be read, the scene with its overrides against the
+  // prefab texts the document recorded, else flattened (Serialize()): the
+  // unsaved edits are never lost to a broken prefab file.
+  [[nodiscard]] std::expected<std::string, Error> SerializeRecovery() const;
   // The document World's hash.
   [[nodiscard]] std::uint64_t Hash() const;
   // The hash of Serialize()'s text (0 when it fails).
   [[nodiscard]] std::uint64_t ContentHash() const;
 
   // The prefab texts the load reported, by reference (scene documents).
-  [[nodiscard]] const std::map<std::string, std::string, std::less<>>&
-  PrefabTexts() const noexcept {
+  [[nodiscard]] const PrefabTextMap& PrefabTexts() const noexcept {
     return prefab_texts_;
   }
   // The text a prefab change was rebased onto (not part of undo).
@@ -179,7 +183,7 @@ class EditDocument {
   std::unique_ptr<CommandGroup> group_;
   std::uint64_t revision_ = 0;
   std::uint64_t saved_revision_ = 0;
-  std::map<std::string, std::string, std::less<>> prefab_texts_;
+  PrefabTextMap prefab_texts_;
   std::string file_text_;
 };
 

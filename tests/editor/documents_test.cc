@@ -24,6 +24,7 @@
 #include "se_editor/edit_queue.h"
 #include "se_editor/prefab_commands.h"
 #include "se_editor/recovery.h"
+#include "se_platform/fs.h"
 #include "se_sim/game_module.h"
 #include "support/test_roles.h"
 
@@ -105,6 +106,31 @@ TEST_CASE("The document set: ids are never reused, one is active",
   REQUIRE(t.documents.At(0)->id == d);
   REQUIRE(t.documents.FindByName("1")->id == c);
   REQUIRE(t.documents.FindByPath(testing::SandboxScenePath()) != nullptr);
+}
+
+// Review fix F7: one file is one document, however its path is spelt (a
+// "." segment, a ".." segment, and on Windows another case).
+TEST_CASE("A file opens as one document whatever its path's spelling",
+          "[documents]") {
+  const testing::MainThreadScope main_thread;
+  TwoDocuments t;
+  const std::string path = testing::SandboxScenePath();
+  const std::string dir = fs::Parent(path);
+  const std::string file = path.substr(dir.size() + 1);
+  REQUIRE(t.documents.FindByPath(dir + "/./" + file) != nullptr);
+  const std::string leaf = dir.substr(fs::Parent(dir).size() + 1);
+  REQUIRE(t.documents.FindByPath(dir + "/../" + leaf + "/" + file) != nullptr);
+  REQUIRE(fs::Canonical(dir + "/./" + file) == fs::Canonical(path));
+#if defined(_WIN32)
+  std::string upper = path;
+  for (char& c : upper) {
+    if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
+  }
+  REQUIRE(upper != path);
+  REQUIRE(t.documents.FindByPath(upper) != nullptr);
+  REQUIRE(fs::Canonical(upper) == fs::Canonical(path));
+#endif
+  REQUIRE(t.documents.FindByPath(dir + "/no_such.scene.json") == nullptr);
 }
 
 TEST_CASE("Commands apply to the document they were made for", "[documents]") {

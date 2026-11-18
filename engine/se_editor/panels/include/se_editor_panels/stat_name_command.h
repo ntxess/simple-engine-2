@@ -20,6 +20,7 @@
 #ifndef SE_EDITOR_PANELS_STAT_NAME_COMMAND_H_
 #define SE_EDITOR_PANELS_STAT_NAME_COMMAND_H_
 
+#include <cstdint>
 #include <expected>
 #include <memory>
 #include <string>
@@ -68,6 +69,45 @@ class StatNameCommand final : public EditorCommand {
   std::string label_;
   bool added_ = false;
 };
+
+// PrefabNamesCommand: the stat and texture names a prefab rebase brings
+// into a document (review fix F1; ADR-116): Apply records each name its
+// World's StatNames or TextureNames lack (a name whose id another name
+// has is an error), Revert removes the ones it added. ToSession: none, as
+// for StatNameCommand.
+class PrefabNamesCommand final : public EditorCommand {
+ public:
+  PrefabNamesCommand(std::string label, std::vector<std::string> stats,
+                     std::vector<std::string> textures);
+
+  [[nodiscard]] CommandKind Kind() const noexcept override {
+    return CommandKind::kGame;
+  }
+  [[nodiscard]] std::string_view Label() const noexcept override {
+    return label_;
+  }
+  [[nodiscard]] Guid Target() const noexcept override { return Guid{}; }
+  [[nodiscard]] std::expected<void, Error> Apply(World& world) override
+      SE_REQUIRES(g_sim_owner);
+  [[nodiscard]] std::expected<void, Error> Revert(World& world) override
+      SE_REQUIRES(g_sim_owner);
+  [[nodiscard]] std::expected<std::vector<SessionEntry>, Error> ToSession(
+      const ComponentRegistry& registry, Tick apply_before) const override;
+
+ private:
+  std::string label_;
+  std::vector<std::string> stats_;
+  std::vector<std::string> textures_;
+  // The ids the last Apply added.
+  std::vector<std::uint32_t> added_stats_;
+  std::vector<std::uint32_t> added_textures_;
+};
+
+// EditorGame::prefab_names for rampage: a PrefabNamesCommand with the names
+// prefab |text| writes that |world| lacks, or null when it lacks none.
+[[nodiscard]] std::expected<std::unique_ptr<EditorCommand>, Error>
+MakePrefabNames(const World& world, std::string_view ref,
+                std::string_view text);
 
 // Whether |world|'s StatNames hold |name|.
 [[nodiscard]] bool HasStatName(const World& world, std::string_view name);

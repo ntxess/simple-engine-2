@@ -60,6 +60,12 @@ inline constexpr std::string_view kPauseScene =
     "assets/scenes/pause.scene.json";
 inline constexpr std::string_view kGameOverScene =
     "assets/scenes/game_over.scene.json";
+// The key under which the editor's 'Play game' records its Gameplay scene
+// (the Play-start bytes, read from a per-user absolute path) in the
+// session's content bundle; se_replay points the Gameplay state at it when
+// a bundle holds it, so a Play game replay or dump needs no --scene (review
+// fix F4, ADR-129).
+inline constexpr std::string_view kPlayGameSceneKey = "play-game.scene.json";
 
 enum class FlowRole : std::uint8_t {
   kNone,

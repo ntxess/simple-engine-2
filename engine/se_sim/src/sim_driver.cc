@@ -77,6 +77,9 @@ void SimDriver::TickInline(GameStateStack& states, const StepPlan& plan,
       // this one first (RunTick would apply them next): the gate sees the
       // stack this tick runs on.
       CompleteBoundary(states, log);
+      // A state that could not enter: no tick runs on the stack it left;
+      // the owner takes the fault path.
+      if (states.EnterError() != nullptr) break;
       if (gate_->HoldTicks(states, next_tick_)) {
         held_ = true;
         break;

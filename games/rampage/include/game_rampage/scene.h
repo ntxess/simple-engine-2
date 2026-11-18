@@ -51,6 +51,7 @@
 #include <cstdint>
 #include <expected>
 #include <functional>
+#include <map>
 #include <span>
 #include <string>
 #include <string_view>
@@ -73,6 +74,12 @@ inline constexpr std::string_view kPrefabFormat = "se-prefab-v1";
 // The text of the prefab |ref| (a path relative to the asset root).
 using PrefabResolver =
     std::function<std::expected<std::string, Error>(std::string_view ref)>;
+
+// A resolver that serves |texts| (by reference; |texts| outlives it) and
+// reads <asset_root>/<ref> for a reference |texts| lacks.
+[[nodiscard]] PrefabResolver TextsFirst(
+    const std::map<std::string, std::string, std::less<>>& texts,
+    std::string asset_root);
 
 struct SceneLoadOptions {
   std::string asset_root;
@@ -154,6 +161,17 @@ struct EntityComponentsJson {
 RebasePrefabInstances(const World& world, std::string_view ref,
                       std::string_view old_text, std::string_view new_text,
                       const SceneLoadOptions& options);
+
+// The stat and texture names prefab |text| (|ref|) writes in its scene
+// form. A document whose instances take components from the prefab (the
+// editor's rebase) records them with those components, so the writer
+// names what the prefab names (ADR-116, review fix F1).
+struct PrefabNameSet {
+  std::vector<std::string> stats;
+  std::vector<std::string> textures;
+};
+[[nodiscard]] std::expected<PrefabNameSet, Error> PrefabNames(
+    std::string_view text, std::string_view ref);
 
 // The components removing |component| takes with it (those FinishLoad
 // derives from it: PathCache with Path; ActiveEffects with Stats;

@@ -3,8 +3,14 @@
 (--headless --audio none --fixed-frame-dt 8.3333) from seeded frames 1 to
 600, each quitting one of three ways: by --frames, by an SDL_EVENT_QUIT
 pushed with SDL_PushEvent, or by SDL_EVENT_TERMINATING (the --push-event
-test hook). Every run must exit 0, log "teardown took" under 2 s and,
-with --expect-no-threads, report that no engine thread was left once the
+test hook). The runs cycle over three starts (review fix F5: rampage
+starts at the Title since M13b, whose World has one entity): the Gameplay
+state ("-- --start-state gameplay"), the sandbox ("-- --start-state
+sandbox"), and the Title with Enter pushed half way to the quit (the
+--push-key hook), so most runs quit while a gameplay World runs, its
+AudioEvents and fork-pool work included, and some while Gameplay is being
+pushed. Every run must exit 0, log "teardown took" under 2 s and, with
+--expect-no-threads, report that no engine thread was left once the
 teardown had run ("engine threads left at exit: 0").
 
 usage:
@@ -24,6 +30,7 @@ import time
 TEARDOWN_LIMIT_MS = 2000.0
 RUN_TIMEOUT_S = 120
 KINDS = ("frames", "quit", "terminating")
+STARTS = ("gameplay", "sandbox", "title")
 
 
 def main():
@@ -41,10 +48,13 @@ def main():
     draw = random.Random(args.seed)
     failures = []
     longest = 0.0
+    gameplay = 0
     started = time.monotonic()
     for run in range(args.runs):
         frame = draw.randint(1, 600)
         kind = KINDS[run % len(KINDS)]
+        # Each quit kind meets each start.
+        start = STARTS[(run // len(KINDS)) % len(STARTS)]
         command = [args.rampage, "--headless", "--audio", "none",
                    "--fixed-frame-dt", "8.3333", "--expect-no-threads",
                    "--pref-dir", str(work / "pref")]
@@ -55,12 +65,20 @@ def main():
             # failure and not a hang.
             command += ["--frames", "5000", "--push-event",
                         f"{frame}:{kind}"]
+        if start == "title":
+            if frame > 8:
+                enter = frame // 2
+                command += ["--push-key", f"{enter}:2:enter",
+                            "--push-key", f"{enter + 4}:2:enter:up"]
+        else:
+            command += ["--", "--start-state", start]
         try:
             result = subprocess.run(command, capture_output=True, text=True,
                                     errors="replace", env=env,
                                     timeout=RUN_TIMEOUT_S, check=False)
         except subprocess.TimeoutExpired:
-            failures.append(f"run {run} ({kind} at frame {frame}) hung")
+            failures.append(f"run {run} ({kind} at frame {frame}, from "
+                            f"{start}) hung")
             continue
         output = (result.stdout or "") + (result.stderr or "")
         problems = []
@@ -78,13 +96,20 @@ def main():
         if kind != "frames" and f"pushed event '{kind}' at frame {frame}" \
                 not in output:
             problems.append(f"the {kind} event was not pushed")
+        # The Gameplay state waits for its texts at boot; the sandbox,
+        # which names none, is created at once.
+        if start == "gameplay" and \
+                "start state 'gameplay' pushed at boot" not in output:
+            problems.append("the start state 'gameplay' was not pushed")
+        if start == "sandbox" or "flow: entered 'gameplay'" in output:
+            gameplay += 1
         if problems:
-            failures.append(f"run {run} ({kind} at frame {frame}): "
-                            + ", ".join(problems))
+            failures.append(f"run {run} ({kind} at frame {frame}, from "
+                            f"{start}): " + ", ".join(problems))
             print(output[-4000:])
     print(f"shutdown_stress: {args.runs} runs in "
-          f"{time.monotonic() - started:.1f} s, longest teardown "
-          f"{longest:.1f} ms")
+          f"{time.monotonic() - started:.1f} s ({gameplay} with a gameplay "
+          f"World), longest teardown {longest:.1f} ms")
     for failure in failures:
         print("FAIL:", failure)
     if not failures:

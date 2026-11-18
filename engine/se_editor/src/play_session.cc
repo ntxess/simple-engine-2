@@ -67,16 +67,24 @@ std::string_view TextOf(const std::vector<std::byte>& bytes) {
 
 class PlaySession::RecordingContent final : public ContentSource {
  public:
-  RecordingContent(const ContentSource& inner, std::string_view start_state)
-      : inner_(&inner) {
+  // |scene_path|'s text is recorded under |scene_key| (both empty: none).
+  RecordingContent(const ContentSource& inner, std::string_view start_state,
+                   std::string_view scene_path, std::string_view scene_key)
+      : inner_(&inner),
+        scene_path_(scene_path.empty() ? std::string()
+                                       : fs::Normalize(scene_path)),
+        scene_key_(scene_key) {
     bundle_.SetStartState(start_state);
   }
 
   [[nodiscard]] std::expected<std::string_view, Error> Text(
       std::string_view path) const override {
     auto text = inner_->Text(path);
-    // Keyed as se_replay is given it: the normalised path.
-    if (text) bundle_.Add(fs::Normalize(path), *text);
+    // Keyed as se_replay reads it: the normalised path, or for the
+    // Play-start file (a per-user path) its key.
+    std::string key = fs::Normalize(path);
+    if (!scene_key_.empty() && key == scene_path_) key = scene_key_;
+    if (text) bundle_.Add(key, *text);
     return text;
   }
 
@@ -84,6 +92,8 @@ class PlaySession::RecordingContent final : public ContentSource {
 
  private:
   const ContentSource* inner_;
+  std::string scene_path_;
+  std::string scene_key_;
   // Text() is const (ContentSource); the bundle is what it served.
   mutable ContentBundle bundle_;
 };
@@ -166,7 +176,8 @@ std::expected<std::unique_ptr<PlaySession>, Error> PlaySession::Start(
     // through the content gate; what the states read is kept for the
     // session's replay and dump (a content bundle).
     if (content != nullptr) {
-      s.recording_ = std::make_unique<RecordingContent>(*content, first);
+      s.recording_ = std::make_unique<RecordingContent>(
+          *content, first, s.start_.scene_path, s.start_.scene_key);
       env.content = s.recording_.get();
     }
     s.states_ = std::make_unique<GameStateStack>(instance.Factory(), env);
@@ -174,6 +185,12 @@ std::expected<std::unique_ptr<PlaySession>, Error> PlaySession::Start(
   }
   s.states_->Request(StackOp::kPush, first);
   s.states_->ApplyPending();
+  if (const Error* error = s.states_->EnterError()) {
+    Error out = *error;
+    out.message = std::format("the start state '{}' cannot be created: {}",
+                              first, error->message);
+    return std::unexpected(std::move(out));
+  }
   if (s.states_->RejectedCount() != 0 ||
       (s.states_->Depth() != 1 && s.states_->Waiting() != first)) {
     return Fail(ErrorCode::kInvalidArgument,
@@ -204,8 +221,25 @@ void PlaySession::SetRunning(bool running) noexcept { play_running_ = running; }
 void PlaySession::CompleteBoundary() {
   AssertMainThread();
   if (!states_ || states_->Waiting().empty() || Faulted()) return;
-  const InlineOwnerScope owner(OnMainThread());
-  driver_.CompleteBoundary(*states_, log_);
+  {
+    const InlineOwnerScope owner(OnMainThread());
+    driver_.CompleteBoundary(*states_, log_);
+  }
+  FaultOnEnterError();
+}
+
+void PlaySession::FaultOnEnterError() {
+  if (!states_ || Faulted() || states_->EnterError() == nullptr) return;
+  // A state whose content did not load (M13a): the session faults as for a
+  // text that did not load; the editor goes on.
+  const Error& error = *states_->EnterError();
+  PlayFault fault;
+  fault.where = "content";
+  fault.what = std::format("state '{}' cannot be created: {} ({}:{}:{})",
+                           states_->EnterErrorState(), error.message,
+                           error.path, error.line, error.column);
+  fault.tick = LastTick();
+  Fault(std::move(fault));
 }
 
 void PlaySession::Marker(SessionOp op) {
@@ -275,6 +309,8 @@ int PlaySession::TickFrame(const StepPlan& plan, InputSource& input,
     Fault(std::move(info));
     return ran;
   }
+  FaultOnEnterError();
+  if (Faulted()) return ran;
   if (stepping && ran > 0) {
     state_ = PlayState::kPaused;
     SetRunning(false);

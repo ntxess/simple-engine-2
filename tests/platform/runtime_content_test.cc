@@ -494,5 +494,39 @@ TEST_CASE("A state whose text does not load takes the fault path",
   REQUIRE(log.Find("no_such_scene.txt") >= 0);
 }
 
+// Review fix F2: a state whose text was read but whose content does not
+// load (a line the module cannot parse) is not created either: the stack
+// takes it off again (GameState::EnterError) and the App takes the fault
+// path with the text's path and line, instead of running on an empty World.
+TEST_CASE("A state whose content does not load takes the fault path",
+          "[content]") {
+  const std::string root = CopyContent("bad_content");
+  {
+    std::ofstream title(fs::Join(root, "content/title.txt"),
+                        std::ios::binary | std::ios::trunc);
+    title << "entity banner 0 0 0 0\nnot an entity\n";
+  }
+  LogLines log;
+  GameSetup setup = ContentSetup();
+  bool created = false;
+  const std::uint64_t start_ns = SDL_GetTicksNS();
+  setup.on_frame = [&](App& app, const FrameReport& /*report*/) {
+    AssertMainThread();
+    log.Take(app);
+    QuitAfter(app, start_ns, kRunLimitNs);
+    created = created || app.GameStates()->Depth() > 0;
+  };
+  setup.on_shutdown = [&](App& app, SDL_AppResult /*result*/) {
+    log.Settle(app);
+  };
+  REQUIRE(testing::RunTestApp(
+              std::move(setup),
+              {"--headless", "--frames", "100000000", "--fixed-frame-dt",
+               "8.3333", "--content-root", root}) == 1);
+  CHECK_FALSE(created);
+  REQUIRE(log.Find("state 'title' cannot be created") >= 0);
+  REQUIRE(log.Find("content/title.txt:2:1") >= 0);
+}
+
 }  // namespace
 }  // namespace se

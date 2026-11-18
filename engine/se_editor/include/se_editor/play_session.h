@@ -89,13 +89,16 @@ struct PlayStart {
   std::string asset_root;
   // Play game: where the editor wrote |bytes| for the start state.
   std::string scene_path;
+  // Play game: the key the content bundle records |scene_path|'s text
+  // under (EditorGame::play_game_scene_key; empty: its normalised path).
+  std::string scene_key;
   std::uint64_t seed = 0;
   std::uint32_t tick_rate = kDefaultTickRate;
 };
 
 // Why a session faulted.
 struct PlayFault {
-  // "tick" or "render".
+  // "tick", "render" or "content" (a state's text or scene did not load).
   std::string where;
   std::string what;
   // The tick that faulted (a tick fault) or the last tick run.
@@ -266,6 +269,9 @@ class PlaySession {
               PlayStart start);
   void Marker(SessionOp op) SE_REQUIRES(g_main) SE_EXCLUDES(g_sim_owner);
   void SetRunning(bool running) noexcept;
+  // Faults the session ("content") when a state could not enter
+  // (GameStateStack::EnterError).
+  void FaultOnEnterError();
 
   ModuleInstance* instance_;
   PlayStart start_;

@@ -119,6 +119,7 @@ class HierarchyPanel final : public Panel, public Probed {
   std::uint64_t cache_document_ = 0;
   std::uint64_t cache_revision_ = 0;
   std::map<Guid, bool> overrides_;
+  PrefabBaselines baselines_;
 };
 
 class InspectorPanel final : public Panel, public Probed {
@@ -143,9 +144,9 @@ class InspectorPanel final : public Panel, public Probed {
 
   void DrawEntity(const PanelContext& context, EditSink& sink,
                   entt::entity entity, Guid guid);
-  // The selected instance's prefab baseline: computed at most once a frame,
-  // kept while the document's revision holds (null: not an instance, or
-  // the game has no baseline).
+  // The selected instance's prefab baseline: one per prefab and recorded
+  // text (PrefabBaselines; null: not an instance, or the game has no
+  // baseline).
   [[nodiscard]] const EntityJson* Baseline(const PanelContext& context,
                                            Guid guid);
   void DrawComponent(const DrawTarget& target, const ComponentInfo& info);
@@ -158,13 +159,8 @@ class InspectorPanel final : public Panel, public Probed {
   EffectSourceDrawer effects_;
   TextEdits text_;
   std::map<Guid, Canvas> canvases_;
-  // The baseline cache.
-  std::optional<EntityJson> baseline_;
-  Guid baseline_guid_;
-  const World* baseline_world_ = nullptr;
-  std::uint64_t baseline_document_ = 0;
-  std::uint64_t baseline_revision_ = 0;
-  bool baseline_valid_ = false;
+  // The baseline cache: one per prefab and recorded text.
+  PrefabBaselines baselines_;
   // The components the last Draw marked as differing from the prefab.
   std::vector<std::string> overridden_;
 };

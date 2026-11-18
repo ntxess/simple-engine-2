@@ -526,6 +526,11 @@ int RunRampage(const Args& args) SE_REQUIRES(g_main) SE_EXCLUDES(g_sim_owner) {
           rampage::FlowConfig flow = rampage::GetFlowConfig();
           flow.gameplay_scene = args.scene;
           rampage::SetFlowConfig(std::move(flow));
+        } else if (ContentBundle::IsBundle(reader->StartBytes())) {
+          // An editor 'Play game' bundle names its Gameplay scene (F4).
+          if (auto read = ContentBundle::Read(reader->StartBytes())) {
+            replay::PointGameplayAtBundle(*read);
+          }
         }
         if (!args.edges_out.empty() && !WriteEdges(args.edges_out, *reader)) {
           std::fprintf(stderr, "se_replay: cannot write %s\n",

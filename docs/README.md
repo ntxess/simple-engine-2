@@ -430,9 +430,15 @@ checks. The same hook hangs the editor inside a tick of Play
 (`simple_editor --audio null --hang-test after-ticks:240 -- --editor-script
 tests/editor/scripts/play_hang.editor`, the test `crash.editor_play_hang`):
 the dump then carries the Play-start stream (0x53450006), and `se_replay
---from-dump DUMP --start-scene start.scene.json` starts from it. An App
-that waits for events (the editor idle in Edit mode) is not a hang; a dump
-taken then says in its session header that no session runs.
+--from-dump DUMP --start-scene start.scene.json` starts from it. A dump
+of 'Play game' (`play_game_hang.editor`, `crash.editor_play_game_hang`)
+carries the session's content bundle instead, and `se_replay --from-dump
+DUMP` runs the game's states from it (the Gameplay scene under
+`play-game.scene.json`). An App that waits for events (the editor idle in
+Edit mode) is not a hang; a dump taken then says in its session header that
+no session runs. A state whose scene is read but does not load (not JSON, an
+unknown component, a bad prefab) is not created: the game takes the fault
+path with the file's path, line and column.
 
 A game's states build their Worlds from texts (scenes, prefabs) the
 background lane reads (M13a): a state named in a push or replace is

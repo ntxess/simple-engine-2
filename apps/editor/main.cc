@@ -89,11 +89,16 @@ se::editor::EditorGame RampageForTheEditor() {
     return se::rampage::SaveScene(world, name);
   };
   game.save_scene_file = [](const se::World& world, std::string_view name,
-                            const std::string& asset_root) {
-    // With prefab references (kPrefabs): Save, Save As, autosave, recovery.
+                            const std::string& asset_root,
+                            const se::editor::PrefabTextMap* prefab_texts) {
+    // With prefab references (kPrefabs): Save, Save As, autosave,
+    // recovery.
     se::rampage::SceneWriteOptions options;
     options.mode = se::rampage::SceneWriteMode::kPrefabs;
     options.asset_root = asset_root;
+    if (prefab_texts != nullptr) {
+      options.resolver = se::rampage::TextsFirst(*prefab_texts, asset_root);
+    }
     return se::rampage::SaveScene(world, name, options);
   };
   game.load_prefab =
@@ -112,10 +117,14 @@ se::editor::EditorGame RampageForTheEditor() {
     return se::rampage::SavePrefabDocument(world, ref, name);
   };
   game.prefab_baseline = [](const se::World& world, se::Guid guid,
-                            const std::string& asset_root)
+                            const std::string& asset_root,
+                            const se::editor::PrefabTextMap* prefab_texts)
       -> std::expected<se::editor::EntityJson, se::Error> {
     se::rampage::SceneLoadOptions options;
     options.asset_root = asset_root;
+    if (prefab_texts != nullptr) {
+      options.resolver = se::rampage::TextsFirst(*prefab_texts, asset_root);
+    }
     auto baseline = se::rampage::PrefabBaseline(world, guid, options);
     if (!baseline) return std::unexpected(std::move(baseline.error()));
     return ToEntityJson(std::move(*baseline));
@@ -137,6 +146,7 @@ se::editor::EditorGame RampageForTheEditor() {
     }
     return out;
   };
+  game.prefab_names = &se::editor::MakePrefabNames;
   game.removed_with = [](std::string_view component) {
     std::vector<std::string> out;
     for (const std::string_view derived : se::rampage::RemovedWith(component)) {
@@ -163,6 +173,7 @@ se::editor::EditorGame RampageForTheEditor() {
     flow.content_root = se::fs::Parent(asset_root);
     se::rampage::SetFlowConfig(std::move(flow));
   };
+  game.play_game_scene_key = std::string(se::rampage::kPlayGameSceneKey);
   game.camera = [](const se::World& world) {
     return se::rampage::SandboxCamera(world);
   };

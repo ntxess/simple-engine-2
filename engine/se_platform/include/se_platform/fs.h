@@ -54,6 +54,14 @@ struct PathInfo {
 // root.
 [[nodiscard]] std::string Normalize(std::string_view path);
 
+// The existing file or directory |path| names, as the file system spells
+// it and normalised: absolute, symbolic links resolved and, on Windows, in
+// the file's own case, so two spellings of one file give one string (a
+// path that differs only in case names the same file there). Normalize(path)
+// when it does not exist or cannot be resolved. Not lexical: it asks the
+// file system.
+[[nodiscard]] std::string Canonical(std::string_view path);
+
 // True for "/x", "\\x" and "C:/x" style paths.
 [[nodiscard]] bool IsAbsolute(std::string_view path) noexcept;
 

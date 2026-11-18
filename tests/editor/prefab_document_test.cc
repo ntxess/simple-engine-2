@@ -35,8 +35,10 @@
 #include "se_editor/commands.h"
 #include "se_editor/documents.h"
 #include "se_editor/edit_document.h"
+#include "se_editor/panel.h"
 #include "se_editor/prefab_commands.h"
 #include "se_editor/recovery.h"
+#include "se_editor_panels/panel_support.h"
 #include "se_editor_panels/stat_name_command.h"
 #include "se_editor_panels/stress_generator.h"
 #include "se_platform/fs.h"
@@ -261,7 +263,8 @@ TEST_CASE(
       REQUIRE(HasStatName(world, "Mana"));
     }
     // Revert to prefab: enemy 1's Path back to the prefab's.
-    auto baseline = game.prefab_baseline(world, kEnemy1, content.assets);
+    auto baseline =
+        game.prefab_baseline(world, kEnemy1, content.assets, nullptr);
     REQUIRE(baseline.has_value());
     REQUIRE(DiffersFromBaseline(world, kEnemy1, "Path", *baseline));
     auto revert = MakeRevertToPrefab(world, kEnemy1, "Path", *baseline);
@@ -479,6 +482,59 @@ TEST_CASE("A saved prefab updates its instances in an open scene",
   REQUIRE(scene->Dirty());
 }
 
+// Review fix F1: a stat the prefab gains (a name the scene's World did not
+// know) comes with the rebase's components, and the scene saves without an
+// override of it; the saved scene follows a later change of the prefab.
+TEST_CASE("A stat a prefab gains is not written as an override",
+          "[prefab][rebase]") {
+  const testing::MainThreadScope main_thread;
+  const ModuleInstance module(rampage::RampageModule());
+  const EditorGame game = testing::RampageEditorGame();
+  const Content content("prefab_gains_stat");
+  std::unique_ptr<EditDocument> scene =
+      OpenScene(module.Registry(), game, content);
+  REQUIRE_FALSE(HasStatName(scene->Get(), "Armor"));
+  std::string armored = content.Read(kEnemyRef);
+  const std::string from = R"("Stats": {"HP": 100, "Speed": 500})";
+  const std::size_t at = armored.find(from);
+  REQUIRE(at != std::string::npos);
+  armored.replace(at, from.size(),
+                  R"("Stats": {"HP": 100, "Speed": 500, "Armor": 5})");
+  content.Write(kEnemyRef, armored);
+  {
+    const InlineOwnerScope owner(OnMainThread());
+    auto rebased = RebaseDocument(*scene, game, kEnemyRef, armored);
+    REQUIRE(rebased.has_value());
+    REQUIRE(*rebased);
+  }
+  REQUIRE(StatOf(scene->Get(), kEnemy1, "Armor") == 5.0F);
+  REQUIRE(HasStatName(scene->Get(), "Armor"));
+  REQUIRE(scene->UndoCount() == 1);
+  auto saved = scene->SerializeFile();
+  REQUIRE(saved.has_value());
+  INFO(*saved);
+  // Every enemy equals its prefab: no Stats override, no registry form.
+  REQUIRE(Compact(*saved).find("\"Stats\":") == std::string::npos);
+  REQUIRE(saved->find("\"values\"") == std::string::npos);
+  // Undo takes the name back with the components.
+  {
+    const InlineOwnerScope owner(OnMainThread());
+    REQUIRE(scene->Undo().value_or(false));
+    REQUIRE_FALSE(HasStatName(scene->Get(), "Armor"));
+    REQUIRE(scene->Redo().value_or(false));
+    REQUIRE(HasStatName(scene->Get(), "Armor"));
+  }
+  // The saved scene follows the prefab's next change.
+  content.Write("scenes/sandbox.scene.json", *saved);
+  std::string hp999 = armored;
+  hp999.replace(hp999.find(R"("HP": 100)"), 9, R"("HP": 999)");
+  content.Write(kEnemyRef, hp999);
+  std::unique_ptr<EditDocument> reopened =
+      OpenScene(module.Registry(), game, content);
+  REQUIRE(StatOf(reopened->Get(), kEnemy1, "HP") == 999.0F);
+  REQUIRE(StatOf(reopened->Get(), kEnemy2, "Armor") == 5.0F);
+}
+
 TEST_CASE("A prefab changed on disk is one undo step per document",
           "[prefab][rebase]") {
   const testing::MainThreadScope main_thread;
@@ -612,6 +668,85 @@ TEST_CASE("Recovery files with prefab references round-trip",
       OpenScene(module.Registry(), game, content, decoded->scene);
   REQUIRE(recovered->Hash() == doc->Hash());
   REQUIRE(recovered->ContentHash() == doc->ContentHash());
+}
+
+// Review fix F3: a prefab file that cannot be read does not cost the unsaved
+// edits. The recovery text takes the overrides against the prefab texts the
+// document recorded, and loads back to the same document.
+TEST_CASE("A recovery file survives a broken prefab file",
+          "[prefab][recovery]") {
+  const testing::MainThreadScope main_thread;
+  const ModuleInstance module(rampage::RampageModule());
+  const EditorGame game = testing::RampageEditorGame();
+  const Content content("recovery_broken_prefab");
+  std::unique_ptr<EditDocument> doc =
+      OpenScene(module.Registry(), game, content);
+  {
+    const InlineOwnerScope owner(OnMainThread());
+    REQUIRE(doc->Apply(std::make_unique<SetComponentCommand>(
+                           kEnemy1, "Collider",
+                           JsonOf(doc->Get(), kEnemy1, "Collider"),
+                           R"({"half_extents":{"x":30,"y":30}})"))
+                .has_value());
+  }
+  const std::string enemy = content.Read(kEnemyRef);
+  content.Write(kEnemyRef, "oops");
+  REQUIRE_FALSE(doc->SerializeFile().has_value());
+  auto text = doc->SerializeRecovery();
+  REQUIRE(text.has_value());
+  REQUIRE(text->find("\"prefab\"") != std::string::npos);
+  // Loaded once the prefab is back: the same document.
+  content.Write(kEnemyRef, enemy);
+  std::unique_ptr<EditDocument> recovered =
+      OpenScene(module.Registry(), game, content, *text);
+  REQUIRE(recovered->Hash() == doc->Hash());
+  REQUIRE(recovered->ContentHash() == doc->ContentHash());
+}
+
+// Review fix F8: the panels' prefab baselines come from the document's
+// recorded prefab texts, one scratch load per prefab and text, however many
+// instances are asked about and however often the document changes.
+TEST_CASE("Prefab baselines are kept per prefab, not per row",
+          "[prefab][panels]") {
+  const testing::MainThreadScope main_thread;
+  const ModuleInstance module(rampage::RampageModule());
+  const EditorGame game = testing::RampageEditorGame();
+  const Content content("baselines_per_prefab");
+  std::unique_ptr<EditDocument> doc =
+      OpenScene(module.Registry(), game, content);
+  PanelContext context;
+  context.world = &doc->Get();
+  context.game = &game;
+  context.asset_root = doc->Desc().asset_root;
+  context.document = 1;
+  context.prefab_texts = &doc->PrefabTexts();
+  PrefabBaselines baselines;
+  for (std::uint64_t revision = 1; revision <= 5; ++revision) {
+    context.revision = revision;
+    for (const Guid guid : {kEnemy1, kEnemy2, kEnemy3, kEnemy4, kEnemy5}) {
+      REQUIRE(baselines.Get(context, guid) != nullptr);
+    }
+    REQUIRE(baselines.Get(context, kPlayer) != nullptr);
+  }
+  REQUIRE(baselines.Loads() == 2);
+  // No prefab file is read: the recorded texts serve them.
+  const std::string hp250 = EnemyWith(content, 250);
+  content.Write(kEnemyRef, "oops");
+  PrefabBaselines fresh;
+  REQUIRE(fresh.Get(context, kEnemy1) != nullptr);
+  REQUIRE(DiffersFromBaseline(doc->Get(), kEnemy1, "Path",
+                              *fresh.Get(context, kEnemy1)));
+  REQUIRE_FALSE(DiffersFromBaseline(doc->Get(), kEnemy1, "Stats",
+                                    *fresh.Get(context, kEnemy1)));
+  // A rebase records a new text: the baseline follows it.
+  {
+    const InlineOwnerScope owner(OnMainThread());
+    REQUIRE(RebaseDocument(*doc, game, kEnemyRef, hp250).value_or(false));
+  }
+  const EntityJson* rebased = fresh.Get(context, kEnemy1);
+  REQUIRE(rebased != nullptr);
+  REQUIRE(fresh.Loads() == 2);
+  REQUIRE_FALSE(DiffersFromBaseline(doc->Get(), kEnemy1, "Stats", *rebased));
 }
 
 TEST_CASE("A stress press saves as prefab instances", "[prefab][stress]") {

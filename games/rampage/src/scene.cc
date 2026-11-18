@@ -367,6 +367,17 @@ std::expected<std::string, Error> ReadTextFile(const std::string& path) {
   return text;
 }
 
+PrefabResolver TextsFirst(
+    const std::map<std::string, std::string, std::less<>>& texts,
+    std::string asset_root) {
+  return [&texts, root = std::move(asset_root)](
+             std::string_view ref) -> std::expected<std::string, Error> {
+    const auto it = texts.find(ref);
+    if (it != texts.end()) return it->second;
+    return ReadTextFile(root + "/" + std::string(ref));
+  };
+}
+
 void ApplySceneSettings(World& world, const SceneSettings& settings) {
   auto& ctx = world.Reg().ctx();
   ctx.insert_or_assign(settings.bounds);
@@ -608,12 +619,36 @@ bool Holds(const entt::registry& reg, const ComponentInfo& info,
   return storage != nullptr && storage->contains(e);
 }
 
+// |into| gains |from|'s names for the ids it has none for.
+void MergeNames(NameTable& into, const NameTable& from) {
+  for (const auto& [id, name] : from.All()) {
+    if (into.Name(id).empty()) into.Add(name);
+  }
+}
+
 // A World's stat and texture names, empty when it has none.
 class SceneNames {
  public:
   explicit SceneNames(const World& world)
       : stats_(world.CReg().ctx().find<StatNames>()),
         textures_(world.CReg().ctx().find<TextureNames>()) {}
+  // |world|'s names, and |also|'s for the ids |world| does not name: an
+  // instance's component that came from its prefab (a rebase) is written
+  // with the prefab's names, as the prefab writes it (review fix F1).
+  SceneNames(const World& world, const World& also) : SceneNames(world) {
+    merged_stats_ = Stats();
+    merged_textures_ = Textures();
+    if (const auto* stats = also.CReg().ctx().find<StatNames>()) {
+      MergeNames(merged_stats_, *stats);
+    }
+    if (const auto* textures = also.CReg().ctx().find<TextureNames>()) {
+      MergeNames(merged_textures_, *textures);
+    }
+    stats_ = &merged_stats_;
+    textures_ = &merged_textures_;
+  }
+  SceneNames(const SceneNames&) = delete;
+  SceneNames& operator=(const SceneNames&) = delete;
 
   [[nodiscard]] const StatNames& Stats() const {
     return stats_ != nullptr ? *stats_ : no_stats_;
@@ -627,6 +662,8 @@ class SceneNames {
   const TextureNames* textures_;
   StatNames no_stats_;
   TextureNames no_textures_;
+  StatNames merged_stats_;
+  TextureNames merged_textures_;
 };
 
 // One component in the scene form: the registry's JSON with stats and
@@ -825,7 +862,6 @@ std::expected<std::vector<json::Value>, Error> ComputeOverrides(
   if (instances.empty()) return out;
   const entt::registry& reg = world.CReg();
   const ComponentRegistry& registry = world.Registry();
-  const SceneNames names(world);
 
   // The prefabs' own components, and one bare instance of each.
   std::map<std::string, json::Value, std::less<>> authored;
@@ -846,6 +882,8 @@ std::expected<std::vector<json::Value>, Error> ComputeOverrides(
   if (!bare_world) return std::unexpected(bare_world.error());
   const World& base = **bare_world;
   const SceneNames base_names(base);
+  // The entities' scene form: their World's names, then the prefabs'.
+  const SceneNames names(world, base);
 
   for (std::size_t i = 0; i < instances.size(); ++i) {
     const entt::entity e = instances[i].entity;
@@ -1096,6 +1134,28 @@ std::expected<std::string, Error> SavePrefabDocument(const World& world,
   if (!name.empty()) doc.Set("name", json::Value::String(std::string(name)));
   doc.Set("components", std::move(components));
   return json::Write(doc, 2) + "\n";
+}
+
+std::expected<PrefabNameSet, Error> PrefabNames(std::string_view text,
+                                                std::string_view ref) {
+  const std::string where = std::format("prefab \"{}\"", ref);
+  auto parsed = ParsePrefab(text, where);
+  if (!parsed) return std::unexpected(parsed.error());
+  StatNames stats;
+  TextureNames textures;
+  for (const json::Member& c : parsed->components.Members()) {
+    json::Value value = c.value;
+    if (auto named = StatNamesToIds(c.key, value, stats); !named) {
+      return FailAt(where + ".components." + c.key, named.error());
+    }
+    if (auto keyed = TextureNameToKey(c.key, value, textures); !keyed) {
+      return FailAt(where + ".components." + c.key, keyed.error());
+    }
+  }
+  PrefabNameSet out;
+  for (const auto& [id, name] : stats.All()) out.stats.push_back(name);
+  for (const auto& [key, name] : textures.All()) out.textures.push_back(name);
+  return out;
 }
 
 std::expected<EntityComponentsJson, Error> PrefabBaseline(

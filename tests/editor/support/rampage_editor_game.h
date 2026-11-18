@@ -26,6 +26,7 @@
 #include "se_core/world.h"
 #include "se_editor/edit_document.h"
 #include "se_editor/editor_game.h"
+#include "se_editor_panels/stat_name_command.h"
 #include "se_sim/game_module.h"
 
 namespace se::testing {
@@ -69,11 +70,16 @@ namespace se::testing {
     return rampage::SaveScene(world, name);
   };
   game.save_scene_file = [](const World& world, std::string_view name,
-                            const std::string& asset_root) {
-    // With prefab references (kPrefabs): Save, Save As, autosave, recovery.
+                            const std::string& asset_root,
+                            const editor::PrefabTextMap* prefab_texts) {
+    // With prefab references (kPrefabs): Save, Save As, autosave,
+    // recovery.
     rampage::SceneWriteOptions options;
     options.mode = rampage::SceneWriteMode::kPrefabs;
     options.asset_root = asset_root;
+    if (prefab_texts != nullptr) {
+      options.resolver = rampage::TextsFirst(*prefab_texts, asset_root);
+    }
     return rampage::SaveScene(world, name, options);
   };
   game.load_prefab =
@@ -92,10 +98,14 @@ namespace se::testing {
     return rampage::SavePrefabDocument(world, ref, name);
   };
   game.prefab_baseline = [](const World& world, Guid guid,
-                            const std::string& asset_root)
+                            const std::string& asset_root,
+                            const editor::PrefabTextMap* prefab_texts)
       -> std::expected<editor::EntityJson, Error> {
     rampage::SceneLoadOptions options;
     options.asset_root = asset_root;
+    if (prefab_texts != nullptr) {
+      options.resolver = rampage::TextsFirst(*prefab_texts, asset_root);
+    }
     auto baseline = rampage::PrefabBaseline(world, guid, options);
     if (!baseline) return std::unexpected(std::move(baseline.error()));
     return ToEntityJson(std::move(*baseline));
@@ -116,6 +126,7 @@ namespace se::testing {
     }
     return out;
   };
+  game.prefab_names = &editor::MakePrefabNames;
   game.removed_with = [](std::string_view component) {
     std::vector<std::string> out;
     for (const std::string_view derived : rampage::RemovedWith(component)) {

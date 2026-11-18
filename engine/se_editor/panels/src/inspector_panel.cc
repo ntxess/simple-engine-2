@@ -79,33 +79,7 @@ std::optional<CanvasView> InspectorPanel::CanvasViewOf(const Guid& guid) const {
 
 const EntityJson* InspectorPanel::Baseline(const PanelContext& context,
                                            Guid guid) {
-  if (context.game == nullptr || !context.game->prefab_baseline ||
-      !PrefabOf(*context.world, guid)) {
-    return nullptr;
-  }
-  // In Edit mode the revision says whether the document changed; in Play
-  // (revision 0) it is computed again each frame.
-  const bool fresh = baseline_valid_ && context.revision != 0 &&
-                     baseline_guid_ == guid &&
-                     baseline_world_ == context.world &&
-                     baseline_document_ == context.document &&
-                     baseline_revision_ == context.revision;
-  if (!fresh) {
-    auto baseline = context.game->prefab_baseline(
-        *context.world, guid, std::string(context.asset_root));
-    baseline_valid_ = true;
-    baseline_guid_ = guid;
-    baseline_world_ = context.world;
-    baseline_document_ = context.document;
-    baseline_revision_ = context.revision;
-    if (baseline) {
-      baseline_ = std::move(*baseline);
-    } else {
-      baseline_.reset();
-      EditSink::ReportError(baseline.error());
-    }
-  }
-  return baseline_ ? &*baseline_ : nullptr;
+  return baselines_.Get(context, guid);
 }
 
 void InspectorPanel::Draw(const PanelContext& context) {

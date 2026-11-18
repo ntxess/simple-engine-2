@@ -5,6 +5,7 @@
 #include <array>
 #include <expected>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -51,7 +52,11 @@ class SandboxState final : public GameState {
     const MutationGate gate = world_->OpenGate(GateReason::kLoad);
     if (auto loaded = LoadRequestedScene(*world_, PendingScene(), env_.content);
         !loaded) {
+      // Not created (M13a): the stack's owner takes the fault path.
       SE_LOG_ERROR("sandbox: {}", loaded.error().message);
+      error_ = loaded.error();
+      if (error_->path.empty()) error_->path = PendingScene().path;
+      return;
     }
     // The rules' sounds (M8); never part of the World's state.
     AddAudioEvents(*world_);
@@ -69,8 +74,13 @@ class SandboxState final : public GameState {
                   : std::span<World* const>();
   }
 
+  [[nodiscard]] const Error* EnterError() const noexcept override {
+    return error_ ? &*error_ : nullptr;
+  }
+
  private:
   StateEnv env_;
+  std::optional<Error> error_;
   std::unique_ptr<World> world_;
   std::array<World*, 1> worlds_{};
 };

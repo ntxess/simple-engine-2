@@ -62,8 +62,10 @@ GameStateStack::GameStateStack(const GameStateFactory& factory, StateEnv env)
 
 GameStateStack::~GameStateStack() = default;
 
-void GameStateStack::Request(StackOp op, std::string_view state_id) {
-  queue_.push_back(StateCommand{op, std::string(state_id)});
+void GameStateStack::Request(StackOp op, std::string_view state_id,
+                             std::string_view only_if_top) {
+  queue_.push_back(
+      StateCommand{op, std::string(state_id), std::string(only_if_top)});
 }
 
 void GameStateStack::CollectWorldRequests() {
@@ -84,6 +86,8 @@ void GameStateStack::CollectWorldRequests() {
 }
 
 void GameStateStack::ApplyPending() {
+  // A state that failed to enter: its owner takes the fault path.
+  if (enter_error_) return;
   CollectWorldRequests();
   const bool was_waiting = waiting_;
   waiting_ = false;
@@ -96,6 +100,16 @@ void GameStateStack::ApplyPending() {
       break;
     }
     const StateCommand& front = queue_.front();
+    // A conditional command whose state is no longer on top is dropped
+    // here, where a replay drops it too (before the gate is asked).
+    if (!front.only_if_top.empty() && TopId() != front.only_if_top) {
+      ++dropped_;
+      SE_LOG_INFO(
+          "GameState command for '{}' dropped: '{}' is on top, not '{}'",
+          front.state_id, TopId(), front.only_if_top);
+      queue_.pop_front();
+      continue;
+    }
     // The content gate: a state is created only once it is ready; the
     // command and every one behind it wait (unknown ids are rejected by
     // Apply as before).
@@ -111,6 +125,7 @@ void GameStateStack::ApplyPending() {
     const StateCommand command = std::move(queue_.front());
     queue_.pop_front();
     Apply(command);
+    if (enter_error_) return;
   }
 }
 
@@ -144,10 +159,25 @@ void GameStateStack::Apply(const StateCommand& command) {
   stack_.push_back(Entry{command.state_id, std::move(state)});
   ++revision_;
   stack_.back().state->OnEnter();
+  if (const Error* error = stack_.back().state->EnterError()) {
+    // Not created after all: the state goes again, and the error stays.
+    enter_error_ = *error;
+    enter_error_state_ = command.state_id;
+    SE_LOG_ERROR("GameState '{}' could not enter: {} ({}:{}:{})",
+                 command.state_id, error->message, error->path, error->line,
+                 error->column);
+    stack_.back().state->OnExit();
+    stack_.pop_back();
+    if (command.op == StackOp::kPush && !stack_.empty()) {
+      stack_.back().state->OnResume();
+    }
+  }
 }
 
 void GameStateStack::Clear() {
   queue_.clear();
+  enter_error_.reset();
+  enter_error_state_.clear();
   waiting_ = false;
   if (!stack_.empty()) ++revision_;
   while (!stack_.empty()) {

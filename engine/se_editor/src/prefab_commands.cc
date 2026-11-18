@@ -222,9 +222,22 @@ std::expected<bool, Error> RebaseDocument(EditDocument& document,
   auto results = game.rebase_instances(document.Get(), ref, recorded->second,
                                        new_text, document.Desc().asset_root);
   if (!results) return std::unexpected(std::move(results.error()));
-  auto command = MakeRebase(document.Get(),
-                            std::format("Prefab changed: {}", ref), *results);
+  const std::string label = std::format("Prefab changed: {}", ref);
+  auto command = MakeRebase(document.Get(), label, *results);
   if (!command) return std::unexpected(std::move(command.error()));
+  // The names the new text brings (a stat the prefab gained) go into the
+  // document with the components that use them, in the same undo step, so
+  // the writer names them as the prefab does (review fix F1).
+  if (*command != nullptr && game.prefab_names) {
+    auto names = game.prefab_names(document.Get(), ref, new_text);
+    if (!names) return std::unexpected(std::move(names.error()));
+    if (*names != nullptr) {
+      auto group = std::make_unique<CommandGroup>(label);
+      group->Add(std::move(*names));
+      group->Add(std::move(*command));
+      *command = std::move(group);
+    }
+  }
   // Not part of undo: after an undo the instances differ from the file's
   // prefab, which the next save writes as overrides.
   document.SetPrefabText(ref, new_text);

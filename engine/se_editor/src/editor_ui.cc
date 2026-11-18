@@ -459,6 +459,9 @@ void Editor::DrawUi(App& app, const FrameReport& report) {
     context.prefab_document = document->Desc().kind == DocumentKind::kPrefab;
     context.document = documents_.ActiveId();
     context.revision = play_ ? 0 : document->Revision();
+    if (!play_ && document->Desc().kind == DocumentKind::kScene) {
+      context.prefab_texts = &document->PrefabTexts();
+    }
   }
   viewports_->StartReports();
   DrawBuiltInPanels(context);

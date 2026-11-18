@@ -43,6 +43,7 @@
 #include "se_core/thread_role.h"
 #include "se_core/thread_safety.h"
 #include "se_core/types.h"
+#include "se_sim/content_bundle.h"
 
 namespace se::replay {
 
@@ -98,6 +99,12 @@ struct FromDumpResult {
   // Empty when the replay ran and matched the dump; else why not.
   std::string error;
 };
+
+// rampage's Gameplay state reads the editor's 'Play game' scene when
+// |bundle| holds it (rampage::kPlayGameSceneKey): a Play game replay or dump
+// carries its Gameplay scene under that key (review fix F4). True when it
+// did.
+bool PointGameplayAtBundle(const ContentBundle& bundle);
 
 // Replays a dumped rampage session headless (the module, the scene under
 // |root|, whose hash must match, the seed and the frames from the dump) up

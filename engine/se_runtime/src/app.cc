@@ -22,6 +22,7 @@
 #include <format>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -626,6 +627,10 @@ std::expected<void, Error> App::StartGame() {
     game_->states.Request(StackOp::kPush, start);
     game_->states.ApplyPending();
   }
+  if (setup_.push_start_state && game_->states.EnterError() != nullptr) {
+    // A boot error: the start state's content did not load (M13a).
+    return Fail(ErrorCode::kParse, *StateContentFault());
+  }
   if (setup_.push_start_state &&
       (game_->states.RejectedCount() != 0 ||
        (game_->states.Depth() != 1 && game_->states.Waiting() != start))) {
@@ -644,6 +649,24 @@ std::expected<void, Error> App::StartGame() {
   // stream); the editor attaches its own Play session's.
   if (!setup_.extension) SyncSessionDump();
   return {};
+}
+
+std::optional<std::string> App::StateContentFault() const {
+  // A text that did not load (the state was never created), or a state
+  // whose OnEnter could not load what it read (it was taken off again).
+  if (assets_ && assets_->StateError() != nullptr) {
+    const Error& error = *assets_->StateError();
+    return std::format("state '{}' cannot be created: {} ({}:{}:{})",
+                       assets_->StateErrorState(), error.message, error.path,
+                       error.line, error.column);
+  }
+  if (game_ && game_->states.EnterError() != nullptr) {
+    const Error& error = *game_->states.EnterError();
+    return std::format("state '{}' cannot be created: {} ({}:{}:{})",
+                       game_->states.EnterErrorState(), error.message,
+                       error.path, error.line, error.column);
+  }
+  return std::nullopt;
 }
 
 std::string_view App::StartStateId() const noexcept {
@@ -705,16 +728,20 @@ void App::OnFocusLost() {
   }
   const Tick next = game_->driver.NextTick();
   const InlineOwnerScope owner(OnMainThread());
+  // Applied only if |top| is still on top when it applies: a World's own
+  // request (Escape's Pause, a death's GameOver) of the same tick applies
+  // first (review fix F6).
   game_->session.Enqueue(
-      MakeGameStateCommand(next, command->op, command->state_id), next,
+      MakeGameStateCommand(next, command->op, command->state_id, top), next,
       game_->states);
   SE_LOG_INFO(
-      "focus lost on '{}': GameState command {} '{}' logged before tick {}",
+      "focus lost on '{}': GameState command {} '{}' logged before tick {} "
+      "(it applies if '{}' is still on top then)",
       top,
       command->op == StackOp::kPush
           ? "push"
           : (command->op == StackOp::kReplace ? "replace" : "pop"),
-      command->state_id, next);
+      command->state_id, next, top);
 }
 
 std::expected<void, Error> App::StartAssets() {
@@ -1584,14 +1611,11 @@ SDL_AppResult App::Iterate() {
     const InlineOwnerScope owner(OnMainThread());
     game_->driver.CompleteBoundary(game_->states, game_->session);
   }
-  if (!setup_.extension && assets_ && assets_->StateError() != nullptr) {
-    const Error& error = *assets_->StateError();
-    const std::string what =
-        std::format("state '{}' cannot be created: {} ({}:{}:{})",
-                    assets_->StateErrorState(), error.message, error.path,
-                    error.line, error.column);
-    SE_LOG_ERROR("{}", what);
-    return OnCallbackFault("state content", what);
+  if (!setup_.extension) {
+    if (const std::optional<std::string> what = StateContentFault()) {
+      SE_LOG_ERROR("{}", *what);
+      return OnCallbackFault("state content", *what);
+    }
   }
   // The dump's session stream before the frame's ticks (the editor's rule,
   // ADR-111).
@@ -1638,6 +1662,14 @@ SDL_AppResult App::Iterate() {
     costs_.AddTick(ticks_sec / ran);
   }
   report.next_tick = NextTick();
+  // M13a: a state a tick pushed whose content did not load (review fix F2):
+  // the fault path, before an emptied stack could end the game cleanly.
+  if (!setup_.extension) {
+    if (const std::optional<std::string> what = StateContentFault()) {
+      SE_LOG_ERROR("{}", *what);
+      return OnCallbackFault("state content", *what);
+    }
+  }
   // M13: the game ends when its last state is gone.
   if (!setup_.extension && booted_ && game_->states.Depth() == 0 &&
       game_->states.Waiting().empty() && game_->states.PendingCount() == 0 &&

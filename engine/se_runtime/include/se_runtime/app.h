@@ -108,7 +108,8 @@
 // starts the two-phase quit ("the game ended: no state left"). Focus lost
 // while a session runs asks GameSetup::on_focus_lost for a GameState
 // command, queued in the SessionLog against the next tick. A text that
-// does not load is a state error: the fault path. The game's dumps carry
+// does not load, or a state whose content does not (GameState::EnterError),
+// is a state error: the fault path. The game's dumps carry
 // the session's replay file without frames (ADR-111's stream: header,
 // start bytes, SessionLog), attached again before a frame's ticks when the
 // log or the loaded texts grew; the start bytes are the scene file, or the
@@ -513,6 +514,10 @@ class App final : public WindowListener {
   // scene file, or the content bundle), focus loss, the empty stack, the
   // dump's session stream, and the test hooks that push events.
   [[nodiscard]] std::string_view StartStateId() const noexcept;
+  // The game build's state error, described with its path, line and column:
+  // a state's text that did not load, or a state whose content did not
+  // (GameStateStack::EnterError); nullopt when none.
+  [[nodiscard]] std::optional<std::string> StateContentFault() const;
   [[nodiscard]] std::vector<std::byte> SessionStartBytes() const;
   void OnFocusLost() SE_REQUIRES(g_main);
   void SyncSessionDump() SE_REQUIRES(g_main);

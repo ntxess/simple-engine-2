@@ -17,6 +17,7 @@
 #include <utility>
 #include <vector>
 
+#include "game_rampage/flow.h"
 #include "game_rampage/module.h"
 #include "rampage/support/rampage_session.h"
 #include "rampage/support/seinput.h"
@@ -267,6 +268,14 @@ std::vector<std::byte> WriteMinidump(std::span<const MinidumpStream> streams) {
   return out;
 }
 
+bool PointGameplayAtBundle(const ContentBundle& bundle) {
+  if (bundle.Latest(rampage::kPlayGameSceneKey) == nullptr) return false;
+  rampage::FlowConfig flow = rampage::GetFlowConfig();
+  flow.gameplay_scene = std::string(rampage::kPlayGameSceneKey);
+  rampage::SetFlowConfig(std::move(flow));
+  return true;
+}
+
 FromDumpResult ReplayDumpedRampage(const DumpedSession& session,
                                    const std::string& root,
                                    const std::string& start_scene,
@@ -338,6 +347,40 @@ FromDumpResult ReplayDumpedRampage(const DumpedSession& session,
           "Play-start stream (0x53450006)";
       return result;
     }
+    auto file = ReplayReader::Open(session.play_start);
+    if (!file) {
+      result.error =
+          "the dump's Play-start stream: " + std::move(file.error().message);
+      return result;
+    }
+    const std::span<const std::byte> start = file->StartBytes();
+    const std::span<const std::byte> log = file->SessionBytes();
+    session_log.assign(log.begin(), log.end());
+    if (ContentBundle::IsBundle(start)) {
+      // 'Play game' (M13 integration): the stream starts from the content
+      // bundle of every text its states read, the Gameplay scene (the
+      // Play-start bytes the header hashes) under rampage's Play game key
+      // (review fix F4).
+      auto read = ContentBundle::Read(start);
+      if (!read) {
+        result.error = "the dump's content bundle: " + read.error().message;
+        return result;
+      }
+      const ContentText* scene = read->Latest(rampage::kPlayGameSceneKey);
+      if (scene != nullptr &&
+          MakeReplayHeader(std::as_bytes(std::span<const char>(scene->text)),
+                           header.seed, header.tick_rate)
+                  .scene_hash != header.scene_hash) {
+        result.error = std::format(
+            "the dump's Play game scene differs from the dumped session's "
+            "Play-start bytes (hash {:016x})",
+            header.scene_hash);
+        return result;
+      }
+      bundle = std::move(*read);
+    }
+  }
+  if (editor_play && !bundle) {
     if (start_scene.empty()) {
       result.error =
           "an editor Play session needs a file for its Play-start "
@@ -360,8 +403,6 @@ FromDumpResult ReplayDumpedRampage(const DumpedSession& session,
       return result;
     }
     scene = start_scene;
-    const std::span<const std::byte> log = file->SessionBytes();
-    session_log.assign(log.begin(), log.end());
   }
   const std::optional<std::vector<std::byte>> bytes =
       bundle ? std::optional<std::vector<std::byte>>(std::vector<std::byte>())
@@ -402,6 +443,7 @@ FromDumpResult ReplayDumpedRampage(const DumpedSession& session,
     return result;
   }
   if (bundle) {
+    if (module == &rampage::RampageModule()) PointGameplayAtBundle(*bundle);
     ContentBundleSource source(std::move(*bundle));
     testing::FrameListInput frames(session.frames);
     testing::ModuleSessionOptions run;

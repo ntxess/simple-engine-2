@@ -133,6 +133,15 @@ if(NOT CMAKE_BUILD_TYPE STREQUAL "Release" AND TARGET simple_editor)
   # of assets/ and config/, so saves and write-file never touch the
   # repository.
   set(_se_content "${CMAKE_SOURCE_DIR}")
+  # Review fix F2: a Pause scene that does not load faults 'Play game'.
+  _se_editor_script(play_game_bad_scene play_game_bad_scene
+    --content-copy "${_se_content}" --expect-fault-files
+    --expect "Play.Faulted: content fault")
+  # Review fix F3: a prefab broken on disk; the recovery file is still
+  # written, against the document's recorded prefab texts.
+  _se_editor_script(terminate_broken_prefab terminate_broken_prefab
+    --content-copy "${_se_content}" --expect-recovery-file
+    --expect "recovery takes the prefab texts the document recorded")
   _se_editor_script(prefabs prefabs --content-copy "${_se_content}"
     --expect-file-contains assets/prefabs/enemy.prefab.json "250"
     --expect-file-contains assets/scenes/sandbox.scene.json

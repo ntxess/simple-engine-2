@@ -158,6 +158,21 @@ if(TARGET rampage AND TARGET simple_editor AND
     LABELS "unit;rampage" TIMEOUT 180)
 endif()
 
+# Review fix F2 (M13a): a Gameplay scene that is read but does not load (not
+# JSON, an unknown component, a missing prefab) is a state error: rampage
+# logs it with its path, line and column and takes the fault path
+# (bad_scene_test.py; headless).
+if(TARGET rampage AND NOT CMAKE_BUILD_TYPE STREQUAL "Release")
+  add_test(NAME rampage.bad_scene_faults
+    COMMAND Python3::Interpreter
+            "${CMAKE_CURRENT_SOURCE_DIR}/bad_scene_test.py"
+            --rampage $<TARGET_FILE:rampage>
+            --content "${CMAKE_SOURCE_DIR}"
+            --out "${_se_rampage_out}/bad_scene")
+  set_tests_properties(rampage.bad_scene_faults PROPERTIES
+    LABELS "unit;rampage" TIMEOUT 180)
+endif()
+
 set(_se_ref "${CMAKE_SOURCE_DIR}/tests/fixtures/reference")
 set(_se_refcmp "${CMAKE_SOURCE_DIR}/tools/refcmp/refcmp.py")
 

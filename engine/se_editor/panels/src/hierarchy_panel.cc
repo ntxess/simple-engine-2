@@ -5,7 +5,8 @@
 // spawn order (ADR-100). The prefab column shows each instance's prefab
 // (its file name; "-" for an entity without one) and marks an instance
 // with overrides ("*"): what differs from a bare instance of its prefab
-// (EditorGame::prefab_baseline), computed only for the rows on screen and
+// (EditorGame::prefab_baseline, one per prefab and recorded text: no file
+// is read while the panel draws), computed only for the rows on screen and
 // kept until the document changes (Edit mode; ADR-119). A prefab
 // document's one root has no prefab column.
 
@@ -90,10 +91,10 @@ bool HierarchyPanel::HasOverrides(const PanelContext& context,
   if (const auto it = overrides_.find(guid); it != overrides_.end()) {
     return it->second;
   }
-  auto baseline = context.game->prefab_baseline(
-      *context.world, guid, std::string(context.asset_root));
+  // One baseline per prefab and text, from the document's recorded texts.
+  const EntityJson* baseline = baselines_.Get(context, guid);
   const bool has =
-      baseline.has_value() &&
+      baseline != nullptr &&
       !OverriddenComponents(*context.world, guid, *baseline).empty();
   overrides_.emplace(guid, has);
   return has;

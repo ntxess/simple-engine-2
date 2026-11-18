@@ -120,6 +120,22 @@ if(TARGET rampage AND _se_crash_backend STREQUAL "crashpad" AND
     set_tests_properties(crash.editor_play_hang PROPERTIES
       LABELS "desktop;crash;editor" TIMEOUT 120
       ENVIRONMENT "SE_NO_MESSAGE_BOX=1")
+    # Review fix F4: the same for 'Play game', whose dump stream starts from
+    # its content bundle; se_replay --from-dump runs the game's states from
+    # it (Title, then Gameplay on the Play-start bytes) to the hanging tick.
+    add_test(NAME crash.editor_play_game_hang
+      COMMAND Python3::Interpreter
+              "${CMAKE_CURRENT_SOURCE_DIR}/rampage_hang_test.py"
+              --editor "$<TARGET_FILE:simple_editor>"
+              --script
+              "${CMAKE_SOURCE_DIR}/tests/editor/scripts/play_game_hang.editor"
+              --se-replay "$<TARGET_FILE:se_replay>"
+              --read-dump "${_se_read_dump}"
+              --work "${_se_crash_work}/editor_play_game_hang"
+              --scenario editor_play_game_hang)
+    set_tests_properties(crash.editor_play_game_hang PROPERTIES
+      LABELS "desktop;crash;editor" TIMEOUT 120
+      ENVIRONMENT "SE_NO_MESSAGE_BOX=1")
   endif()
 endif()
 

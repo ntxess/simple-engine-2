@@ -4429,6 +4429,17 @@ cooldowns), `rampage.scene.Instances changed in the World save as their
 overrides`, `rampage.scene.Flatten mode writes what M3's writer wrote`,
 `rampage.Merge diffs turn one value into another`.
 
+**Amended (M11/M13 review fix F1, 2026-11-17).** The writer's scene form
+of an instance's component uses its World's stat and texture names and,
+for an id the World does not name, the bare instances' (the prefabs')
+names: a component that came from the prefab (a rebase that brought a new
+stat) is written as the prefab writes it, so pass 1's diff against the
+prefab is empty and no registry-form override is invented. Before, an id
+the scene World lacked kept the registry form ({"values": [...]}), whose
+diff against the named prefab form was a whole Stats override that pinned
+the instances' Stats for good. Checked by `editor.A stat a prefab gains is
+not written as an override`.
+
 ## ADR-116 Prefab documents keep their file's form; rebases and baselines load scratch Worlds (2026-11-17)
 
 **Decision.**
@@ -4494,6 +4505,18 @@ rebases), `rampage.scene.A prefab baseline is a bare instance`,
 `rampage.scene.Every component FinishLoad adds is removed with its
 source`, `rampage.scene.A stat name can be forgotten`.
 
+**Amended (M11/M13 review fixes F1 and F3, 2026-11-17).**
+- A rebase brings the prefab's names with its components: EditorGame gains
+  `prefab_names` (additive; rampage: se_editor_panels' MakePrefabNames over
+  game_rampage's new PrefabNames(text, ref)), a command that records the
+  stat and texture names the new text writes and the document's tables
+  lack (PrefabNamesCommand: Apply adds them, Revert removes the ones it
+  added, ToSession none). RebaseDocument applies it in the rebase's one
+  undo step, before the components, so undo takes the names back with
+  them and the hashes stay the identity.
+- `rampage::TextsFirst(texts, asset_root)`: a resolver that serves
+  recorded prefab texts and reads only a reference they lack.
+
 ## ADR-117 Several documents: the DocumentSet, the close prompt, the content hash, files with prefab references (2026-11-17)
 
 **Context.** Decision 1 of 2026-11-17: the editor holds several documents,
@@ -4557,6 +4580,25 @@ scenes`, `editor.Recovery files with prefab references round-trip`,
 `editor.Play-start bytes stay flattened`, `editor.A prefab document saves
 its file and edits its root`, `editor.script.documents`,
 `editor.script.close_dirty`.
+
+**Amended (M11/M13 review fixes F3 and F7, 2026-11-17).**
+- **Recovery never depends on a prefab file.** EditorGame::save_scene_file
+  takes the document's recorded prefab texts (`const PrefabTextMap*`; null:
+  every prefab from the asset root, as Save does). Autosaves and recovery
+  files (TERMINATING, session end) use EditDocument::SerializeRecovery:
+  the kPrefabs file text, else, when a prefab file cannot be read (deleted
+  or broken by another program), the overrides against the prefab texts
+  the document recorded, else the document flattened. Save and Save As keep
+  ADR-114's rule (a kPrefabs save fails when a prefab cannot be read).
+  Checked by `editor.A recovery file survives a broken prefab file` and
+  `editor.script.terminate_broken_prefab`.
+- **One file, one document.** DocumentSet::FindByPath compares
+  fs::Canonical paths (se_platform, additive: the file system's own
+  spelling, absolute, links resolved, on Windows the file's case through
+  GetFinalPathNameByHandleW; Normalize when the file does not exist), so a
+  path that differs only in case opens no second document; Editor::RefOf
+  derives a prefab's reference from canonical paths too. Checked by
+  `editor.A file opens as one document whatever its path's spelling`.
 
 ## ADR-118 Commands are bound to their document; coalesce scopes end with their panel's frame (2026-11-17)
 
@@ -4656,6 +4698,18 @@ component`, `editor_panels.The Stats drawer edits a stat by name, adds and
 drops stats` and `editor_panels.The effect drawer's stat is typed as text
 and set on Enter` (the group), `editor.script.stat_names`,
 `editor.script.prefabs`.
+
+**Amended (M11/M13 review fix F8, 2026-11-17).** EditorGame::
+prefab_baseline takes the document's recorded prefab texts (`const
+PrefabTextMap*`, as save_scene_file), and PanelContext gains `prefab_texts`
+(the active scene document's, in Edit mode). The Hierarchy's markers and
+the Inspector share one cache, PrefabBaselines (panel_support.h): a bare
+instance's components depend only on its prefab's text, so one baseline is
+kept per prefab reference and recorded text, and drawing the panels reads
+no prefab file on main and loads one scratch World per prefab and text, not
+one per row and revision (a gizmo drag made a new revision every frame).
+The script's expect-override resolves the same way. Checked by
+`editor.Prefab baselines are kept per prefab, not per row`.
 
 ## ADR-120 Hot reload into documents: a foreign watch tag, reads by content, a prefab change as one undo step (2026-11-17)
 
@@ -4870,6 +4924,23 @@ only ever delays a boundary at which no tick runs. Pinning is what makes
 state keeps, and the swap entry is what lets a replay read what each state
 read.
 
+**Amended (M11/M13 review fix F2, 2026-11-17).** A state whose text was
+read but whose content does not load (not JSON, an unknown component, a
+missing or bad prefab, a content line its module cannot parse) is a state
+error too. GameState gains `EnterError()` (additive, default null): a state
+whose OnEnter could not build its Worlds sets it. GameStateStack::Apply
+then exits and destroys the state again (a push resumes the state below),
+keeps the error (EnterError, EnterErrorState; Clear resets it) and applies
+nothing more; SimDriver::TickInline runs no tick after it. The App takes the
+same fault path as for a failed read, with the error's path, line and
+column (App::StateContentFault, at the boundary check and after the
+frame's ticks, before an emptied stack could end the game cleanly; at boot
+a start state that cannot enter fails the boot), and the editor's 'Play
+game' faults ("content") as for a failed read. rampage's flow states and
+sandbox state and the content test module's states report it. Checked by
+`runtime.A state whose content does not load takes the fault path`,
+`rampage.bad_scene_faults` and `A state that cannot enter is not kept`.
+
 ## ADR-124 The game's quit, focus loss, the empty stack and its dumps (2026-11-17)
 
 **Decision.**
@@ -4926,6 +4997,18 @@ read.
 drain can wait for it; the drain's ticks were never part of what a replay
 promises. Decision 5 is the game's side of ADR-089: a game has nothing a
 user could save again, so a failed write must not keep it running.
+
+**Amended (M11/M13 review fix F6, 2026-11-17).** The focus loss's command
+is decided where it applies. StateCommand gains `only_if_top` (and
+GameStateStack::Request a third, defaulted parameter): a command whose
+state is not on top when it reaches the front of the queue (the commands
+before it applied, before the content gate is asked) is dropped
+(DroppedCount, logged). The App logs the focus loss's command with the top
+state it was computed for; the SessionLog entry carries it after the state
+id (written only when set, so older entries read as before), so a replay
+drops it exactly where the live session did. Escape and a focus loss in
+one frame give one Pause, and a death and a focus loss give GameOver
+alone. Checked by `A conditional command applies only over its state`.
 
 ## ADR-125 rampage's game flow: four sprite states, a FlowSystem that acts only where a state put a role (2026-11-17)
 
@@ -5072,6 +5155,15 @@ M12 crash tests, `rampage.frames_300`, `input.pushed_keys_replay_*`,
 **Checked by.** `rampage.flow.The scenes load the same through content as
 from files`, `rampage.flow.The sandbox reads through StateEnv::content`,
 `rampage.flow.Scene dependencies are its prefabs under the asset dir`.
+
+**Note (M11/M13 review finding F9, 2026-11-17).** The 'sandbox' state
+still reads its scene file on main in OnEnter (`--start-state sandbox`,
+which M4/M12's tests use): its SceneRequest has no content_path and its
+StateAssets name no text, because a sandbox session whose texts went
+through the lane would start from a content bundle, which the sandbox
+replays and dumps (se_replay's scene-file path, the M12 hang dumps) do not
+read yet. Kept as decided here; the remaining synchronous read is a ledger
+row until se_replay runs sandbox sessions from bundles.
 
 ## ADR-127 The flow's recorded session and its golden (2026-11-17)
 
@@ -5261,6 +5353,22 @@ in rampage.
 Play-start bytes; se_replay reproduces the session from its bundle),
 `editor.desktop.play_game_input` (its four edges from the bundle replay),
 `editor.desktop.play_session`, `editor.Play-start bytes stay flattened`.
+
+**Amended (M11/M13 review fix F4, 2026-11-17).** A Play game dump replays.
+The bundle no longer keys the Gameplay scene by the per-user absolute
+Play-start path: PlayStart gains `scene_key` (EditorGame::
+play_game_scene_key, rampage's kPlayGameSceneKey "play-game.scene.json"),
+and the recording content source records the Play-start file's text under
+it. se_replay points rampage's Gameplay state at that key when a bundle
+holds it (replay::PointGameplayAtBundle), so a Play game replay needs no
+`--scene` (run_editor.py passes none), and `--from-dump` of an editor Play
+session whose stream starts from a bundle runs it through the game's
+states (RunModuleSession) instead of the Play-start file, after checking
+that the bundle's Gameplay text is the Play-start bytes the session header
+hashes. The header keeps hashing the Play-start bytes. Checked by
+`crash.editor_play_game_hang` (a hang inside Gameplay's tick 240 after the
+Title: the dump replays Title then Gameplay to tick 240 and matches the
+published hash).
 
 ## ADR-130 The editor's quit durability test: one file held, documents checked against their files (2026-11-17)
 

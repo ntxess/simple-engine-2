@@ -180,10 +180,12 @@ SessionEntry MakeDestroyEntity(Tick apply_before, Guid target) {
 }
 
 SessionEntry MakeGameStateCommand(Tick apply_before, StackOp op,
-                                  std::string_view state_id) {
+                                  std::string_view state_id,
+                                  std::string_view only_if_top) {
   ByteWriter out;
   out.U8(static_cast<std::uint8_t>(op));
   out.String(state_id);
+  if (!only_if_top.empty()) out.String(only_if_top);
   SessionEntry entry;
   entry.apply_before = apply_before;
   entry.op = SessionOp::kGameStateCommand;
@@ -272,11 +274,13 @@ bool SessionLog::Apply(const SessionEntry& entry, GameStateStack& states) {
     ByteReader in(entry.payload);
     std::uint8_t op = 0;
     std::string state_id;
+    std::string only_if_top;
     if (!in.U8(&op) || !in.String(&state_id) ||
-        op > static_cast<std::uint8_t>(StackOp::kPop)) {
+        op > static_cast<std::uint8_t>(StackOp::kPop) ||
+        (!in.AtEnd() && (!in.String(&only_if_top) || !in.AtEnd()))) {
       return false;
     }
-    states.Request(static_cast<StackOp>(op), state_id);
+    states.Request(static_cast<StackOp>(op), state_id, only_if_top);
     states.ApplyPending();
     return true;
   }

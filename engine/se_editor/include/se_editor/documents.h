@@ -78,7 +78,8 @@ class DocumentSet {
 
   [[nodiscard]] DocumentEntry* Find(DocumentId id) noexcept;
   [[nodiscard]] const DocumentEntry* Find(DocumentId id) const noexcept;
-  // The document open on |path| (normalised), or null.
+  // The document open on |path|, or null: the same file however it is
+  // spelt (fs::Canonical; on Windows a path differing only in case).
   [[nodiscard]] DocumentEntry* FindByPath(std::string_view path) noexcept;
   // The document whose name is |name|, else the one at index |name|
   // (0-based), as the script's activate names them.

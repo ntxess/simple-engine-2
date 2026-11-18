@@ -49,14 +49,21 @@ std::string StemOf(std::string_view path) {
 
 std::string Editor::RefOf(std::string_view path) const {
   if (app_ == nullptr) return {};
-  const std::string root =
-      fs::Normalize(fs::Join(app_->Paths().content_root, game_.asset_dir));
-  const std::string normal = fs::Normalize(path);
-  if (normal.size() <= root.size() + 1 || !normal.starts_with(root) ||
-      normal[root.size()] != '/') {
-    return {};
-  }
-  return normal.substr(root.size() + 1);
+  const std::string asset_root =
+      fs::Join(app_->Paths().content_root, game_.asset_dir);
+  const auto under = [](const std::string& root, const std::string& file) {
+    if (file.size() <= root.size() + 1 || !file.starts_with(root) ||
+        file[root.size()] != '/') {
+      return std::string();
+    }
+    return file.substr(root.size() + 1);
+  };
+  // Both as the file system spells them: a prefab opened through a path
+  // that differs in case has the reference its instances name (F7). The
+  // lexical form when the file system cannot say (a file being replaced).
+  std::string ref = under(fs::Canonical(asset_root), fs::Canonical(path));
+  if (ref.empty()) ref = under(fs::Normalize(asset_root), fs::Normalize(path));
+  return ref;
 }
 
 std::expected<std::unique_ptr<EditDocument>, Error> Editor::LoadDocument(
@@ -404,7 +411,7 @@ void Editor::Autosave(App& app, std::uint64_t now_ns) {
                             document.Dirty())) {
       continue;
     }
-    auto text = document.SerializeFile();
+    auto text = document.SerializeRecovery();
     if (!text) {
       SE_LOG_ERROR("editor: autosave of '{}': {}", document.Desc().name,
                    text.error().message);
@@ -435,7 +442,7 @@ void Editor::WriteRecoveryFiles(QuitReason reason) {
   if (app_ == nullptr) return;
   for (DocumentEntry* entry : documents_.Dirty()) {
     const EditDocument& document = *entry->document;
-    auto text = document.SerializeFile();
+    auto text = document.SerializeRecovery();
     if (!text) {
       SE_LOG_ERROR("editor: recovery of '{}' at {}: {}", document.Desc().name,
                    QuitReasonName(reason), text.error().message);

@@ -22,6 +22,7 @@
 #include "se_core/world.h"
 #include "se_editor/commands.h"
 #include "se_editor/panel.h"
+#include "se_editor/prefab_commands.h"
 
 namespace se::editor {
 
@@ -159,6 +160,46 @@ std::string ShortGuid(const Guid& guid) { return ToString(guid).substr(0, 8); }
 std::string_view EntityName(const World& world, entt::entity entity) {
   const auto* name = world.CReg().try_get<Name>(entity);
   return name != nullptr ? std::string_view(name->value) : std::string_view{};
+}
+
+const EntityJson* PrefabBaselines::Get(const PanelContext& context, Guid guid) {
+  if (context.world == nullptr || context.game == nullptr ||
+      !context.game->prefab_baseline) {
+    return nullptr;
+  }
+  const std::optional<std::string> ref = PrefabOf(*context.world, guid);
+  if (!ref) return nullptr;
+  if (world_ != context.world || document_ != context.document) {
+    by_ref_.clear();
+    world_ = context.world;
+    document_ = context.document;
+  }
+  std::optional<std::string> text;
+  if (context.prefab_texts != nullptr) {
+    if (const auto it = context.prefab_texts->find(*ref);
+        it != context.prefab_texts->end()) {
+      text = it->second;
+    }
+  }
+  const auto found = by_ref_.find(*ref);
+  if (found != by_ref_.end() && found->second.text == text &&
+      (text.has_value() || found->second.revision == context.revision)) {
+    return found->second.baseline ? &*found->second.baseline : nullptr;
+  }
+  ++loads_;
+  auto baseline = context.game->prefab_baseline(*context.world, guid,
+                                                std::string(context.asset_root),
+                                                context.prefab_texts);
+  Entry entry;
+  entry.text = std::move(text);
+  entry.revision = context.revision;
+  if (baseline) {
+    entry.baseline = std::move(*baseline);
+  } else {
+    EditSink::ReportError(baseline.error());
+  }
+  Entry& kept = by_ref_.insert_or_assign(*ref, std::move(entry)).first->second;
+  return kept.baseline ? &*kept.baseline : nullptr;
 }
 
 }  // namespace se::editor

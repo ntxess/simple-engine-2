@@ -147,6 +147,10 @@ struct PanelContext {
   bool prefab_document = false;
   std::uint64_t document = 0;
   std::uint64_t revision = 0;
+  // The active scene document's recorded prefab texts in Edit mode (null in
+  // Play and for a prefab document): prefab baselines resolve from them, so
+  // no prefab file is read on main while the panels draw (review fix F8).
+  const PrefabTextMap* prefab_texts = nullptr;
 };
 
 class Panel {

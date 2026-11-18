@@ -1,0 +1,9 @@
+# Review fix F3: a prefab file broken on disk (another program wrote it)
+# does not cost the unsaved edits. At SDL_EVENT_TERMINATING the dirty
+# document's recovery file takes the overrides against the prefab texts
+# the document recorded (content copy only).
+set 5a4db0c5-0000-4000-8000-000000000000 Transform {"pos":{"x":444,"y":111},"rot":0,"scale":{"x":1,"y":1},"teleport_tick":0}
+expect-dirty yes
+write-file assets/prefabs/enemy.prefab.json oops
+terminate
+wait-frames 5

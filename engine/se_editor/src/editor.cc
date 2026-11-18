@@ -442,7 +442,14 @@ void Editor::CompletePlayBoundary(App& app) {
   // 'Play game' (M13 integration, ADR-129): a state waiting at the content
   // gate is created at this boundary once its texts and assets are
   // resident; the App holds the frame's ticks while it waits.
-  if (!play_->Waiting().empty()) play_->CompleteBoundary();
+  if (!play_->Waiting().empty()) {
+    play_->CompleteBoundary();
+    // A state whose scene did not load faulted the session.
+    if (play_->Faulted()) {
+      SaveFaultFiles(app);
+      return;
+    }
+  }
   AssetRuntime* assets = app.Assets();
   if (assets == nullptr || assets->StateError() == nullptr) return;
   // A text that did not load: the state is never created, and the session

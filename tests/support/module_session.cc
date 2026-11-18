@@ -3,11 +3,13 @@
 #include "support/module_session.h"
 
 #include <cstdint>
+#include <format>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
 
+#include "se_core/error.h"
 #include "se_core/input_frame.h"
 #include "se_core/jobs.h"
 #include "se_core/thread_role.h"
@@ -84,6 +86,15 @@ ModuleSessionResult RunModuleSession(const ModuleSessionOptions& options) {
       const InputFrame frame = input.Latch(driver.NextTick(), 0, true);
       const TickResult tick =
           driver.RunTick(states, frame, log, recorder, audio, 0);
+      if (const Error* error = states.EnterError()) {
+        // A state whose content did not load: the session ends here, as
+        // the runtime's takes the fault path.
+        result.error =
+            std::format("state '{}' cannot be created: {} ({}:{}:{})",
+                        states.EnterErrorState(), error->message, error->path,
+                        error->line, error->column);
+        break;
+      }
       result.hashes.push_back(tick.hash);
       result.top_states.push_back(tick.top_state);
       if (options.on_tick) options.on_tick(tick.tick, states);

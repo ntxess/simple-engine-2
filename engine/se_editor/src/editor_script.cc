@@ -528,9 +528,11 @@ bool Editor::RunDocumentAction(App& app, const ScriptAction& action,
       ScriptFailure(action, "the game has no prefab baseline");
       return true;
     }
+    // Resolved as the panels resolve it: the document's recorded texts.
     auto baseline = game_.prefab_baseline(
         *world, *guid,
-        active != nullptr ? active->Desc().asset_root : std::string());
+        active != nullptr ? active->Desc().asset_root : std::string(),
+        active != nullptr && !play_ ? &active->PrefabTexts() : nullptr);
     if (!baseline) {
       ScriptFailure(action, baseline.error().message);
       return true;

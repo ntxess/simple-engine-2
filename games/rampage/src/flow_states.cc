@@ -3,12 +3,14 @@
 // The Title, Gameplay, Pause and GameOver states (flow.h). Each owns one
 // World built from its scene (flow.h's FlowSceneOf) through
 // StateEnv::content, with prefabs resolved through the same source, and
-// carries a FlowContext with its role. Pause is an overlay: pushed over
-// Gameplay, its World steps and Gameplay's does not, and both draw.
+// carries a FlowContext with its role; a scene that does not load is the
+// state's EnterError (the state is not created). Pause is an overlay: pushed
+// over Gameplay, its World steps and Gameplay's does not, and both draw.
 
 #include <array>
 #include <expected>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -73,14 +75,16 @@ class FlowState final : public GameState {
     const MutationGate gate = world_->OpenGate(GateReason::kLoad);
     const std::string scene = FlowSceneOf(id_);
     auto loaded = LoadFlowScene(*world_, env_, scene);
-    if (loaded) {
-      SE_LOG_INFO("flow: entered '{}' ({}: {} entities)", id_, scene,
-                  loaded->entities);
-    } else {
-      const Error& error = loaded.error();
+    if (!loaded) {
+      // Not created (M13a): the stack takes the state off again and its
+      // owner takes the fault path with this error.
+      error_ = loaded.error();
       SE_LOG_ERROR("flow: '{}' cannot load {} (line {}, column {}): {}", id_,
-                   error.path, error.line, error.column, error.message);
+                   error_->path, error_->line, error_->column, error_->message);
+      return;
     }
+    SE_LOG_INFO("flow: entered '{}' ({}: {} entities)", id_, scene,
+                loaded->entities);
     world_->Reg().ctx().emplace<FlowContext>(FlowContext{role_});
     // The rules' sounds (M8); never part of the World's state.
     if (role_ == FlowRole::kGameplay) AddAudioEvents(*world_);
@@ -102,10 +106,15 @@ class FlowState final : public GameState {
                   : std::span<World* const>();
   }
 
+  [[nodiscard]] const Error* EnterError() const noexcept override {
+    return error_ ? &*error_ : nullptr;
+  }
+
  private:
   StateEnv env_;
   std::string_view id_;
   FlowRole role_;
+  std::optional<Error> error_;
   std::unique_ptr<World> world_;
   std::array<World*, 1> worlds_{};
 };

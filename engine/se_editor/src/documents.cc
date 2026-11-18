@@ -90,9 +90,16 @@ const DocumentEntry* DocumentSet::Find(DocumentId id) const noexcept {
 
 DocumentEntry* DocumentSet::FindByPath(std::string_view path) noexcept {
   if (path.empty()) return nullptr;
+  // One file, however it is spelt: on Windows a path that differs only in
+  // case names the same file (review fix F7).
   const std::string normal = fs::Normalize(path);
+  const std::string canonical = fs::Canonical(normal);
   for (const std::unique_ptr<DocumentEntry>& entry : entries_) {
-    if (entry->document->Desc().path == normal) return entry.get();
+    const std::string& held = entry->document->Desc().path;
+    if (held.empty()) continue;
+    if (held == normal || fs::Canonical(held) == canonical) {
+      return entry.get();
+    }
   }
   return nullptr;
 }

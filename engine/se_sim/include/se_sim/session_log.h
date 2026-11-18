@@ -110,8 +110,11 @@ struct ComponentValue {
     const ComponentRegistry& registry, Tick apply_before,
     std::span<const std::pair<Guid, std::vector<ComponentValue>>> entities);
 [[nodiscard]] SessionEntry MakeDestroyEntity(Tick apply_before, Guid target);
-[[nodiscard]] SessionEntry MakeGameStateCommand(Tick apply_before, StackOp op,
-                                                std::string_view state_id);
+// |only_if_top| non-empty: StateCommand::only_if_top (written after the
+// state id; entries without it read as before).
+[[nodiscard]] SessionEntry MakeGameStateCommand(
+    Tick apply_before, StackOp op, std::string_view state_id,
+    std::string_view only_if_top = {});
 [[nodiscard]] SessionEntry MakeAssetSwap(Tick apply_before, Guid asset,
                                          std::uint64_t content_hash);
 // kPause, kResume, kStep and kStop markers.
