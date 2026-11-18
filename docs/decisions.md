@@ -4764,6 +4764,18 @@ hash` (the rebase among every kind), `editor.script.hot_reload`
 (`write-file` on a prefab and on the document, during Play too),
 `editor.desktop.prefabs`.
 
+**Amendment (2026-11-18): a catch-up read when a watch starts.** The scan's
+baseline is the file as the lane finds it when it adds the watch, which is
+after the document read it; a file written in between became the baseline
+and was never reported (editor.script.hot_reload failed intermittently).
+The first watch of a path is now followed, on the path's strand
+(StrandOf), by a read compared like any change. A read counts as a handled
+change (what `wait-reload` waits for) only when the file differs from what
+the documents hold, so one write reported twice (catch-up read and scan,
+or a save's own scan) is not counted twice. Checked by
+`editor.script.hot_reload_before_watch` (a throttled save holds the lane
+while a scene is opened and rewritten; fails on the old code).
+
 ## ADR-121 The stress generator's Edit-mode press is one command group of prefab instances (2026-11-17; amends ADR-102)
 
 **Decision.** In Edit mode a press is one CommandGroup "Generate N

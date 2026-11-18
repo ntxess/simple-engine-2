@@ -11,6 +11,11 @@
 //   - a document's own file: unchanged content is ignored, a clean
 //     document is reloaded (its undo stack starts again), a dirty one asks
 //     (Reload, Keep mine).
+// The scan's baseline is the file as it is when the watch is added on the
+// lane, which is after the document read it; so the first watch of a path
+// is followed, on the path's strand, by a catch-up read compared like any
+// change: a file written between the document's read and the watch is
+// still seen.
 // During Play the changes wait for Stop and are handled then, in order.
 
 #include <cstddef>
@@ -53,8 +58,12 @@ void Editor::Watch(const EditDocument& document, bool watch) {
     int& count = watch_refs_[path];
     if (watch) {
       if (count++ == 0 && assets != nullptr) {
-        assets->Lane().Submit(JobDesc{},
-                              MakeWatchJob(path, kEditorWatchTag, true));
+        JobDesc desc;
+        desc.strand = StrandOf(path);
+        assets->Lane().Submit(desc, MakeWatchJob(path, kEditorWatchTag, true));
+        const Ticket ticket = assets->Lane().Submit(desc, MakeReadJob(path));
+        reads_.emplace_back(ticket, path);
+        catch_up_reads_.push_back(ticket);
       }
       continue;
     }
@@ -93,16 +102,20 @@ void Editor::OnFileChanged(const FileChange& change) {
   SE_LOG_INFO("editor: {} changed on disk; reading it", change.path);
 }
 
-void Editor::OnFileRead(const std::string& path, std::string text) {
+void Editor::OnFileRead(const std::string& path, std::string text,
+                        bool catch_up) {
   if (play_) {
-    file_events_.push_back(FileEvent{path, true, std::move(text)});
+    file_events_.push_back(FileEvent{path, true, std::move(text), catch_up});
     return;
   }
+  bool differs = false;
   const std::string normal = fs::Normalize(path);
   // The document open on this file.
   if (DocumentEntry* entry = documents_.FindByPath(normal)) {
     const DocumentId id = entry->id;
-    switch (ClassifyFileText(*entry->document, text)) {
+    const FileTextAction action = ClassifyFileText(*entry->document, text);
+    differs = action != FileTextAction::kUnchanged;
+    switch (action) {
       case FileTextAction::kUnchanged:
         SE_LOG_DEBUG("editor: {} holds what '{}' has: nothing to reload",
                      normal, entry->document->Desc().name);
@@ -142,11 +155,19 @@ void Editor::OnFileRead(const std::string& path, std::string text) {
   }
   // A prefab file: the open scenes holding instances of it.
   const std::string ref = RefOf(normal);
-  if (!ref.empty()) RebasePrefab(ref, text);
+  if (!ref.empty() && RebasePrefab(ref, text)) differs = true;
+  // Only a read that found something new counts as a handled change, so a
+  // second report of one write (the catch-up read and the scan) is not
+  // counted twice.
+  if (!differs) return;
+  if (catch_up) {
+    SE_LOG_INFO("editor: {} changed before it was watched; handled", normal);
+  }
   ++file_events_handled_;
 }
 
-void Editor::RebasePrefab(const std::string& ref, const std::string& text) {
+bool Editor::RebasePrefab(const std::string& ref, const std::string& text) {
+  bool differs = false;
   for (const auto& owned : documents_.All()) {
     DocumentEntry& entry = *owned;
     EditDocument& document = *entry.document;
@@ -154,6 +175,7 @@ void Editor::RebasePrefab(const std::string& ref, const std::string& text) {
     if (recorded == document.PrefabTexts().end() || recorded->second == text) {
       continue;
     }
+    differs = true;
     edits_.EndScopeOf(documents_, entry.id, "a prefab it uses changed");
     std::expected<bool, Error> rebased;
     {
@@ -171,6 +193,7 @@ void Editor::RebasePrefab(const std::string& ref, const std::string& text) {
                          : "has no instance that changes",
                 document.UndoLabel());
   }
+  return differs;
 }
 
 void Editor::ResolveReloadPrompt(App& /*app*/, std::string_view answer) {
@@ -221,7 +244,7 @@ void Editor::RunFileEvents() {
   file_events_.clear();
   for (FileEvent& event : events) {
     if (event.read) {
-      OnFileRead(event.path, std::move(event.text));
+      OnFileRead(event.path, std::move(event.text), event.catch_up);
       continue;
     }
     FileChange change;

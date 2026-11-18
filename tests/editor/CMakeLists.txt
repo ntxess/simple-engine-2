@@ -154,6 +154,8 @@ if(NOT CMAKE_BUILD_TYPE STREQUAL "Release" AND TARGET simple_editor)
   _se_editor_script(hot_reload hot_reload --content-copy "${_se_content}"
     --expect "reloaded as document" --expect "asking (Reload, Keep mine)"
     --expect "handled at Stop")
+  _se_editor_script(hot_reload_before_watch hot_reload_before_watch
+    --content-copy "${_se_content}" --expect "changed before it was watched")
   _se_editor_script(stat_names stat_names --scene-copy "${_se_sandbox}"
     --expect-scene-contains "Armor")
   # M11/M13 integration: the design's quit durability test, editor side.

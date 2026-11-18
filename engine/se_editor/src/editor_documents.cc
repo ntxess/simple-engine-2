@@ -483,6 +483,13 @@ void Editor::OnLaneCompletion(const LaneCompletion& completion) {
       read != reads_.end()) {
     const std::string path = std::move(read->second);
     reads_.erase(read);
+    const bool catch_up = std::erase(catch_up_reads_, completion.ticket) > 0;
+    if (!completion.result && catch_up) {
+      // Nothing to compare: the scan reports the file when it appears.
+      SE_LOG_DEBUG("editor: no catch-up read of {}: {}", path,
+                   completion.result.error().message);
+      return;
+    }
     if (!completion.result) {
       ++file_events_handled_;
       SE_LOG_ERROR("editor: reading {} after its change: {}", path,
@@ -495,7 +502,7 @@ void Editor::OnLaneCompletion(const LaneCompletion& completion) {
     if (bytes != nullptr) {
       text.assign(reinterpret_cast<const char*>(bytes->data()), bytes->size());
     }
-    file_events_.push_back(FileEvent{path, true, std::move(text)});
+    file_events_.push_back(FileEvent{path, true, std::move(text), catch_up});
     return;
   }
   const auto it =

@@ -239,6 +239,8 @@ class Editor final : public AppExtension, public QuitProvider {
     std::string path;
     bool read = false;
     std::string text;
+    // The read made when the file started being watched (see Watch).
+    bool catch_up = false;
   };
 
   enum class Request : std::uint8_t {
@@ -325,11 +327,15 @@ class Editor final : public AppExtension, public QuitProvider {
       const EditDocument& document) const;
   void Watch(const EditDocument& document, bool watch) SE_REQUIRES(g_main);
   void OnFileChanged(const FileChange& change) SE_REQUIRES(g_main);
-  void OnFileRead(const std::string& path, std::string text)
-      SE_REQUIRES(g_main);
+  // A read counts as a handled change only when the file differs from
+  // what the documents hold. |catch_up|: the read made when the file
+  // started being watched (logged when it found a change).
+  void OnFileRead(const std::string& path, std::string text,
+                  bool catch_up = false) SE_REQUIRES(g_main);
   // A prefab's file now holds |text|: every open scene holding instances
-  // of it gets one undo step "Prefab changed: <ref>".
-  void RebasePrefab(const std::string& ref, const std::string& text)
+  // of it gets one undo step "Prefab changed: <ref>". Returns whether any
+  // open document recorded another text for it.
+  bool RebasePrefab(const std::string& ref, const std::string& text)
       SE_REQUIRES(g_main);
   // The reference of |path| under the asset root ("" when not under it).
   [[nodiscard]] std::string RefOf(std::string_view path) const;
@@ -510,6 +516,8 @@ class Editor final : public AppExtension, public QuitProvider {
   // the queued file events, and the changes handled so far.
   std::map<std::string, int, std::less<>> watch_refs_;
   std::vector<std::pair<Ticket, std::string>> reads_;
+  // The reads among reads_ made when their file started being watched.
+  std::vector<Ticket> catch_up_reads_;
   std::deque<FileEvent> file_events_;
   std::uint64_t file_events_handled_ = 0;
   std::uint64_t wait_reload_base_ = 0;
