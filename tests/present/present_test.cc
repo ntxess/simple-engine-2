@@ -627,8 +627,15 @@ void CheckPresentStatistics(WindowMode mode) SE_REQUIRES(g_main) {
     REQUIRE(s.present_refresh_count <= s.sync_refresh_count);
     max_sync_lag =
         std::max(max_sync_lag, s.sync_refresh_count - s.present_refresh_count);
-    REQUIRE(s.sync_time_ns <= samples[i].now_ns);
-    const std::uint64_t sync_age = samples[i].now_ns - s.sync_time_ns;
+    // The patch maps DXGI's QPC sync time to SDL ticks from one midpoint
+    // sample of both clocks, so it is off by up to half that sample's gap:
+    // microseconds, more when the thread is preempted while sampling (4 us
+    // late was seen on an idle machine).
+    constexpr std::uint64_t kConversionSlackNs = 50'000;
+    REQUIRE(s.sync_time_ns <= samples[i].now_ns + kConversionSlackNs);
+    const std::uint64_t sync_age = samples[i].now_ns > s.sync_time_ns
+                                       ? samples[i].now_ns - s.sync_time_ns
+                                       : 0;
     max_sync_age = std::max(max_sync_age, sync_age);
     if (sync_age >= 100 * kNsPerMs) ++stale_samples;
     if (i == 0) continue;
