@@ -12,6 +12,12 @@
 #include "Components.hpp"
 #include "interface/ISystem.hpp"
 
+/**
+ * @brief Moves entities along their MovementPattern at their bound speed stat, in px/s; dt is the
+ * tick length in seconds (rule R5). A tick's step follows the polyline across as many waypoints as
+ * it reaches, and the position is taken from the progress along the current segment (rule R12). A
+ * repeating path closes the loop from its last point back to its first (rule R13).
+*/
 class WayPointSystem : public ISystem
 {
 public:

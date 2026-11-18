@@ -1,0 +1,2377 @@
+simple-engine-2 presentation patch for SDL 3.4.20 (docs/milestone-specs.md M6a).
+
+Adds include/SDL3/SDL_gpu_se.h (SDL_SE_* functions: frame-latency wait,
+present statistics, GPU timestamps, native handles, device status) and
+its Direct3D 12 and Vulkan backends. Generated with git diff against the
+extracted SDL3-3.4.20.tar.gz; applied by cmake/ApplyPatch.cmake.
+Rebase notes: docs/deps.md, "SDL presentation patch".
+
+diff --git a/include/SDL3/SDL_gpu_se.h b/include/SDL3/SDL_gpu_se.h
+new file mode 100644
+index 0000000..3dec053
+--- /dev/null
++++ b/include/SDL3/SDL_gpu_se.h
+@@ -0,0 +1,260 @@
++/*
++  Simple DirectMedia Layer
++  Copyright (C) 1997-2026 Sam Lantinga <slouken@libsdl.org>
++
++  This software is provided 'as-is', without any express or implied
++  warranty.  In no event will the authors be held liable for any damages
++  arising from the use of this software.
++
++  Permission is granted to anyone to use this software for any purpose,
++  including commercial applications, and to alter it and redistribute it
++  freely, subject to the following restrictions:
++
++  1. The origin of this software must not be misrepresented; you must not
++     claim that you wrote the original software. If you use this software
++     in a product, an acknowledgment in the product documentation would be
++     appreciated but is not required.
++  2. Altered source versions must be plainly marked as such, and must not be
++     misrepresented as being the original software.
++  3. This notice may not be removed or altered from any source distribution.
++*/
++
++/**
++ * # CategoryGPUSE
++ *
++ * Presentation extensions to SDL_GPU. This header is NOT part of SDL: it is
++ * added by simple-engine-2's local patch (sdl3-3.4.20-se-presentation.patch)
++ * and every function in it is prefixed SDL_SE_ so that it can never collide
++ * with a future SDL function.
++ *
++ * The extensions cover what a frame pacer needs from the swapchain and the
++ * queue that SDL_GPU does not expose:
++ *
++ * - a frame-latency wait: on Direct3D 12 the DXGI frame-latency waitable
++ *   object (the swapchain is recreated with
++ *   DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT on first use); on
++ *   Vulkan vkWaitForPresentKHR with VK_KHR_present_id and
++ *   VK_KHR_present_wait;
++ * - present statistics with DXGI_FRAME_STATISTICS semantics (Direct3D 12:
++ *   IDXGISwapChain::GetFrameStatistics; Vulkan: VK_GOOGLE_display_timing);
++ * - per-command-buffer GPU timestamps;
++ * - the native device, queue and swapchain handles;
++ * - the device-removed (device-lost) status.
++ *
++ * Without the new calls SDL behaves exactly as without the patch. Missing
++ * driver features are reported through SDL_SE_GetGPUCapabilities and never
++ * make device creation fail.
++ *
++ * These functions are not thread safe with respect to the window they take:
++ * call them on the thread that presents that window.
++ */
++
++#ifndef SDL_gpu_se_h_
++#define SDL_gpu_se_h_
++
++#include <SDL3/SDL_stdinc.h>
++#include <SDL3/SDL_gpu.h>
++#include <SDL3/SDL_video.h>
++
++#include <SDL3/SDL_begin_code.h>
++/* Set up for C function definitions, even when using C++ */
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/**
++ * The version of this extension header. It changes whenever a declaration
++ * in it changes.
++ */
++#define SDL_SE_GPU_PRESENTATION_VERSION 1
++
++/**
++ * A set of SDL_SE_GPU_CAPABILITY_* flags.
++ */
++typedef Uint32 SDL_SE_GPUCapabilityFlags;
++
++/** SDL_SE_SetGPUFrameLatency and SDL_SE_WaitForGPUFrameLatency work. */
++#define SDL_SE_GPU_CAPABILITY_FRAME_LATENCY_WAIT (1u << 0)
++/** SDL_SE_GetGPUPresentStatistics can report statistics. */
++#define SDL_SE_GPU_CAPABILITY_PRESENT_STATISTICS (1u << 1)
++/** SDL_SE_BeginGPUTiming and SDL_SE_EndGPUTiming measure command buffers. */
++#define SDL_SE_GPU_CAPABILITY_TIMESTAMPS         (1u << 2)
++/** SDL_SE_GetGPUNativeHandles returns the backend's handles. */
++#define SDL_SE_GPU_CAPABILITY_NATIVE_HANDLES     (1u << 3)
++/** SDL_SE_GetGPUDeviceStatus can tell a removed device. */
++#define SDL_SE_GPU_CAPABILITY_DEVICE_STATUS      (1u << 4)
++/** SDL_GPU_PRESENTMODE_IMMEDIATE tears (variable refresh in a window). */
++#define SDL_SE_GPU_CAPABILITY_TEARING            (1u << 5)
++
++/**
++ * Reports which extensions work on a device and, for the window-dependent
++ * ones (present statistics, tearing), on a window it has claimed.
++ *
++ * \param device a GPU context.
++ * \param window a window claimed by the device, or NULL for the device-wide
++ *               capabilities only.
++ * \returns the supported capabilities, 0 for a NULL device.
++ */
++extern SDL_DECLSPEC SDL_SE_GPUCapabilityFlags SDLCALL SDL_SE_GetGPUCapabilities(SDL_GPUDevice *device, SDL_Window *window);
++
++/**
++ * Bounds the presentation queue of a claimed window to `frames` frames and
++ * enables SDL_SE_WaitForGPUFrameLatency.
++ *
++ * On Direct3D 12 the first call recreates the swapchain with
++ * DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT (it waits for the GPU
++ * to go idle first) and every later swapchain of the window keeps the flag;
++ * the maximum frame latency is set with
++ * IDXGISwapChain2::SetMaximumFrameLatency. On Vulkan the following presents
++ * carry VK_KHR_present_id ids.
++ *
++ * \param device a GPU context.
++ * \param window a window claimed by the device.
++ * \param frames 1 or 2 (up to 16 is accepted).
++ * \returns true on success, false when unsupported or on failure; call
++ *          SDL_GetError() for more information.
++ */
++extern SDL_DECLSPEC bool SDLCALL SDL_SE_SetGPUFrameLatency(SDL_GPUDevice *device, SDL_Window *window, Uint32 frames);
++
++/**
++ * The outcome of SDL_SE_WaitForGPUFrameLatency.
++ */
++typedef enum SDL_SE_GPUWaitResult
++{
++    SDL_SE_GPU_WAIT_READY,      /**< The window can take a new frame. */
++    SDL_SE_GPU_WAIT_TIMEOUT,    /**< The timeout elapsed first. */
++    SDL_SE_GPU_WAIT_UNSUPPORTED /**< No frame latency was set, or no support. */
++} SDL_SE_GPUWaitResult;
++
++/**
++ * Waits until the window's presentation queue has room for a new frame
++ * under the latency set with SDL_SE_SetGPUFrameLatency, but never longer
++ * than `timeout_ns`.
++ *
++ * Direct3D 12 waits on the frame-latency waitable object (a high-resolution
++ * waitable timer bounds the wait). Vulkan waits with vkWaitForPresentKHR for
++ * the present `frames` back from the next one.
++ *
++ * \param device a GPU context.
++ * \param window a window claimed by the device.
++ * \param timeout_ns the longest wait in nanoseconds; 0 polls.
++ * \returns the outcome.
++ */
++extern SDL_DECLSPEC SDL_SE_GPUWaitResult SDLCALL SDL_SE_WaitForGPUFrameLatency(SDL_GPUDevice *device, SDL_Window *window, Uint64 timeout_ns);
++
++/**
++ * Present statistics of a window's swapchain, with the semantics of
++ * DXGI_FRAME_STATISTICS.
++ */
++typedef struct SDL_SE_GPUPresentStatistics
++{
++    Uint64 present_count;         /**< The present count of the most recently displayed present. */
++    Uint64 present_refresh_count; /**< The refresh (vblank) count at which that present was displayed. */
++    Uint64 sync_refresh_count;    /**< The refresh count when the statistics were sampled. */
++    Uint64 sync_time_ns;          /**< The time of that refresh, in the SDL_GetTicksNS() domain. */
++    Uint64 last_present_count;    /**< Presents issued on the window (IDXGISwapChain::GetLastPresentCount). */
++} SDL_SE_GPUPresentStatistics;
++
++/**
++ * Reads the present statistics of a claimed window.
++ *
++ * \param device a GPU context.
++ * \param window a window claimed by the device.
++ * \param statistics filled on success.
++ * \returns true on success; false before the first displayed present, while
++ *          the window is minimized, or when unsupported (Vulkan without
++ *          VK_GOOGLE_display_timing). On Vulkan the first call enables
++ *          display timing for the presents that follow.
++ */
++extern SDL_DECLSPEC bool SDLCALL SDL_SE_GetGPUPresentStatistics(SDL_GPUDevice *device, SDL_Window *window, SDL_SE_GPUPresentStatistics *statistics);
++
++/**
++ * Writes the start timestamp of a command buffer's GPU work.
++ *
++ * Call it once, right after the command buffer is acquired and outside any
++ * pass. The end timestamp is written by SDL_SE_EndGPUTiming, or at submit
++ * when it was not called, and both are resolved at submit. Read the result
++ * with SDL_SE_GetGPUTiming and the fence of
++ * SDL_SubmitGPUCommandBufferAndAcquireFence.
++ *
++ * \param command_buffer a command buffer.
++ */
++extern SDL_DECLSPEC void SDLCALL SDL_SE_BeginGPUTiming(SDL_GPUCommandBuffer *command_buffer);
++
++/**
++ * Writes the end timestamp of a command buffer's GPU work. Call it right
++ * before submitting, outside any pass.
++ *
++ * \param command_buffer a command buffer on which SDL_SE_BeginGPUTiming
++ *                       was called.
++ */
++extern SDL_DECLSPEC void SDLCALL SDL_SE_EndGPUTiming(SDL_GPUCommandBuffer *command_buffer);
++
++/**
++ * Reads the GPU duration of a timed command buffer once its fence has
++ * signalled. A successful read consumes the result.
++ *
++ * \param device a GPU context.
++ * \param fence the fence of the timed command buffer's submission.
++ * \param duration_ns filled with the time between the two timestamps.
++ * \returns true on success; false while the fence has not signalled, or
++ *          when the submission was not timed (or its result was read or
++ *          discarded already).
++ */
++extern SDL_DECLSPEC bool SDLCALL SDL_SE_GetGPUTiming(SDL_GPUDevice *device, SDL_GPUFence *fence, Uint64 *duration_ns);
++
++/**
++ * The device-removed status of a GPU context.
++ */
++typedef enum SDL_SE_GPUDeviceStatus
++{
++    SDL_SE_GPU_DEVICE_STATUS_OK,      /**< The device works. */
++    SDL_SE_GPU_DEVICE_STATUS_REMOVED, /**< Removed or lost: recreate it. */
++    SDL_SE_GPU_DEVICE_STATUS_UNKNOWN  /**< The backend cannot tell. */
++} SDL_SE_GPUDeviceStatus;
++
++/**
++ * Reports whether the device was removed (Direct3D 12:
++ * ID3D12Device::GetDeviceRemovedReason) or lost (Vulkan:
++ * VK_ERROR_DEVICE_LOST from any call, or from a status probe).
++ *
++ * \param device a GPU context.
++ * \returns the status.
++ */
++extern SDL_DECLSPEC SDL_SE_GPUDeviceStatus SDLCALL SDL_SE_GetGPUDeviceStatus(SDL_GPUDevice *device);
++
++/**
++ * Native handles of a GPU context. They are borrowed: valid while the
++ * device lives (the swapchain while the window stays claimed and is not
++ * resized or reconfigured), and never released by the caller.
++ */
++typedef struct SDL_SE_GPUNativeHandles
++{
++    void *d3d12_device;        /**< ID3D12Device* */
++    void *d3d12_queue;         /**< ID3D12CommandQueue* (the direct queue) */
++    void *dxgi_swapchain;      /**< IDXGISwapChain3* of the window */
++    void *vk_instance;         /**< VkInstance */
++    void *vk_physical_device;  /**< VkPhysicalDevice */
++    void *vk_device;           /**< VkDevice */
++    void *vk_queue;            /**< VkQueue (graphics, compute, transfer, present) */
++    Uint32 vk_queue_family;    /**< The queue's family index */
++    Uint64 vk_swapchain;       /**< VkSwapchainKHR of the window */
++} SDL_SE_GPUNativeHandles;
++
++/**
++ * Reads the native handles of the active backend.
++ *
++ * \param device a GPU context.
++ * \param window a window claimed by the device (for the swapchain), or NULL.
++ * \param handles filled on success; the other backend's fields are zero.
++ * \returns true on success, false when unsupported.
++ */
++extern SDL_DECLSPEC bool SDLCALL SDL_SE_GetGPUNativeHandles(SDL_GPUDevice *device, SDL_Window *window, SDL_SE_GPUNativeHandles *handles);
++
++/* Ends C function definitions when using C++ */
++#ifdef __cplusplus
++}
++#endif
++#include <SDL3/SDL_close_code.h>
++
++#endif /* SDL_gpu_se_h_ */
+diff --git a/src/gpu/SDL_gpu_se.c b/src/gpu/SDL_gpu_se.c
+new file mode 100644
+index 0000000..f8fbce1
+--- /dev/null
++++ b/src/gpu/SDL_gpu_se.c
+@@ -0,0 +1,219 @@
++/*
++  Simple DirectMedia Layer
++  Copyright (C) 1997-2026 Sam Lantinga <slouken@libsdl.org>
++
++  This software is provided 'as-is', without any express or implied
++  warranty.  In no event will the authors be held liable for any damages
++  arising from the use of this software.
++
++  Permission is granted to anyone to use this software for any purpose,
++  including commercial applications, and to alter it and redistribute it
++  freely, subject to the following restrictions:
++
++  1. The origin of this software must not be misrepresented; you must not
++     claim that you wrote the original software. If you use this software
++     in a product, an acknowledgment in the product documentation would be
++     appreciated but is not required.
++  2. Altered source versions must be plainly marked as such, and must not be
++     misrepresented as being the original software.
++  3. This notice may not be removed or altered from any source distribution.
++*/
++
++/* simple-engine-2 presentation patch: the public SDL_SE_* entry points of
++ * SDL_gpu_se.h. They validate their arguments and forward to the device's
++ * backend; a backend without the extensions reports them unsupported. */
++
++#include "SDL_internal.h"
++#include "SDL_sysgpu.h"
++#include "SDL_gpu_se_c.h"
++
++static const SDL_SE_GPUBackend *SDL_SE_GetBackend(SDL_GPUDevice *device)
++{
++    if (device == NULL || device->backend == NULL) {
++        return NULL;
++    }
++#ifdef SDL_GPU_D3D12
++    if (SDL_strcmp(device->backend, "direct3d12") == 0) {
++        return &SDL_SE_D3D12Backend;
++    }
++#endif
++#ifdef SDL_GPU_VULKAN
++    if (SDL_strcmp(device->backend, "vulkan") == 0) {
++        return &SDL_SE_VulkanBackend;
++    }
++#endif
++    return NULL;
++}
++
++static bool SDL_SE_CommandBufferIsRecording(SDL_GPUCommandBuffer *command_buffer)
++{
++    CommandBufferCommonHeader *header = (CommandBufferCommonHeader *)command_buffer;
++    /* SDL_AcquireGPUCommandBuffer resets these fields only in debug mode;
++       without it a pooled command buffer keeps the state of its last use. */
++    if (!header->device->debug_mode) {
++        return true;
++    }
++    if (header->submitted) {
++        SDL_assert_release(!"Command buffer already submitted!");
++        return false;
++    }
++    if (header->render_pass.in_progress || header->compute_pass.in_progress || header->copy_pass.in_progress) {
++        SDL_assert_release(!"GPU timing cannot be written inside a pass!");
++        return false;
++    }
++    return true;
++}
++
++Uint64 SDL_SE_TicksToNS(Uint64 ticks, Uint64 frequency)
++{
++    if (frequency == 0) {
++        return 0;
++    }
++    return (ticks / frequency) * SDL_NS_PER_SECOND + ((ticks % frequency) * SDL_NS_PER_SECOND) / frequency;
++}
++
++Uint64 SDL_SE_PerformanceCounterToTicksNS(Uint64 counter)
++{
++    const Uint64 frequency = SDL_GetPerformanceFrequency();
++    const Uint64 before = SDL_GetPerformanceCounter();
++    const Uint64 ticks = SDL_GetTicksNS();
++    const Uint64 after = SDL_GetPerformanceCounter();
++    const Uint64 now = before + (after - before) / 2;
++    if (counter >= now) {
++        return ticks + SDL_SE_TicksToNS(counter - now, frequency);
++    } else {
++        const Uint64 ago = SDL_SE_TicksToNS(now - counter, frequency);
++        return ago < ticks ? ticks - ago : 0;
++    }
++}
++
++SDL_SE_GPUCapabilityFlags SDL_SE_GetGPUCapabilities(SDL_GPUDevice *device, SDL_Window *window)
++{
++    const SDL_SE_GPUBackend *backend = SDL_SE_GetBackend(device);
++    if (backend == NULL) {
++        return 0;
++    }
++    return backend->GetCapabilities(device->driverData, window);
++}
++
++bool SDL_SE_SetGPUFrameLatency(SDL_GPUDevice *device, SDL_Window *window, Uint32 frames)
++{
++    const SDL_SE_GPUBackend *backend = SDL_SE_GetBackend(device);
++    if (device == NULL) {
++        return SDL_InvalidParamError("device");
++    }
++    if (window == NULL) {
++        return SDL_InvalidParamError("window");
++    }
++    if (frames < 1 || frames > 16) {
++        return SDL_SetError("Frame latency must be between 1 and 16, not %u", (unsigned int)frames);
++    }
++    if (backend == NULL) {
++        return SDL_Unsupported();
++    }
++    return backend->SetFrameLatency(device->driverData, window, frames);
++}
++
++SDL_SE_GPUWaitResult SDL_SE_WaitForGPUFrameLatency(SDL_GPUDevice *device, SDL_Window *window, Uint64 timeout_ns)
++{
++    const SDL_SE_GPUBackend *backend = SDL_SE_GetBackend(device);
++    if (backend == NULL || window == NULL) {
++        return SDL_SE_GPU_WAIT_UNSUPPORTED;
++    }
++    return backend->WaitForFrameLatency(device->driverData, window, timeout_ns);
++}
++
++bool SDL_SE_GetGPUPresentStatistics(SDL_GPUDevice *device, SDL_Window *window, SDL_SE_GPUPresentStatistics *statistics)
++{
++    const SDL_SE_GPUBackend *backend = SDL_SE_GetBackend(device);
++    if (statistics == NULL) {
++        return SDL_InvalidParamError("statistics");
++    }
++    SDL_zerop(statistics);
++    if (device == NULL) {
++        return SDL_InvalidParamError("device");
++    }
++    if (window == NULL) {
++        return SDL_InvalidParamError("window");
++    }
++    if (backend == NULL) {
++        return SDL_Unsupported();
++    }
++    return backend->GetPresentStatistics(device->driverData, window, statistics);
++}
++
++void SDL_SE_BeginGPUTiming(SDL_GPUCommandBuffer *command_buffer)
++{
++    const SDL_SE_GPUBackend *backend;
++    if (command_buffer == NULL) {
++        SDL_InvalidParamError("command_buffer");
++        return;
++    }
++    if (!SDL_SE_CommandBufferIsRecording(command_buffer)) {
++        return;
++    }
++    backend = SDL_SE_GetBackend(((CommandBufferCommonHeader *)command_buffer)->device);
++    if (backend != NULL) {
++        backend->BeginTiming(command_buffer);
++    }
++}
++
++void SDL_SE_EndGPUTiming(SDL_GPUCommandBuffer *command_buffer)
++{
++    const SDL_SE_GPUBackend *backend;
++    if (command_buffer == NULL) {
++        SDL_InvalidParamError("command_buffer");
++        return;
++    }
++    if (!SDL_SE_CommandBufferIsRecording(command_buffer)) {
++        return;
++    }
++    backend = SDL_SE_GetBackend(((CommandBufferCommonHeader *)command_buffer)->device);
++    if (backend != NULL) {
++        backend->EndTiming(command_buffer);
++    }
++}
++
++bool SDL_SE_GetGPUTiming(SDL_GPUDevice *device, SDL_GPUFence *fence, Uint64 *duration_ns)
++{
++    const SDL_SE_GPUBackend *backend = SDL_SE_GetBackend(device);
++    if (duration_ns == NULL) {
++        return SDL_InvalidParamError("duration_ns");
++    }
++    *duration_ns = 0;
++    if (device == NULL) {
++        return SDL_InvalidParamError("device");
++    }
++    if (fence == NULL) {
++        return SDL_InvalidParamError("fence");
++    }
++    if (backend == NULL) {
++        return SDL_Unsupported();
++    }
++    return backend->GetTiming(device->driverData, fence, duration_ns);
++}
++
++SDL_SE_GPUDeviceStatus SDL_SE_GetGPUDeviceStatus(SDL_GPUDevice *device)
++{
++    const SDL_SE_GPUBackend *backend = SDL_SE_GetBackend(device);
++    if (backend == NULL) {
++        return SDL_SE_GPU_DEVICE_STATUS_UNKNOWN;
++    }
++    return backend->GetDeviceStatus(device->driverData);
++}
++
++bool SDL_SE_GetGPUNativeHandles(SDL_GPUDevice *device, SDL_Window *window, SDL_SE_GPUNativeHandles *handles)
++{
++    const SDL_SE_GPUBackend *backend = SDL_SE_GetBackend(device);
++    if (handles == NULL) {
++        return SDL_InvalidParamError("handles");
++    }
++    SDL_zerop(handles);
++    if (device == NULL) {
++        return SDL_InvalidParamError("device");
++    }
++    if (backend == NULL) {
++        return SDL_Unsupported();
++    }
++    return backend->GetNativeHandles(device->driverData, window, handles);
++}
+diff --git a/src/gpu/SDL_gpu_se_c.h b/src/gpu/SDL_gpu_se_c.h
+new file mode 100644
+index 0000000..23b393d
+--- /dev/null
++++ b/src/gpu/SDL_gpu_se_c.h
+@@ -0,0 +1,66 @@
++/*
++  Simple DirectMedia Layer
++  Copyright (C) 1997-2026 Sam Lantinga <slouken@libsdl.org>
++
++  This software is provided 'as-is', without any express or implied
++  warranty.  In no event will the authors be held liable for any damages
++  arising from the use of this software.
++
++  Permission is granted to anyone to use this software for any purpose,
++  including commercial applications, and to alter it and redistribute it
++  freely, subject to the following restrictions:
++
++  1. The origin of this software must not be misrepresented; you must not
++     claim that you wrote the original software. If you use this software
++     in a product, an acknowledgment in the product documentation would be
++     appreciated but is not required.
++  2. Altered source versions must be plainly marked as such, and must not be
++     misrepresented as being the original software.
++  3. This notice may not be removed or altered from any source distribution.
++*/
++
++/* simple-engine-2 presentation patch: the backend interface behind
++ * SDL_gpu_se.h. Each backend that supports the extensions defines one
++ * SDL_SE_GPUBackend in a file included at the end of its own source file
++ * (it needs the backend's private structures); SDL_gpu_se.c picks it by the
++ * device's backend name. */
++
++#ifndef SDL_gpu_se_c_h_
++#define SDL_gpu_se_c_h_
++
++#include "SDL_sysgpu.h"
++#include <SDL3/SDL_gpu_se.h>
++
++typedef struct SDL_SE_GPUBackend
++{
++    SDL_SE_GPUCapabilityFlags (*GetCapabilities)(SDL_GPURenderer *driverData, SDL_Window *window);
++    bool (*SetFrameLatency)(SDL_GPURenderer *driverData, SDL_Window *window, Uint32 frames);
++    SDL_SE_GPUWaitResult (*WaitForFrameLatency)(SDL_GPURenderer *driverData, SDL_Window *window, Uint64 timeout_ns);
++    bool (*GetPresentStatistics)(SDL_GPURenderer *driverData, SDL_Window *window, SDL_SE_GPUPresentStatistics *statistics);
++    void (*BeginTiming)(SDL_GPUCommandBuffer *commandBuffer);
++    void (*EndTiming)(SDL_GPUCommandBuffer *commandBuffer);
++    bool (*GetTiming)(SDL_GPURenderer *driverData, SDL_GPUFence *fence, Uint64 *duration_ns);
++    SDL_SE_GPUDeviceStatus (*GetDeviceStatus)(SDL_GPURenderer *driverData);
++    bool (*GetNativeHandles)(SDL_GPURenderer *driverData, SDL_Window *window, SDL_SE_GPUNativeHandles *handles);
++} SDL_SE_GPUBackend;
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++extern const SDL_SE_GPUBackend SDL_SE_D3D12Backend;
++extern const SDL_SE_GPUBackend SDL_SE_VulkanBackend;
++
++// Converts a SDL_GetPerformanceCounter() value (QPC on Windows) into the
++// SDL_GetTicksNS() domain.
++extern Uint64 SDL_SE_PerformanceCounterToTicksNS(Uint64 counter);
++
++// Converts a count of `frequency` ticks per second into nanoseconds without
++// overflowing for any realistic count.
++extern Uint64 SDL_SE_TicksToNS(Uint64 ticks, Uint64 frequency);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif // SDL_gpu_se_c_h_
+diff --git a/src/gpu/d3d12/SDL_gpu_d3d12.c b/src/gpu/d3d12/SDL_gpu_d3d12.c
+index b4986fb..7d430f2 100644
+--- a/src/gpu/d3d12/SDL_gpu_d3d12.c
++++ b/src/gpu/d3d12/SDL_gpu_d3d12.c
+@@ -739,6 +739,8 @@ typedef struct D3D12Fence
+     SDL_AtomicInt referenceCount;
+ } D3D12Fence;
+ 
++#include "SDL_gpu_d3d12_se.h" // simple-engine-2 presentation patch
++
+ struct D3D12DescriptorHeap
+ {
+     ID3D12DescriptorHeap *handle;
+@@ -857,6 +859,7 @@ typedef struct D3D12WindowData
+     Uint32 width;
+     Uint32 height;
+     bool needsSwapchainRecreate;
++    SDL_SE_D3D12WindowData se; // simple-engine-2 presentation patch
+ } D3D12WindowData;
+ 
+ typedef struct D3D12PresentData
+@@ -989,6 +992,8 @@ struct D3D12Renderer
+     SDL_Mutex *windowLock;
+     SDL_Mutex *fenceLock;
+     SDL_Mutex *disposeLock;
++
++    SDL_SE_D3D12RendererData se; // simple-engine-2 presentation patch
+ };
+ 
+ struct D3D12CommandBuffer
+@@ -1105,6 +1110,8 @@ struct D3D12CommandBuffer
+     D3D12TextureDownload **textureDownloads;
+     Uint32 textureDownloadCount;
+     Uint32 textureDownloadCapacity;
++
++    SDL_SE_D3D12CommandBufferData se; // simple-engine-2 presentation patch
+ };
+ 
+ struct D3D12Shader
+@@ -1781,6 +1788,7 @@ static void D3D12_DestroyDevice(SDL_GPUDevice *device)
+         D3D12_ReleaseWindow((SDL_GPURenderer *)renderer, renderer->claimedWindows[i]->window);
+     }
+ 
++    SDL_SE_D3D12_DestroyDevice(renderer); // simple-engine-2 presentation patch
+     D3D12_INTERNAL_DestroyRenderer(renderer);
+     SDL_free(device);
+ }
+@@ -6948,7 +6956,8 @@ static bool D3D12_INTERNAL_ResizeSwapchain(
+         0, // use client window width
+         0, // use client window height
+         DXGI_FORMAT_UNKNOWN, // Keep the old format
+-        renderer->supportsTearing ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0);
++        (renderer->supportsTearing ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0) |
++            SDL_SE_D3D12_SwapchainFlags(windowData)); // simple-engine-2 presentation patch
+     CHECK_D3D12_ERROR_AND_RETURN("Could not resize swapchain buffers", false);
+ 
+     // Create texture object for the swapchain
+@@ -6990,6 +6999,7 @@ static void D3D12_INTERNAL_DestroySwapchain(
+         SDL_free(windowData->textureContainers[i].textures);
+     }
+ 
++    SDL_SE_D3D12_OnSwapchainDestroyed(windowData); // simple-engine-2 presentation patch
+     IDXGISwapChain_Release(windowData->swapchain);
+     windowData->swapchain = NULL;
+ }
+@@ -7047,6 +7057,7 @@ static bool D3D12_INTERNAL_CreateSwapchain(
+     } else {
+         swapchainDesc.Flags = 0;
+     }
++    swapchainDesc.Flags |= SDL_SE_D3D12_SwapchainFlags(windowData); // simple-engine-2 presentation patch
+ 
+     if (!IsWindow(dxgiHandle)) {
+         return false;
+@@ -7154,6 +7165,7 @@ static bool D3D12_INTERNAL_CreateSwapchain(
+         }
+     }
+ 
++    SDL_SE_D3D12_OnSwapchainCreated(windowData); // simple-engine-2 presentation patch
+     return true;
+ }
+ #endif
+@@ -7573,6 +7585,7 @@ static SDL_GPUCommandBuffer *D3D12_AcquireCommandBuffer(
+     SDL_zeroa(commandBuffer->computeUniformBuffers);
+ 
+     commandBuffer->autoReleaseFence = true;
++    SDL_zero(commandBuffer->se); // simple-engine-2 presentation patch
+ 
+     return (SDL_GPUCommandBuffer *)commandBuffer;
+ }
+@@ -8025,6 +8038,8 @@ static bool D3D12_INTERNAL_Submit(
+             &barrierDesc);
+     }
+ 
++    SDL_SE_D3D12_OnSubmitRecording(d3d12CommandBuffer); // simple-engine-2 presentation patch
++
+     // Notify the command buffer that we have completed recording
+     res = ID3D12GraphicsCommandList_Close(d3d12CommandBuffer->graphicsCommandList);
+ #if !(defined(SDL_PLATFORM_XBOXONE) || defined(SDL_PLATFORM_XBOXSERIES))
+@@ -8055,6 +8070,7 @@ static bool D3D12_INTERNAL_Submit(
+         SDL_UnlockMutex(renderer->submitLock);
+         return false;
+     }
++    SDL_SE_D3D12_OnSubmitFence(d3d12CommandBuffer); // simple-engine-2 presentation patch
+ 
+     // Return the fence while submitLock is held, another thread could
+     // recycle this command buffer as soon as the lock is released.
+@@ -8195,6 +8211,7 @@ static bool D3D12_Cancel(
+ 
+     d3d12CommandBuffer->autoReleaseFence = false;
+     SDL_LockMutex(renderer->submitLock);
++    SDL_SE_D3D12_OnCancel(d3d12CommandBuffer); // simple-engine-2 presentation patch
+     result = D3D12_INTERNAL_CleanCommandBuffer(renderer, d3d12CommandBuffer, true);
+     SDL_UnlockMutex(renderer->submitLock);
+ 
+@@ -9662,6 +9679,8 @@ static SDL_GPUDevice *D3D12_CreateDevice(bool debugMode, bool preferLowPower, SD
+     return result;
+ }
+ 
++#include "SDL_gpu_d3d12_se_impl.h" // simple-engine-2 presentation patch
++
+ SDL_GPUBootstrap D3D12Driver = {
+     "direct3d12",
+     D3D12_PrepareDriver,
+diff --git a/src/gpu/d3d12/SDL_gpu_d3d12_se.h b/src/gpu/d3d12/SDL_gpu_d3d12_se.h
+new file mode 100644
+index 0000000..57381f2
+--- /dev/null
++++ b/src/gpu/d3d12/SDL_gpu_d3d12_se.h
+@@ -0,0 +1,96 @@
++/*
++  Simple DirectMedia Layer
++  Copyright (C) 1997-2026 Sam Lantinga <slouken@libsdl.org>
++
++  This software is provided 'as-is', without any express or implied
++  warranty.  In no event will the authors be held liable for any damages
++  arising from the use of this software.
++
++  Permission is granted to anyone to use this software for any purpose,
++  including commercial applications, and to alter it and redistribute it
++  freely, subject to the following restrictions:
++
++  1. The origin of this software must not be misrepresented; you must not
++     claim that you wrote the original software. If you use this software
++     in a product, an acknowledgment in the product documentation would be
++     appreciated but is not required.
++  2. Altered source versions must be plainly marked as such, and must not be
++     misrepresented as being the original software.
++  3. This notice may not be removed or altered from any source distribution.
++*/
++
++/* simple-engine-2 presentation patch, Direct3D 12 part 1 of 2: the state the
++ * backend's structures carry for SDL_gpu_se.h, and the hooks the backend
++ * calls. Included by SDL_gpu_d3d12.c once, after D3D12Fence; the hooks are
++ * defined in SDL_gpu_d3d12_se_impl.h, included at the end of that file. */
++
++#ifndef SDL_gpu_d3d12_se_h_
++#define SDL_gpu_d3d12_se_h_
++
++#include "../SDL_gpu_se_c.h"
++
++// Timed command buffers whose result can be outstanding at once.
++#define SDL_SE_D3D12_TIMING_SLOTS 64
++
++struct D3D12WindowData;
++
++// D3D12WindowData::se
++typedef struct SDL_SE_D3D12WindowData
++{
++    // Requested maximum frame latency; 0 until SDL_SE_SetGPUFrameLatency.
++    // Every swapchain created while it is set has the waitable flag.
++    Uint32 frameLatency;
++    // The swapchain's frame-latency waitable object, or NULL.
++    HANDLE latencyWaitable;
++    // A high-resolution waitable timer that bounds waits on it.
++    HANDLE waitTimer;
++} SDL_SE_D3D12WindowData;
++
++// D3D12CommandBuffer::se, zeroed at acquire.
++typedef struct SDL_SE_D3D12CommandBufferData
++{
++    Uint32 timingSlot;
++    bool timingBegun;
++    bool timingEnded;
++} SDL_SE_D3D12CommandBufferData;
++
++typedef struct SDL_SE_D3D12TimingSlot
++{
++    // Taken by a command buffer that is being recorded.
++    bool inUse;
++    // Its submission's fence, referenced until the result is read or the
++    // slot is reused.
++    D3D12Fence *fence;
++} SDL_SE_D3D12TimingSlot;
++
++// D3D12Renderer::se. Guarded by the renderer's submitLock.
++typedef struct SDL_SE_D3D12RendererData
++{
++    // Two timestamps per slot, resolved at submit into the readback buffer.
++    ID3D12QueryHeap *timestampHeap;
++    ID3D12Resource *timestampReadback;
++    Uint64 timestampFrequency;
++    bool timestampsFailed;
++    Uint32 nextTimingSlot;
++    SDL_SE_D3D12TimingSlot timingSlots[SDL_SE_D3D12_TIMING_SLOTS];
++} SDL_SE_D3D12RendererData;
++
++// Hooks, in the order the backend calls them.
++#if !(defined(SDL_PLATFORM_XBOXONE) || defined(SDL_PLATFORM_XBOXSERIES))
++// Extra DXGI_SWAP_CHAIN_FLAGs for CreateSwapChainForHwnd and ResizeBuffers.
++static UINT SDL_SE_D3D12_SwapchainFlags(struct D3D12WindowData *windowData);
++// After a swapchain was created: frame latency and the waitable.
++static void SDL_SE_D3D12_OnSwapchainCreated(struct D3D12WindowData *windowData);
++// Before a swapchain is released.
++static void SDL_SE_D3D12_OnSwapchainDestroyed(struct D3D12WindowData *windowData);
++#endif
++// In Submit, before the command list is closed: end and resolve timing.
++static void SDL_SE_D3D12_OnSubmitRecording(D3D12CommandBuffer *commandBuffer);
++// In Submit, once the submission's fence exists: bind it to the timing.
++static void SDL_SE_D3D12_OnSubmitFence(D3D12CommandBuffer *commandBuffer);
++// In Cancel: give back the timing slot.
++static void SDL_SE_D3D12_OnCancel(D3D12CommandBuffer *commandBuffer);
++// In DestroyDevice, after the GPU is idle and the windows are released.
++static void SDL_SE_D3D12_DestroyDevice(D3D12Renderer *renderer);
++
++#endif // SDL_gpu_d3d12_se_h_
+diff --git a/src/gpu/d3d12/SDL_gpu_d3d12_se_impl.h b/src/gpu/d3d12/SDL_gpu_d3d12_se_impl.h
+new file mode 100644
+index 0000000..9ab2e8f
+--- /dev/null
++++ b/src/gpu/d3d12/SDL_gpu_d3d12_se_impl.h
+@@ -0,0 +1,574 @@
++/*
++  Simple DirectMedia Layer
++  Copyright (C) 1997-2026 Sam Lantinga <slouken@libsdl.org>
++
++  This software is provided 'as-is', without any express or implied
++  warranty.  In no event will the authors be held liable for any damages
++  arising from the use of this software.
++
++  Permission is granted to anyone to use this software for any purpose,
++  including commercial applications, and to alter it and redistribute it
++  freely, subject to the following restrictions:
++
++  1. The origin of this software must not be misrepresented; you must not
++     claim that you wrote the original software. If you use this software
++     in a product, an acknowledgment in the product documentation would be
++     appreciated but is not required.
++  2. Altered source versions must be plainly marked as such, and must not be
++     misrepresented as being the original software.
++  3. This notice may not be removed or altered from any source distribution.
++*/
++
++/* simple-engine-2 presentation patch, Direct3D 12 part 2 of 2: the
++ * SDL_gpu_se.h backend and the hooks declared in SDL_gpu_d3d12_se.h.
++ * Included once, near the end of SDL_gpu_d3d12.c, so it sees the backend's
++ * private structures and static functions. */
++
++#ifndef SDL_gpu_d3d12_se_impl_h_
++#define SDL_gpu_d3d12_se_impl_h_
++
++static const IID D3D_IID_ID3D12QueryHeap = { 0x0d9658ae, 0xed45, 0x469e, { 0xa6, 0x1d, 0x97, 0x0e, 0xc5, 0x83, 0xca, 0xb4 } };
++
++#define SDL_SE_D3D12_TIMESTAMP_BYTES (2 * sizeof(Uint64))
++
++// Swapchain hooks
++
++#if !(defined(SDL_PLATFORM_XBOXONE) || defined(SDL_PLATFORM_XBOXSERIES))
++
++static UINT SDL_SE_D3D12_SwapchainFlags(D3D12WindowData *windowData)
++{
++    return windowData->se.frameLatency > 0 ? DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT : 0;
++}
++
++static void SDL_SE_D3D12_OnSwapchainCreated(D3D12WindowData *windowData)
++{
++    HRESULT res;
++
++    if (windowData->se.frameLatency == 0 || windowData->swapchain == NULL) {
++        return;
++    }
++    res = IDXGISwapChain3_SetMaximumFrameLatency(windowData->swapchain, windowData->se.frameLatency);
++    if (FAILED(res)) {
++        SDL_LogWarn(SDL_LOG_CATEGORY_GPU, "SetMaximumFrameLatency(%u) failed! Error Code: " HRESULT_FMT,
++                    (unsigned int)windowData->se.frameLatency, res);
++    }
++    windowData->se.latencyWaitable = IDXGISwapChain3_GetFrameLatencyWaitableObject(windowData->swapchain);
++}
++
++static void SDL_SE_D3D12_OnSwapchainDestroyed(D3D12WindowData *windowData)
++{
++    if (windowData->se.latencyWaitable != NULL) {
++        CloseHandle(windowData->se.latencyWaitable);
++        windowData->se.latencyWaitable = NULL;
++    }
++    if (windowData->se.waitTimer != NULL) {
++        CloseHandle(windowData->se.waitTimer);
++        windowData->se.waitTimer = NULL;
++    }
++}
++
++#endif
++
++// Timing hooks
++
++static void SDL_SE_D3D12_ReleaseTimingSlot(D3D12Renderer *renderer, Uint32 slot)
++{
++    SDL_SE_D3D12TimingSlot *timing = &renderer->se.timingSlots[slot];
++    if (timing->fence != NULL) {
++        D3D12_ReleaseFence((SDL_GPURenderer *)renderer, (SDL_GPUFence *)timing->fence);
++        timing->fence = NULL;
++    }
++    timing->inUse = false;
++}
++
++static bool SDL_SE_D3D12_EnsureTimestamps(D3D12Renderer *renderer)
++{
++    D3D12_QUERY_HEAP_DESC heapDesc;
++    D3D12_HEAP_PROPERTIES heapProperties;
++    D3D12_RESOURCE_DESC bufferDesc;
++    UINT64 frequency = 0;
++    HRESULT res;
++
++    if (renderer->se.timestampHeap != NULL) {
++        return true;
++    }
++    if (renderer->se.timestampsFailed) {
++        return false;
++    }
++    renderer->se.timestampsFailed = true; // until everything below worked
++
++    res = ID3D12CommandQueue_GetTimestampFrequency(renderer->commandQueue, &frequency);
++    if (FAILED(res) || frequency == 0) {
++        D3D12_INTERNAL_SetError(renderer, "Could not get the timestamp frequency", res);
++        return false;
++    }
++
++    SDL_zero(heapDesc);
++    heapDesc.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
++    heapDesc.Count = 2 * SDL_SE_D3D12_TIMING_SLOTS;
++    heapDesc.NodeMask = 0;
++    res = ID3D12Device_CreateQueryHeap(
++        renderer->device,
++        &heapDesc,
++        D3D_GUID(D3D_IID_ID3D12QueryHeap),
++        (void **)&renderer->se.timestampHeap);
++    if (FAILED(res)) {
++        renderer->se.timestampHeap = NULL;
++        D3D12_INTERNAL_SetError(renderer, "Could not create the timestamp query heap", res);
++        return false;
++    }
++
++    SDL_zero(heapProperties);
++    heapProperties.Type = D3D12_HEAP_TYPE_READBACK;
++    heapProperties.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
++    heapProperties.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
++    heapProperties.CreationNodeMask = 0;
++    heapProperties.VisibleNodeMask = 0;
++
++    SDL_zero(bufferDesc);
++    bufferDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
++    bufferDesc.Alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
++    bufferDesc.Width = SDL_SE_D3D12_TIMESTAMP_BYTES * SDL_SE_D3D12_TIMING_SLOTS;
++    bufferDesc.Height = 1;
++    bufferDesc.DepthOrArraySize = 1;
++    bufferDesc.MipLevels = 1;
++    bufferDesc.Format = DXGI_FORMAT_UNKNOWN;
++    bufferDesc.SampleDesc.Count = 1;
++    bufferDesc.SampleDesc.Quality = 0;
++    bufferDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
++    bufferDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
++
++    res = ID3D12Device_CreateCommittedResource(
++        renderer->device,
++        &heapProperties,
++        D3D12_HEAP_FLAG_NONE,
++        &bufferDesc,
++        D3D12_RESOURCE_STATE_COPY_DEST,
++        NULL,
++        D3D_GUID(D3D_IID_ID3D12Resource),
++        (void **)&renderer->se.timestampReadback);
++    if (FAILED(res)) {
++        renderer->se.timestampReadback = NULL;
++        ID3D12QueryHeap_Release(renderer->se.timestampHeap);
++        renderer->se.timestampHeap = NULL;
++        D3D12_INTERNAL_SetError(renderer, "Could not create the timestamp readback buffer", res);
++        return false;
++    }
++
++    renderer->se.timestampFrequency = frequency;
++    renderer->se.timestampsFailed = false;
++    return true;
++}
++
++static void SDL_SE_D3D12_BeginTiming(SDL_GPUCommandBuffer *commandBuffer)
++{
++    D3D12CommandBuffer *d3d12CommandBuffer = (D3D12CommandBuffer *)commandBuffer;
++    D3D12Renderer *renderer = d3d12CommandBuffer->renderer;
++    Uint32 slot = SDL_SE_D3D12_TIMING_SLOTS;
++
++    if (d3d12CommandBuffer->se.timingBegun) {
++        return;
++    }
++
++    SDL_LockMutex(renderer->submitLock);
++    if (SDL_SE_D3D12_EnsureTimestamps(renderer)) {
++        // The oldest slot that no command buffer is recording into; a result
++        // nobody read is dropped.
++        for (Uint32 i = 0; i < SDL_SE_D3D12_TIMING_SLOTS; i += 1) {
++            Uint32 candidate = (renderer->se.nextTimingSlot + i) % SDL_SE_D3D12_TIMING_SLOTS;
++            if (!renderer->se.timingSlots[candidate].inUse || renderer->se.timingSlots[candidate].fence != NULL) {
++                slot = candidate;
++                break;
++            }
++        }
++        if (slot < SDL_SE_D3D12_TIMING_SLOTS) {
++            SDL_SE_D3D12_ReleaseTimingSlot(renderer, slot);
++            renderer->se.timingSlots[slot].inUse = true;
++            renderer->se.nextTimingSlot = (slot + 1) % SDL_SE_D3D12_TIMING_SLOTS;
++        }
++    }
++    SDL_UnlockMutex(renderer->submitLock);
++
++    if (slot >= SDL_SE_D3D12_TIMING_SLOTS) {
++        return;
++    }
++    d3d12CommandBuffer->se.timingSlot = slot;
++    d3d12CommandBuffer->se.timingBegun = true;
++    d3d12CommandBuffer->se.timingEnded = false;
++    ID3D12GraphicsCommandList_EndQuery(
++        d3d12CommandBuffer->graphicsCommandList,
++        renderer->se.timestampHeap,
++        D3D12_QUERY_TYPE_TIMESTAMP,
++        2 * slot);
++}
++
++static void SDL_SE_D3D12_EndTiming(SDL_GPUCommandBuffer *commandBuffer)
++{
++    D3D12CommandBuffer *d3d12CommandBuffer = (D3D12CommandBuffer *)commandBuffer;
++
++    if (!d3d12CommandBuffer->se.timingBegun || d3d12CommandBuffer->se.timingEnded) {
++        return;
++    }
++    d3d12CommandBuffer->se.timingEnded = true;
++    ID3D12GraphicsCommandList_EndQuery(
++        d3d12CommandBuffer->graphicsCommandList,
++        d3d12CommandBuffer->renderer->se.timestampHeap,
++        D3D12_QUERY_TYPE_TIMESTAMP,
++        2 * d3d12CommandBuffer->se.timingSlot + 1);
++}
++
++static void SDL_SE_D3D12_OnSubmitRecording(D3D12CommandBuffer *commandBuffer)
++{
++    D3D12Renderer *renderer = commandBuffer->renderer;
++    Uint32 slot = commandBuffer->se.timingSlot;
++
++    if (!commandBuffer->se.timingBegun) {
++        return;
++    }
++    SDL_SE_D3D12_EndTiming((SDL_GPUCommandBuffer *)commandBuffer);
++    ID3D12GraphicsCommandList_ResolveQueryData(
++        commandBuffer->graphicsCommandList,
++        renderer->se.timestampHeap,
++        D3D12_QUERY_TYPE_TIMESTAMP,
++        2 * slot,
++        2,
++        renderer->se.timestampReadback,
++        (UINT64)slot * SDL_SE_D3D12_TIMESTAMP_BYTES);
++}
++
++static void SDL_SE_D3D12_OnSubmitFence(D3D12CommandBuffer *commandBuffer)
++{
++    D3D12Renderer *renderer = commandBuffer->renderer;
++    SDL_SE_D3D12TimingSlot *timing;
++
++    if (!commandBuffer->se.timingBegun) {
++        return;
++    }
++    timing = &renderer->se.timingSlots[commandBuffer->se.timingSlot];
++    timing->fence = commandBuffer->inFlightFence;
++    (void)SDL_AtomicIncRef(&timing->fence->referenceCount);
++    SDL_zero(commandBuffer->se);
++}
++
++static void SDL_SE_D3D12_OnCancel(D3D12CommandBuffer *commandBuffer)
++{
++    if (commandBuffer->se.timingBegun) {
++        SDL_SE_D3D12_ReleaseTimingSlot(commandBuffer->renderer, commandBuffer->se.timingSlot);
++    }
++    SDL_zero(commandBuffer->se);
++}
++
++static bool SDL_SE_D3D12_GetTiming(SDL_GPURenderer *driverData, SDL_GPUFence *fence, Uint64 *duration_ns)
++{
++    D3D12Renderer *renderer = (D3D12Renderer *)driverData;
++    D3D12Fence *d3d12Fence = (D3D12Fence *)fence;
++    Uint32 slot = SDL_SE_D3D12_TIMING_SLOTS;
++    Uint64 timestamps[2] = { 0, 0 };
++    D3D12_RANGE readRange;
++    D3D12_RANGE writtenRange;
++    void *mapped = NULL;
++    bool result = false;
++    HRESULT res;
++
++    SDL_LockMutex(renderer->submitLock);
++    for (Uint32 i = 0; i < SDL_SE_D3D12_TIMING_SLOTS; i += 1) {
++        if (renderer->se.timingSlots[i].fence == d3d12Fence) {
++            slot = i;
++            break;
++        }
++    }
++    if (slot >= SDL_SE_D3D12_TIMING_SLOTS) {
++        SDL_UnlockMutex(renderer->submitLock);
++        return SDL_SetError("No GPU timing is pending for this fence");
++    }
++    if (ID3D12Fence_GetCompletedValue(d3d12Fence->handle) != D3D12_FENCE_SIGNAL_VALUE) {
++        SDL_UnlockMutex(renderer->submitLock);
++        return false;
++    }
++
++    readRange.Begin = (SIZE_T)slot * SDL_SE_D3D12_TIMESTAMP_BYTES;
++    readRange.End = readRange.Begin + SDL_SE_D3D12_TIMESTAMP_BYTES;
++    res = ID3D12Resource_Map(renderer->se.timestampReadback, 0, &readRange, &mapped);
++    if (SUCCEEDED(res) && mapped != NULL) {
++        SDL_memcpy(timestamps, (Uint8 *)mapped + readRange.Begin, sizeof(timestamps));
++        writtenRange.Begin = 0;
++        writtenRange.End = 0;
++        ID3D12Resource_Unmap(renderer->se.timestampReadback, 0, &writtenRange);
++        if (timestamps[1] >= timestamps[0]) {
++            *duration_ns = SDL_SE_TicksToNS(timestamps[1] - timestamps[0], renderer->se.timestampFrequency);
++            result = true;
++        } else {
++            SDL_SetError("GPU timestamps out of order");
++        }
++    } else {
++        D3D12_INTERNAL_SetError(renderer, "Could not map the timestamp readback buffer", res);
++    }
++    SDL_SE_D3D12_ReleaseTimingSlot(renderer, slot);
++    SDL_UnlockMutex(renderer->submitLock);
++    return result;
++}
++
++static void SDL_SE_D3D12_DestroyDevice(D3D12Renderer *renderer)
++{
++    for (Uint32 i = 0; i < SDL_SE_D3D12_TIMING_SLOTS; i += 1) {
++        SDL_SE_D3D12_ReleaseTimingSlot(renderer, i);
++    }
++    if (renderer->se.timestampReadback != NULL) {
++        ID3D12Resource_Release(renderer->se.timestampReadback);
++        renderer->se.timestampReadback = NULL;
++    }
++    if (renderer->se.timestampHeap != NULL) {
++        ID3D12QueryHeap_Release(renderer->se.timestampHeap);
++        renderer->se.timestampHeap = NULL;
++    }
++}
++
++// Frame latency and present statistics
++
++#if !(defined(SDL_PLATFORM_XBOXONE) || defined(SDL_PLATFORM_XBOXSERIES))
++
++static bool SDL_SE_D3D12_SetFrameLatency(SDL_GPURenderer *driverData, SDL_Window *window, Uint32 frames)
++{
++    D3D12Renderer *renderer = (D3D12Renderer *)driverData;
++    D3D12WindowData *windowData = D3D12_INTERNAL_FetchWindowData(window);
++    HRESULT res;
++
++    if (windowData == NULL || windowData->renderer != renderer) {
++        SET_STRING_ERROR_AND_RETURN("Cannot set the frame latency of an unclaimed window!", false);
++    }
++
++    if (windowData->se.latencyWaitable != NULL) {
++        res = IDXGISwapChain3_SetMaximumFrameLatency(windowData->swapchain, frames);
++        CHECK_D3D12_ERROR_AND_RETURN("Could not set the maximum frame latency", false);
++        windowData->se.frameLatency = frames;
++        return true;
++    }
++
++    // The waitable flag can only be given at creation: recreate the
++    // swapchain, as SetSwapchainParameters does for a new present mode.
++    windowData->se.frameLatency = frames;
++    if (!D3D12_Wait(driverData)) {
++        return false;
++    }
++    D3D12_INTERNAL_DestroySwapchain(renderer, windowData);
++    if (!D3D12_INTERNAL_CreateSwapchain(
++            renderer,
++            windowData,
++            windowData->swapchainComposition,
++            windowData->present_mode)) {
++        return false;
++    }
++    if (windowData->se.latencyWaitable == NULL) {
++        SET_STRING_ERROR_AND_RETURN("The swapchain has no frame-latency waitable object", false);
++    }
++    return true;
++}
++
++#ifdef _WIN32
++#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
++#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x2
++#endif
++typedef HANDLE(WINAPI *SDL_SE_pfnCreateWaitableTimerExW)(LPSECURITY_ATTRIBUTES lpTimerAttributes, LPCWSTR lpTimerName, DWORD dwFlags, DWORD dwDesiredAccess);
++
++static HANDLE SDL_SE_D3D12_CreateWaitTimer(void)
++{
++    static SDL_SE_pfnCreateWaitableTimerExW pCreateWaitableTimerExW = NULL;
++    static bool loaded = false;
++    HANDLE timer = NULL;
++
++    if (!loaded) {
++        HMODULE module = GetModuleHandle(TEXT("kernel32.dll"));
++        if (module != NULL) {
++            pCreateWaitableTimerExW = (SDL_SE_pfnCreateWaitableTimerExW)GetProcAddress(module, "CreateWaitableTimerExW");
++        }
++        loaded = true;
++    }
++    if (pCreateWaitableTimerExW != NULL) {
++        timer = pCreateWaitableTimerExW(NULL, NULL, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
++        if (timer == NULL) {
++            // Before Windows 10 1803: a regular timer.
++            timer = pCreateWaitableTimerExW(NULL, NULL, 0, TIMER_ALL_ACCESS);
++        }
++    }
++    return timer;
++}
++#endif
++
++static SDL_SE_GPUWaitResult SDL_SE_D3D12_WaitForFrameLatency(SDL_GPURenderer *driverData, SDL_Window *window, Uint64 timeout_ns)
++{
++    D3D12WindowData *windowData = D3D12_INTERNAL_FetchWindowData(window);
++    DWORD waitResult;
++
++    if (windowData == NULL || windowData->renderer != (D3D12Renderer *)driverData ||
++        windowData->se.latencyWaitable == NULL) {
++        return SDL_SE_GPU_WAIT_UNSUPPORTED;
++    }
++
++    if (timeout_ns == 0) {
++        waitResult = WaitForSingleObjectEx(windowData->se.latencyWaitable, 0, FALSE);
++        return waitResult == WAIT_OBJECT_0 ? SDL_SE_GPU_WAIT_READY : SDL_SE_GPU_WAIT_TIMEOUT;
++    }
++
++#ifdef _WIN32
++    if (windowData->se.waitTimer == NULL) {
++        windowData->se.waitTimer = SDL_SE_D3D12_CreateWaitTimer();
++    }
++    if (windowData->se.waitTimer != NULL) {
++        LARGE_INTEGER dueTime;
++        HANDLE handles[2];
++        // A relative due time in 100 ns units, rounded down so that the wait
++        // never exceeds the timeout.
++        dueTime.QuadPart = -(LONGLONG)(timeout_ns / 100);
++        if (dueTime.QuadPart == 0) {
++            dueTime.QuadPart = -1;
++        }
++        if (SetWaitableTimer(windowData->se.waitTimer, &dueTime, 0, NULL, NULL, FALSE)) {
++            handles[0] = windowData->se.latencyWaitable;
++            handles[1] = windowData->se.waitTimer;
++            // The millisecond timeout is only a backstop for the timer.
++            waitResult = WaitForMultipleObjectsEx(2, handles, FALSE, (DWORD)SDL_min(timeout_ns / SDL_NS_PER_MS + 2, 0xFFFFFFF0u), FALSE);
++            CancelWaitableTimer(windowData->se.waitTimer);
++            return waitResult == WAIT_OBJECT_0 ? SDL_SE_GPU_WAIT_READY : SDL_SE_GPU_WAIT_TIMEOUT;
++        }
++    }
++#endif
++
++    // Millisecond resolution, rounded down.
++    waitResult = WaitForSingleObjectEx(windowData->se.latencyWaitable, (DWORD)SDL_min(timeout_ns / SDL_NS_PER_MS, 0xFFFFFFF0u), FALSE);
++    return waitResult == WAIT_OBJECT_0 ? SDL_SE_GPU_WAIT_READY : SDL_SE_GPU_WAIT_TIMEOUT;
++}
++
++static bool SDL_SE_D3D12_GetPresentStatistics(SDL_GPURenderer *driverData, SDL_Window *window, SDL_SE_GPUPresentStatistics *statistics)
++{
++    D3D12Renderer *renderer = (D3D12Renderer *)driverData;
++    D3D12WindowData *windowData = D3D12_INTERNAL_FetchWindowData(window);
++    DXGI_FRAME_STATISTICS frameStatistics;
++    UINT lastPresentCount = 0;
++    HRESULT res;
++
++    if (windowData == NULL || windowData->renderer != renderer || windowData->swapchain == NULL) {
++        SET_STRING_ERROR_AND_RETURN("Cannot read present statistics of an unclaimed window!", false);
++    }
++    if (SDL_GetWindowFlags(window) & SDL_WINDOW_MINIMIZED) {
++        return SDL_SetError("No present statistics while the window is minimized");
++    }
++
++    SDL_zero(frameStatistics);
++    res = IDXGISwapChain3_GetFrameStatistics(windowData->swapchain, &frameStatistics);
++    if (FAILED(res)) {
++        // DXGI_ERROR_FRAME_STATISTICS_DISJOINT, or nothing displayed yet.
++        return SDL_SetError("GetFrameStatistics failed " HRESULT_FMT, res);
++    }
++    if (frameStatistics.PresentCount == 0) {
++        // Also what DXGI reports for a composed (windowed) flip-model
++        // swapchain: the statistics stay zero until it presents through
++        // independent flip.
++        return SDL_SetError("DXGI reports no displayed present yet");
++    }
++    res = IDXGISwapChain3_GetLastPresentCount(windowData->swapchain, &lastPresentCount);
++    if (FAILED(res)) {
++        return SDL_SetError("GetLastPresentCount failed " HRESULT_FMT, res);
++    }
++
++    statistics->present_count = frameStatistics.PresentCount;
++    statistics->present_refresh_count = frameStatistics.PresentRefreshCount;
++    statistics->sync_refresh_count = frameStatistics.SyncRefreshCount;
++    statistics->sync_time_ns = SDL_SE_PerformanceCounterToTicksNS((Uint64)frameStatistics.SyncQPCTime.QuadPart);
++    statistics->last_present_count = lastPresentCount;
++    return true;
++}
++
++#else // Xbox: no DXGI swapchain
++
++static bool SDL_SE_D3D12_SetFrameLatency(SDL_GPURenderer *driverData, SDL_Window *window, Uint32 frames)
++{
++    (void)driverData;
++    (void)window;
++    (void)frames;
++    return SDL_Unsupported();
++}
++
++static SDL_SE_GPUWaitResult SDL_SE_D3D12_WaitForFrameLatency(SDL_GPURenderer *driverData, SDL_Window *window, Uint64 timeout_ns)
++{
++    (void)driverData;
++    (void)window;
++    (void)timeout_ns;
++    return SDL_SE_GPU_WAIT_UNSUPPORTED;
++}
++
++static bool SDL_SE_D3D12_GetPresentStatistics(SDL_GPURenderer *driverData, SDL_Window *window, SDL_SE_GPUPresentStatistics *statistics)
++{
++    (void)driverData;
++    (void)window;
++    (void)statistics;
++    return SDL_Unsupported();
++}
++
++#endif
++
++// Capabilities, status and handles
++
++static SDL_SE_GPUCapabilityFlags SDL_SE_D3D12_GetCapabilities(SDL_GPURenderer *driverData, SDL_Window *window)
++{
++    D3D12Renderer *renderer = (D3D12Renderer *)driverData;
++    SDL_SE_GPUCapabilityFlags flags = SDL_SE_GPU_CAPABILITY_TIMESTAMPS |
++                                      SDL_SE_GPU_CAPABILITY_NATIVE_HANDLES |
++                                      SDL_SE_GPU_CAPABILITY_DEVICE_STATUS;
++    (void)window;
++#if !(defined(SDL_PLATFORM_XBOXONE) || defined(SDL_PLATFORM_XBOXSERIES))
++    flags |= SDL_SE_GPU_CAPABILITY_FRAME_LATENCY_WAIT | SDL_SE_GPU_CAPABILITY_PRESENT_STATISTICS;
++    if (renderer->supportsTearing) {
++        // IMMEDIATE presents with sync interval 0 and DXGI_PRESENT_ALLOW_TEARING.
++        flags |= SDL_SE_GPU_CAPABILITY_TEARING;
++    }
++#endif
++    if (renderer->se.timestampsFailed) {
++        flags &= ~SDL_SE_GPU_CAPABILITY_TIMESTAMPS;
++    }
++    return flags;
++}
++
++static SDL_SE_GPUDeviceStatus SDL_SE_D3D12_GetDeviceStatus(SDL_GPURenderer *driverData)
++{
++    D3D12Renderer *renderer = (D3D12Renderer *)driverData;
++    HRESULT res;
++
++    if (renderer->device == NULL) {
++        return SDL_SE_GPU_DEVICE_STATUS_UNKNOWN;
++    }
++    res = ID3D12Device_GetDeviceRemovedReason(renderer->device);
++    return res == S_OK ? SDL_SE_GPU_DEVICE_STATUS_OK : SDL_SE_GPU_DEVICE_STATUS_REMOVED;
++}
++
++static bool SDL_SE_D3D12_GetNativeHandles(SDL_GPURenderer *driverData, SDL_Window *window, SDL_SE_GPUNativeHandles *handles)
++{
++    D3D12Renderer *renderer = (D3D12Renderer *)driverData;
++
++    handles->d3d12_device = renderer->device;
++    handles->d3d12_queue = renderer->commandQueue;
++#if !(defined(SDL_PLATFORM_XBOXONE) || defined(SDL_PLATFORM_XBOXSERIES))
++    if (window != NULL) {
++        D3D12WindowData *windowData = D3D12_INTERNAL_FetchWindowData(window);
++        if (windowData != NULL && windowData->renderer == renderer) {
++            handles->dxgi_swapchain = windowData->swapchain;
++        }
++    }
++#else
++    (void)window;
++#endif
++    return true;
++}
++
++const SDL_SE_GPUBackend SDL_SE_D3D12Backend = {
++    SDL_SE_D3D12_GetCapabilities,
++    SDL_SE_D3D12_SetFrameLatency,
++    SDL_SE_D3D12_WaitForFrameLatency,
++    SDL_SE_D3D12_GetPresentStatistics,
++    SDL_SE_D3D12_BeginTiming,
++    SDL_SE_D3D12_EndTiming,
++    SDL_SE_D3D12_GetTiming,
++    SDL_SE_D3D12_GetDeviceStatus,
++    SDL_SE_D3D12_GetNativeHandles
++};
++
++#endif // SDL_gpu_d3d12_se_impl_h_
+diff --git a/src/gpu/vulkan/SDL_gpu_vulkan.c b/src/gpu/vulkan/SDL_gpu_vulkan.c
+index a7d8d57..b60b934 100644
+--- a/src/gpu/vulkan/SDL_gpu_vulkan.c
++++ b/src/gpu/vulkan/SDL_gpu_vulkan.c
+@@ -447,6 +447,8 @@ typedef struct VulkanFenceHandle
+     SDL_AtomicInt referenceCount;
+ } VulkanFenceHandle;
+ 
++#include "SDL_gpu_vulkan_se.h" // simple-engine-2 presentation patch
++
+ // Memory Allocation
+ 
+ typedef struct VulkanMemoryFreeRegion
+@@ -704,6 +706,8 @@ typedef struct WindowData
+     SDL_GPUFence *inFlightFences[MAX_FRAMES_IN_FLIGHT];
+ 
+     Uint32 frameCounter;
++
++    SDL_SE_VulkanWindowData se; // simple-engine-2 presentation patch
+ } WindowData;
+ 
+ typedef struct SwapchainSupportDetails
+@@ -1082,6 +1086,8 @@ typedef struct VulkanCommandBuffer
+ 
+     bool swapchainRequested;
+     bool isDefrag; // Whether this CB was created for defragging
++
++    SDL_SE_VulkanCommandBufferData se; // simple-engine-2 presentation patch
+ } VulkanCommandBuffer;
+ 
+ struct VulkanCommandPool
+@@ -1224,6 +1230,8 @@ struct VulkanRenderer
+     Uint32 allocationsToDefragCount;
+     Uint32 allocationsToDefragCapacity;
+ 
++    SDL_SE_VulkanRendererData se; // simple-engine-2 presentation patch
++
+ #define VULKAN_INSTANCE_FUNCTION(func) \
+     PFN_##func func;
+ #define VULKAN_DEVICE_FUNCTION(func) \
+@@ -1294,6 +1302,7 @@ static inline const char *VkErrorMessages(VkResult code)
+ #define CHECK_VULKAN_ERROR_AND_RETURN(res, fn, ret)                                     \
+     do {                                                                                \
+         if ((res) != VK_SUCCESS) {                                                      \
++            SDL_SE_VULKAN_OnResult(renderer, (res)); /* simple-engine-2 patch */        \
+             if (renderer->debugMode) {                                                  \
+                 SDL_LogError(SDL_LOG_CATEGORY_GPU, "%s %s", #fn, VkErrorMessages(res)); \
+             }                                                                           \
+@@ -4935,6 +4944,7 @@ static Uint32 VULKAN_INTERNAL_CreateSwapchain(
+         }
+     }
+ 
++    SDL_SE_VULKAN_OnSwapchainCreated(windowData); // simple-engine-2 presentation patch
+     windowData->needsSwapchainRecreate = false;
+     return true;
+ }
+@@ -4990,6 +5000,7 @@ static void VULKAN_DestroyDevice(
+     SDL_free(renderer->claimedWindows);
+ 
+     VULKAN_Wait(device->driverData);
++    SDL_SE_VULKAN_DestroyDevice(renderer); // simple-engine-2 presentation patch
+ 
+     SDL_free(renderer->submittedCommandBuffers);
+ 
+@@ -9726,6 +9737,7 @@ static SDL_GPUCommandBuffer *VULKAN_AcquireCommandBuffer(
+ 
+     commandBuffer->swapchainRequested = false;
+     commandBuffer->isDefrag = 0;
++    SDL_zero(commandBuffer->se); // simple-engine-2 presentation patch
+ 
+     /* Reset the command buffer here to avoid resets being called
+      * from a separate thread than where the command buffer was acquired
+@@ -10786,6 +10798,7 @@ static bool VULKAN_Submit(
+     VulkanPresentData *presentData;
+     VkResult vulkanResult, presentResult = VK_SUCCESS;
+     VkPipelineStageFlags waitStages[MAX_PRESENT_COUNT];
++    SDL_SE_VulkanPresentChain sePresentChain; // simple-engine-2 presentation patch
+     Uint32 swapchainImageIndex;
+     VulkanTextureSubresource *swapchainTextureSubresource;
+     VulkanMemorySubAllocator *allocator;
+@@ -10823,6 +10836,8 @@ static bool VULKAN_Submit(
+         }
+     }
+ 
++    SDL_SE_VULKAN_OnSubmitRecording(vulkanCommandBuffer); // simple-engine-2 presentation patch
++
+     if (!VULKAN_INTERNAL_EndCommandBuffer(renderer, vulkanCommandBuffer)) {
+         SDL_UnlockMutex(renderer->submitLock);
+         return false;
+@@ -10836,6 +10851,7 @@ static bool VULKAN_Submit(
+ 
+     // Command buffer has a reference to the in-flight fence
+     (void)SDL_AtomicIncRef(&vulkanCommandBuffer->inFlightFence->referenceCount);
++    SDL_SE_VULKAN_OnSubmitFence(vulkanCommandBuffer); // simple-engine-2 presentation patch
+ 
+     submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+     submitInfo.pNext = NULL;
+@@ -10864,7 +10880,7 @@ static bool VULKAN_Submit(
+         presentData = &vulkanCommandBuffer->presentDatas[j];
+ 
+         presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+-        presentInfo.pNext = NULL;
++        presentInfo.pNext = SDL_SE_VULKAN_PresentNext(renderer, presentData->windowData, &sePresentChain); // simple-engine-2 presentation patch
+         presentInfo.pWaitSemaphores =
+             &presentData->windowData->renderFinishedSemaphore[presentData->swapchainImageIndex];
+         presentInfo.waitSemaphoreCount = 1;
+@@ -10972,6 +10988,7 @@ static bool VULKAN_Cancel(
+ 
+     vulkanCommandBuffer->autoReleaseFence = false;
+     SDL_LockMutex(renderer->submitLock);
++    SDL_SE_VULKAN_OnCancel(vulkanCommandBuffer); // simple-engine-2 presentation patch
+     VULKAN_INTERNAL_CleanCommandBuffer(renderer, vulkanCommandBuffer, true);
+     SDL_UnlockMutex(renderer->submitLock);
+ 
+@@ -12593,12 +12610,22 @@ static Uint8 VULKAN_INTERNAL_CreateLogicalDevice(
+         deviceCreateInfo.pEnabledFeatures = &features->desiredVulkan10DeviceFeatures;
+     }
+ 
++    SDL_SE_VulkanDeviceCreate seDeviceCreate; // simple-engine-2 presentation patch
++    SDL_SE_VULKAN_PrepareDeviceCreate(renderer, &deviceCreateInfo, &seDeviceCreate);
+     vulkanResult = renderer->vkCreateDevice(
+         renderer->physicalDevice,
+         &deviceCreateInfo,
+         NULL,
+         &renderer->logicalDevice);
++    if (vulkanResult != VK_SUCCESS && SDL_SE_VULKAN_RevertDeviceCreate(&deviceCreateInfo, &seDeviceCreate)) {
++        vulkanResult = renderer->vkCreateDevice(
++            renderer->physicalDevice,
++            &deviceCreateInfo,
++            NULL,
++            &renderer->logicalDevice);
++    }
+     SDL_stack_free((void *)deviceExtensions);
++    SDL_SE_VULKAN_FinishDeviceCreate(renderer, &seDeviceCreate, vulkanResult == VK_SUCCESS);
+     CHECK_VULKAN_ERROR_AND_RETURN(vulkanResult, vkCreateDevice, 0);
+ 
+     // Load vkDevice entry points
+@@ -13073,6 +13100,8 @@ static SDL_GPUDevice *VULKAN_CreateDevice(bool debugMode, bool preferLowPower, S
+     return result;
+ }
+ 
++#include "SDL_gpu_vulkan_se_impl.h" // simple-engine-2 presentation patch
++
+ SDL_GPUBootstrap VulkanDriver = {
+     "vulkan",
+     VULKAN_PrepareDriver,
+diff --git a/src/gpu/vulkan/SDL_gpu_vulkan_se.h b/src/gpu/vulkan/SDL_gpu_vulkan_se.h
+new file mode 100644
+index 0000000..37fe306
+--- /dev/null
++++ b/src/gpu/vulkan/SDL_gpu_vulkan_se.h
+@@ -0,0 +1,151 @@
++/*
++  Simple DirectMedia Layer
++  Copyright (C) 1997-2026 Sam Lantinga <slouken@libsdl.org>
++
++  This software is provided 'as-is', without any express or implied
++  warranty.  In no event will the authors be held liable for any damages
++  arising from the use of this software.
++
++  Permission is granted to anyone to use this software for any purpose,
++  including commercial applications, and to alter it and redistribute it
++  freely, subject to the following restrictions:
++
++  1. The origin of this software must not be misrepresented; you must not
++     claim that you wrote the original software. If you use this software
++     in a product, an acknowledgment in the product documentation would be
++     appreciated but is not required.
++  2. Altered source versions must be plainly marked as such, and must not be
++     misrepresented as being the original software.
++  3. This notice may not be removed or altered from any source distribution.
++*/
++
++/* simple-engine-2 presentation patch, Vulkan part 1 of 2: the state the
++ * backend's structures carry for SDL_gpu_se.h, and the hooks the backend
++ * calls. Included by SDL_gpu_vulkan.c once, after VulkanFenceHandle; the
++ * hooks are defined in SDL_gpu_vulkan_se_impl.h, included at the end of
++ * that file. */
++
++#ifndef SDL_gpu_vulkan_se_h_
++#define SDL_gpu_vulkan_se_h_
++
++#include "../SDL_gpu_se_c.h"
++
++// Timed command buffers whose result can be outstanding at once.
++#define SDL_SE_VULKAN_TIMING_SLOTS 64
++// Optional device extensions the patch may add at device creation.
++#define SDL_SE_VULKAN_MAX_ADDED_EXTENSIONS 3
++
++struct WindowData;
++struct VulkanCommandBuffer;
++
++// WindowData::se
++typedef struct SDL_SE_VulkanWindowData
++{
++    // Requested frame latency; 0 until SDL_SE_SetGPUFrameLatency. While it
++    // is set, presents carry VK_KHR_present_id ids.
++    Uint32 frameLatency;
++    // Presents issued on the window; each one's number is its present id.
++    Uint64 presentCount;
++    // The last present that carried an id, and the first one on the
++    // current swapchain (0: none yet).
++    Uint64 lastPresentId;
++    Uint64 firstPresentIdOfSwapchain;
++    // VK_GOOGLE_display_timing, enabled by the first statistics query.
++    bool displayTimingRequested;
++    bool haveDisplayTiming;
++    Uint32 lastTimingPresentId;
++    Uint64 lastActualPresentTime;
++    Uint64 refreshDuration;
++    Uint64 baseActualPresentTime;
++    Uint64 baseRefreshCount;
++} SDL_SE_VulkanWindowData;
++
++// VulkanCommandBuffer::se, zeroed at acquire.
++typedef struct SDL_SE_VulkanCommandBufferData
++{
++    Uint32 timingSlot;
++    bool timingBegun;
++    bool timingEnded;
++} SDL_SE_VulkanCommandBufferData;
++
++typedef struct SDL_SE_VulkanTimingSlot
++{
++    bool inUse;
++    VulkanFenceHandle *fence;
++} SDL_SE_VulkanTimingSlot;
++
++// VulkanRenderer::se. The timing slots are guarded by submitLock.
++typedef struct SDL_SE_VulkanRendererData
++{
++    bool presentId;     // VK_KHR_present_id with its feature enabled
++    bool presentWait;   // VK_KHR_present_wait with its feature enabled
++    bool displayTiming; // VK_GOOGLE_display_timing enabled
++
++    PFN_vkWaitForPresentKHR vkWaitForPresentKHR;
++    PFN_vkGetPastPresentationTimingGOOGLE vkGetPastPresentationTimingGOOGLE;
++    PFN_vkGetRefreshCycleDurationGOOGLE vkGetRefreshCycleDurationGOOGLE;
++    PFN_vkCreateQueryPool vkCreateQueryPool;
++    PFN_vkDestroyQueryPool vkDestroyQueryPool;
++    PFN_vkCmdResetQueryPool vkCmdResetQueryPool;
++    PFN_vkCmdWriteTimestamp vkCmdWriteTimestamp;
++    PFN_vkGetQueryPoolResults vkGetQueryPoolResults;
++
++    VkQueryPool timestampPool;
++    Uint32 timestampValidBits;
++    float timestampPeriod;
++    bool timestampsFailed;
++    Uint32 nextTimingSlot;
++    SDL_SE_VulkanTimingSlot timingSlots[SDL_SE_VULKAN_TIMING_SLOTS];
++
++    // An unsubmitted fence whose status reports a lost device.
++    VkFence statusFence;
++    SDL_AtomicInt deviceLost;
++} SDL_SE_VulkanRendererData;
++
++// Device creation: the optional extensions and their features, appended to
++// the create info and taken out again if vkCreateDevice fails with them.
++typedef struct SDL_SE_VulkanDeviceCreate
++{
++    const char **extensionNames;
++    const char *const *originalExtensionNames;
++    Uint32 originalExtensionCount;
++    const void *originalNext;
++    VkPhysicalDevicePresentIdFeaturesKHR presentIdFeatures;
++    VkPhysicalDevicePresentWaitFeaturesKHR presentWaitFeatures;
++    bool presentId;
++    bool presentWait;
++    bool displayTiming;
++} SDL_SE_VulkanDeviceCreate;
++
++// The pNext chain of one present.
++typedef struct SDL_SE_VulkanPresentChain
++{
++    Uint64 presentIdValue;
++    VkPresentIdKHR presentId;
++    VkPresentTimeGOOGLE presentTime;
++    VkPresentTimesInfoGOOGLE presentTimes;
++} SDL_SE_VulkanPresentChain;
++
++// Hooks, in the order the backend calls them.
++// Before vkCreateDevice: append the optional extensions and features.
++static void SDL_SE_VULKAN_PrepareDeviceCreate(VulkanRenderer *renderer, VkDeviceCreateInfo *createInfo, SDL_SE_VulkanDeviceCreate *data);
++// After vkCreateDevice failed: undo the additions; true if a retry differs.
++static bool SDL_SE_VULKAN_RevertDeviceCreate(VkDeviceCreateInfo *createInfo, SDL_SE_VulkanDeviceCreate *data);
++// After vkCreateDevice (success or not): load entry points, free the list.
++static void SDL_SE_VULKAN_FinishDeviceCreate(VulkanRenderer *renderer, SDL_SE_VulkanDeviceCreate *data, bool created);
++// At the end of a successful swapchain creation.
++static void SDL_SE_VULKAN_OnSwapchainCreated(struct WindowData *windowData);
++// The pNext of a VkPresentInfoKHR for the window.
++static const void *SDL_SE_VULKAN_PresentNext(VulkanRenderer *renderer, struct WindowData *windowData, SDL_SE_VulkanPresentChain *chain);
++// In Submit, before vkEndCommandBuffer: write a missing end timestamp.
++static void SDL_SE_VULKAN_OnSubmitRecording(struct VulkanCommandBuffer *commandBuffer);
++// In Submit, once the submission's fence exists: bind it to the timing.
++static void SDL_SE_VULKAN_OnSubmitFence(struct VulkanCommandBuffer *commandBuffer);
++// In Cancel: give back the timing slot.
++static void SDL_SE_VULKAN_OnCancel(struct VulkanCommandBuffer *commandBuffer);
++// Every failed call checked by CHECK_VULKAN_ERROR_AND_RETURN.
++static void SDL_SE_VULKAN_OnResult(VulkanRenderer *renderer, VkResult result);
++// In DestroyDevice, after the GPU is idle and the windows are released.
++static void SDL_SE_VULKAN_DestroyDevice(VulkanRenderer *renderer);
++
++#endif // SDL_gpu_vulkan_se_h_
+diff --git a/src/gpu/vulkan/SDL_gpu_vulkan_se_impl.h b/src/gpu/vulkan/SDL_gpu_vulkan_se_impl.h
+new file mode 100644
+index 0000000..73c8e0e
+--- /dev/null
++++ b/src/gpu/vulkan/SDL_gpu_vulkan_se_impl.h
+@@ -0,0 +1,692 @@
++/*
++  Simple DirectMedia Layer
++  Copyright (C) 1997-2026 Sam Lantinga <slouken@libsdl.org>
++
++  This software is provided 'as-is', without any express or implied
++  warranty.  In no event will the authors be held liable for any damages
++  arising from the use of this software.
++
++  Permission is granted to anyone to use this software for any purpose,
++  including commercial applications, and to alter it and redistribute it
++  freely, subject to the following restrictions:
++
++  1. The origin of this software must not be misrepresented; you must not
++     claim that you wrote the original software. If you use this software
++     in a product, an acknowledgment in the product documentation would be
++     appreciated but is not required.
++  2. Altered source versions must be plainly marked as such, and must not be
++     misrepresented as being the original software.
++  3. This notice may not be removed or altered from any source distribution.
++*/
++
++/* simple-engine-2 presentation patch, Vulkan part 2 of 2: the SDL_gpu_se.h
++ * backend and the hooks declared in SDL_gpu_vulkan_se.h. Included once, near
++ * the end of SDL_gpu_vulkan.c, so it sees the backend's private structures
++ * and static functions. */
++
++#ifndef SDL_gpu_vulkan_se_impl_h_
++#define SDL_gpu_vulkan_se_impl_h_
++
++#ifndef _WIN32
++#include <time.h>
++#endif
++
++// Device creation hooks
++
++static bool SDL_SE_VULKAN_HasExtension(const VkExtensionProperties *extensions, Uint32 count, const char *name)
++{
++    for (Uint32 i = 0; i < count; i += 1) {
++        if (SDL_strcmp(extensions[i].extensionName, name) == 0) {
++            return true;
++        }
++    }
++    return false;
++}
++
++static bool SDL_SE_VULKAN_IsRequested(const VkDeviceCreateInfo *createInfo, const char *name)
++{
++    for (Uint32 i = 0; i < createInfo->enabledExtensionCount; i += 1) {
++        if (SDL_strcmp(createInfo->ppEnabledExtensionNames[i], name) == 0) {
++            return true;
++        }
++    }
++    return false;
++}
++
++static void SDL_SE_VULKAN_PrepareDeviceCreate(VulkanRenderer *renderer, VkDeviceCreateInfo *createInfo, SDL_SE_VulkanDeviceCreate *data)
++{
++    VkExtensionProperties *extensions;
++    Uint32 extensionCount = 0;
++    bool havePresentId, havePresentWait, haveDisplayTiming;
++    Uint32 count;
++
++    SDL_zerop(data);
++    data->originalExtensionNames = createInfo->ppEnabledExtensionNames;
++    data->originalExtensionCount = createInfo->enabledExtensionCount;
++    data->originalNext = createInfo->pNext;
++
++    if (renderer->vkEnumerateDeviceExtensionProperties(renderer->physicalDevice, NULL, &extensionCount, NULL) != VK_SUCCESS ||
++        extensionCount == 0) {
++        return;
++    }
++    extensions = (VkExtensionProperties *)SDL_malloc(extensionCount * sizeof(VkExtensionProperties));
++    if (extensions == NULL) {
++        return;
++    }
++    if (renderer->vkEnumerateDeviceExtensionProperties(renderer->physicalDevice, NULL, &extensionCount, extensions) != VK_SUCCESS) {
++        SDL_free(extensions);
++        return;
++    }
++    // Extensions an application already requested through
++    // SDL_PROP_GPU_DEVICE_CREATE_VULKAN_OPTIONS_POINTER are left alone.
++    havePresentId = SDL_SE_VULKAN_HasExtension(extensions, extensionCount, VK_KHR_PRESENT_ID_EXTENSION_NAME) &&
++                    !SDL_SE_VULKAN_IsRequested(createInfo, VK_KHR_PRESENT_ID_EXTENSION_NAME);
++    havePresentWait = SDL_SE_VULKAN_HasExtension(extensions, extensionCount, VK_KHR_PRESENT_WAIT_EXTENSION_NAME) &&
++                      !SDL_SE_VULKAN_IsRequested(createInfo, VK_KHR_PRESENT_WAIT_EXTENSION_NAME);
++    haveDisplayTiming = SDL_SE_VULKAN_HasExtension(extensions, extensionCount, VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME) &&
++                        !SDL_SE_VULKAN_IsRequested(createInfo, VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME);
++    SDL_free(extensions);
++
++    // present_id and present_wait are features as well as extensions; their
++    // query needs VK_KHR_get_physical_device_properties2 on a 1.0 instance.
++    if (havePresentId && renderer->supportsPhysicalDeviceProperties2) {
++        PFN_vkGetPhysicalDeviceFeatures2KHR getFeatures2 =
++            (PFN_vkGetPhysicalDeviceFeatures2KHR)vkGetInstanceProcAddr(renderer->instance, "vkGetPhysicalDeviceFeatures2KHR");
++        if (getFeatures2 != NULL) {
++            VkPhysicalDevicePresentWaitFeaturesKHR waitFeatures;
++            VkPhysicalDevicePresentIdFeaturesKHR idFeatures;
++            VkPhysicalDeviceFeatures2 features2;
++            SDL_zero(waitFeatures);
++            SDL_zero(idFeatures);
++            SDL_zero(features2);
++            waitFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR;
++            idFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR;
++            idFeatures.pNext = havePresentWait ? &waitFeatures : NULL;
++            features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
++            features2.pNext = &idFeatures;
++            getFeatures2(renderer->physicalDevice, &features2);
++            data->presentId = idFeatures.presentId == VK_TRUE;
++            data->presentWait = data->presentId && havePresentWait && waitFeatures.presentWait == VK_TRUE;
++        }
++    }
++    data->displayTiming = haveDisplayTiming;
++
++    count = data->presentId + data->presentWait + data->displayTiming;
++    if (count == 0) {
++        return;
++    }
++    data->extensionNames = (const char **)SDL_malloc((data->originalExtensionCount + SDL_SE_VULKAN_MAX_ADDED_EXTENSIONS) * sizeof(const char *));
++    if (data->extensionNames == NULL) {
++        data->presentId = data->presentWait = data->displayTiming = false;
++        return;
++    }
++    count = 0;
++    for (Uint32 i = 0; i < data->originalExtensionCount; i += 1) {
++        data->extensionNames[count++] = data->originalExtensionNames[i];
++    }
++    if (data->presentId) {
++        data->extensionNames[count++] = VK_KHR_PRESENT_ID_EXTENSION_NAME;
++        data->presentIdFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR;
++        data->presentIdFeatures.pNext = (void *)createInfo->pNext;
++        data->presentIdFeatures.presentId = VK_TRUE;
++        createInfo->pNext = &data->presentIdFeatures;
++    }
++    if (data->presentWait) {
++        data->extensionNames[count++] = VK_KHR_PRESENT_WAIT_EXTENSION_NAME;
++        data->presentWaitFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR;
++        data->presentWaitFeatures.pNext = (void *)createInfo->pNext;
++        data->presentWaitFeatures.presentWait = VK_TRUE;
++        createInfo->pNext = &data->presentWaitFeatures;
++    }
++    if (data->displayTiming) {
++        data->extensionNames[count++] = VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME;
++    }
++    createInfo->enabledExtensionCount = count;
++    createInfo->ppEnabledExtensionNames = data->extensionNames;
++}
++
++static bool SDL_SE_VULKAN_RevertDeviceCreate(VkDeviceCreateInfo *createInfo, SDL_SE_VulkanDeviceCreate *data)
++{
++    bool changed = data->presentId || data->presentWait || data->displayTiming;
++    createInfo->ppEnabledExtensionNames = data->originalExtensionNames;
++    createInfo->enabledExtensionCount = data->originalExtensionCount;
++    createInfo->pNext = data->originalNext;
++    data->presentId = data->presentWait = data->displayTiming = false;
++    if (changed) {
++        SDL_LogWarn(SDL_LOG_CATEGORY_GPU, "Vulkan: device creation failed with the optional presentation extensions; retrying without them");
++    }
++    return changed;
++}
++
++#define SDL_SE_VULKAN_LOAD_DEVICE_FUNCTION(func) \
++    renderer->se.func = (PFN_##func)renderer->vkGetDeviceProcAddr(renderer->logicalDevice, #func)
++
++static void SDL_SE_VULKAN_FinishDeviceCreate(VulkanRenderer *renderer, SDL_SE_VulkanDeviceCreate *data, bool created)
++{
++    SDL_free((void *)data->extensionNames);
++    data->extensionNames = NULL;
++    if (!created) {
++        return;
++    }
++
++    if (data->presentWait) {
++        SDL_SE_VULKAN_LOAD_DEVICE_FUNCTION(vkWaitForPresentKHR);
++    }
++    renderer->se.presentId = data->presentId;
++    renderer->se.presentWait = data->presentWait && renderer->se.vkWaitForPresentKHR != NULL;
++    if (data->displayTiming) {
++        SDL_SE_VULKAN_LOAD_DEVICE_FUNCTION(vkGetPastPresentationTimingGOOGLE);
++        SDL_SE_VULKAN_LOAD_DEVICE_FUNCTION(vkGetRefreshCycleDurationGOOGLE);
++    }
++    renderer->se.displayTiming = data->displayTiming &&
++                                 renderer->se.vkGetPastPresentationTimingGOOGLE != NULL &&
++                                 renderer->se.vkGetRefreshCycleDurationGOOGLE != NULL;
++
++    // Timestamp queries are core: they need a queue family with valid bits.
++    SDL_SE_VULKAN_LOAD_DEVICE_FUNCTION(vkCreateQueryPool);
++    SDL_SE_VULKAN_LOAD_DEVICE_FUNCTION(vkDestroyQueryPool);
++    SDL_SE_VULKAN_LOAD_DEVICE_FUNCTION(vkCmdResetQueryPool);
++    SDL_SE_VULKAN_LOAD_DEVICE_FUNCTION(vkCmdWriteTimestamp);
++    SDL_SE_VULKAN_LOAD_DEVICE_FUNCTION(vkGetQueryPoolResults);
++    renderer->se.timestampPeriod = renderer->physicalDeviceProperties.properties.limits.timestampPeriod;
++    {
++        Uint32 familyCount = 0;
++        VkQueueFamilyProperties *families;
++        renderer->vkGetPhysicalDeviceQueueFamilyProperties(renderer->physicalDevice, &familyCount, NULL);
++        families = (VkQueueFamilyProperties *)SDL_malloc(SDL_max(familyCount, 1) * sizeof(VkQueueFamilyProperties));
++        if (families != NULL) {
++            renderer->vkGetPhysicalDeviceQueueFamilyProperties(renderer->physicalDevice, &familyCount, families);
++            if (renderer->queueFamilyIndex < familyCount) {
++                renderer->se.timestampValidBits = families[renderer->queueFamilyIndex].timestampValidBits;
++            }
++            SDL_free(families);
++        }
++    }
++    if (renderer->se.timestampValidBits == 0 || renderer->se.timestampPeriod <= 0.0f ||
++        renderer->se.vkCreateQueryPool == NULL || renderer->se.vkCmdWriteTimestamp == NULL ||
++        renderer->se.vkCmdResetQueryPool == NULL || renderer->se.vkGetQueryPoolResults == NULL) {
++        renderer->se.timestampsFailed = true;
++    }
++}
++
++#undef SDL_SE_VULKAN_LOAD_DEVICE_FUNCTION
++
++// Swapchain and present hooks
++
++static void SDL_SE_VULKAN_OnSwapchainCreated(WindowData *windowData)
++{
++    windowData->se.firstPresentIdOfSwapchain = 0;
++    windowData->se.haveDisplayTiming = false;
++    windowData->se.refreshDuration = 0;
++    windowData->se.baseActualPresentTime = 0;
++    windowData->se.baseRefreshCount = 0;
++}
++
++static const void *SDL_SE_VULKAN_PresentNext(VulkanRenderer *renderer, WindowData *windowData, SDL_SE_VulkanPresentChain *chain)
++{
++    const void *next = NULL;
++    Uint64 id;
++
++    windowData->se.presentCount += 1;
++    id = windowData->se.presentCount;
++
++    if (renderer->se.presentId && windowData->se.frameLatency > 0) {
++        chain->presentIdValue = id;
++        chain->presentId.sType = VK_STRUCTURE_TYPE_PRESENT_ID_KHR;
++        chain->presentId.pNext = next;
++        chain->presentId.swapchainCount = 1;
++        chain->presentId.pPresentIds = &chain->presentIdValue;
++        next = &chain->presentId;
++        windowData->se.lastPresentId = id;
++        if (windowData->se.firstPresentIdOfSwapchain == 0) {
++            windowData->se.firstPresentIdOfSwapchain = id;
++        }
++    }
++    if (renderer->se.displayTiming && windowData->se.displayTimingRequested) {
++        chain->presentTime.presentID = (Uint32)id;
++        chain->presentTime.desiredPresentTime = 0;
++        chain->presentTimes.sType = VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE;
++        chain->presentTimes.pNext = next;
++        chain->presentTimes.swapchainCount = 1;
++        chain->presentTimes.pTimes = &chain->presentTime;
++        next = &chain->presentTimes;
++    }
++    return next;
++}
++
++// Status hooks
++
++static void SDL_SE_VULKAN_OnResult(VulkanRenderer *renderer, VkResult result)
++{
++    if (result == VK_ERROR_DEVICE_LOST) {
++        SDL_SetAtomicInt(&renderer->se.deviceLost, 1);
++    }
++}
++
++// Timing hooks
++
++static void SDL_SE_VULKAN_ReleaseTimingSlot(VulkanRenderer *renderer, Uint32 slot)
++{
++    SDL_SE_VulkanTimingSlot *timing = &renderer->se.timingSlots[slot];
++    if (timing->fence != NULL) {
++        VULKAN_ReleaseFence((SDL_GPURenderer *)renderer, (SDL_GPUFence *)timing->fence);
++        timing->fence = NULL;
++    }
++    timing->inUse = false;
++}
++
++static bool SDL_SE_VULKAN_EnsureTimestamps(VulkanRenderer *renderer)
++{
++    VkQueryPoolCreateInfo createInfo;
++    VkResult result;
++
++    if (renderer->se.timestampPool != VK_NULL_HANDLE) {
++        return true;
++    }
++    if (renderer->se.timestampsFailed) {
++        return false;
++    }
++    SDL_zero(createInfo);
++    createInfo.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
++    createInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
++    createInfo.queryCount = 2 * SDL_SE_VULKAN_TIMING_SLOTS;
++    result = renderer->se.vkCreateQueryPool(renderer->logicalDevice, &createInfo, NULL, &renderer->se.timestampPool);
++    if (result != VK_SUCCESS) {
++        SDL_SE_VULKAN_OnResult(renderer, result);
++        renderer->se.timestampPool = VK_NULL_HANDLE;
++        renderer->se.timestampsFailed = true;
++        SDL_SetError("vkCreateQueryPool %s", VkErrorMessages(result));
++        return false;
++    }
++    return true;
++}
++
++static void SDL_SE_VULKAN_BeginTiming(SDL_GPUCommandBuffer *commandBuffer)
++{
++    VulkanCommandBuffer *vulkanCommandBuffer = (VulkanCommandBuffer *)commandBuffer;
++    VulkanRenderer *renderer = vulkanCommandBuffer->renderer;
++    Uint32 slot = SDL_SE_VULKAN_TIMING_SLOTS;
++
++    if (vulkanCommandBuffer->se.timingBegun) {
++        return;
++    }
++
++    SDL_LockMutex(renderer->submitLock);
++    if (SDL_SE_VULKAN_EnsureTimestamps(renderer)) {
++        // The oldest slot that no command buffer is recording into; a result
++        // nobody read is dropped.
++        for (Uint32 i = 0; i < SDL_SE_VULKAN_TIMING_SLOTS; i += 1) {
++            Uint32 candidate = (renderer->se.nextTimingSlot + i) % SDL_SE_VULKAN_TIMING_SLOTS;
++            if (!renderer->se.timingSlots[candidate].inUse || renderer->se.timingSlots[candidate].fence != NULL) {
++                slot = candidate;
++                break;
++            }
++        }
++        if (slot < SDL_SE_VULKAN_TIMING_SLOTS) {
++            SDL_SE_VULKAN_ReleaseTimingSlot(renderer, slot);
++            renderer->se.timingSlots[slot].inUse = true;
++            renderer->se.nextTimingSlot = (slot + 1) % SDL_SE_VULKAN_TIMING_SLOTS;
++        }
++    }
++    SDL_UnlockMutex(renderer->submitLock);
++
++    if (slot >= SDL_SE_VULKAN_TIMING_SLOTS) {
++        return;
++    }
++    vulkanCommandBuffer->se.timingSlot = slot;
++    vulkanCommandBuffer->se.timingBegun = true;
++    vulkanCommandBuffer->se.timingEnded = false;
++    // Outside any render pass (checked by SDL_SE_BeginGPUTiming).
++    renderer->se.vkCmdResetQueryPool(vulkanCommandBuffer->commandBuffer, renderer->se.timestampPool, 2 * slot, 2);
++    renderer->se.vkCmdWriteTimestamp(vulkanCommandBuffer->commandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, renderer->se.timestampPool, 2 * slot);
++}
++
++static void SDL_SE_VULKAN_EndTiming(SDL_GPUCommandBuffer *commandBuffer)
++{
++    VulkanCommandBuffer *vulkanCommandBuffer = (VulkanCommandBuffer *)commandBuffer;
++    VulkanRenderer *renderer = vulkanCommandBuffer->renderer;
++
++    if (!vulkanCommandBuffer->se.timingBegun || vulkanCommandBuffer->se.timingEnded) {
++        return;
++    }
++    vulkanCommandBuffer->se.timingEnded = true;
++    renderer->se.vkCmdWriteTimestamp(
++        vulkanCommandBuffer->commandBuffer,
++        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
++        renderer->se.timestampPool,
++        2 * vulkanCommandBuffer->se.timingSlot + 1);
++}
++
++static void SDL_SE_VULKAN_OnSubmitRecording(VulkanCommandBuffer *commandBuffer)
++{
++    SDL_SE_VULKAN_EndTiming((SDL_GPUCommandBuffer *)commandBuffer);
++}
++
++static void SDL_SE_VULKAN_OnSubmitFence(VulkanCommandBuffer *commandBuffer)
++{
++    VulkanRenderer *renderer = commandBuffer->renderer;
++    SDL_SE_VulkanTimingSlot *timing;
++
++    if (!commandBuffer->se.timingBegun) {
++        return;
++    }
++    timing = &renderer->se.timingSlots[commandBuffer->se.timingSlot];
++    timing->fence = commandBuffer->inFlightFence;
++    (void)SDL_AtomicIncRef(&timing->fence->referenceCount);
++    SDL_zero(commandBuffer->se);
++}
++
++static void SDL_SE_VULKAN_OnCancel(VulkanCommandBuffer *commandBuffer)
++{
++    if (commandBuffer->se.timingBegun) {
++        SDL_SE_VULKAN_ReleaseTimingSlot(commandBuffer->renderer, commandBuffer->se.timingSlot);
++    }
++    SDL_zero(commandBuffer->se);
++}
++
++static bool SDL_SE_VULKAN_GetTiming(SDL_GPURenderer *driverData, SDL_GPUFence *fence, Uint64 *duration_ns)
++{
++    VulkanRenderer *renderer = (VulkanRenderer *)driverData;
++    VulkanFenceHandle *handle = (VulkanFenceHandle *)fence;
++    Uint32 slot = SDL_SE_VULKAN_TIMING_SLOTS;
++    Uint64 timestamps[2] = { 0, 0 };
++    Uint64 mask, ticks;
++    VkResult result;
++    bool ok = false;
++
++    SDL_LockMutex(renderer->submitLock);
++    for (Uint32 i = 0; i < SDL_SE_VULKAN_TIMING_SLOTS; i += 1) {
++        if (renderer->se.timingSlots[i].fence == handle) {
++            slot = i;
++            break;
++        }
++    }
++    if (slot >= SDL_SE_VULKAN_TIMING_SLOTS) {
++        SDL_UnlockMutex(renderer->submitLock);
++        return SDL_SetError("No GPU timing is pending for this fence");
++    }
++    result = renderer->vkGetFenceStatus(renderer->logicalDevice, handle->fence);
++    if (result != VK_SUCCESS) {
++        SDL_SE_VULKAN_OnResult(renderer, result);
++        SDL_UnlockMutex(renderer->submitLock);
++        return false;
++    }
++    result = renderer->se.vkGetQueryPoolResults(
++        renderer->logicalDevice,
++        renderer->se.timestampPool,
++        2 * slot,
++        2,
++        sizeof(timestamps),
++        timestamps,
++        sizeof(Uint64),
++        VK_QUERY_RESULT_64_BIT);
++    if (result == VK_SUCCESS) {
++        mask = renderer->se.timestampValidBits >= 64 ? ~(Uint64)0 : (((Uint64)1 << renderer->se.timestampValidBits) - 1);
++        ticks = ((timestamps[1] & mask) - (timestamps[0] & mask)) & mask;
++        *duration_ns = (Uint64)((double)ticks * (double)renderer->se.timestampPeriod);
++        ok = true;
++    } else {
++        SDL_SE_VULKAN_OnResult(renderer, result);
++        SDL_SetError("vkGetQueryPoolResults %s", VkErrorMessages(result));
++    }
++    SDL_SE_VULKAN_ReleaseTimingSlot(renderer, slot);
++    SDL_UnlockMutex(renderer->submitLock);
++    return ok;
++}
++
++static void SDL_SE_VULKAN_DestroyDevice(VulkanRenderer *renderer)
++{
++    for (Uint32 i = 0; i < SDL_SE_VULKAN_TIMING_SLOTS; i += 1) {
++        SDL_SE_VULKAN_ReleaseTimingSlot(renderer, i);
++    }
++    if (renderer->se.timestampPool != VK_NULL_HANDLE) {
++        renderer->se.vkDestroyQueryPool(renderer->logicalDevice, renderer->se.timestampPool, NULL);
++        renderer->se.timestampPool = VK_NULL_HANDLE;
++    }
++    if (renderer->se.statusFence != VK_NULL_HANDLE) {
++        renderer->vkDestroyFence(renderer->logicalDevice, renderer->se.statusFence, NULL);
++        renderer->se.statusFence = VK_NULL_HANDLE;
++    }
++}
++
++// Frame latency and present statistics
++
++static bool SDL_SE_VULKAN_SetFrameLatency(SDL_GPURenderer *driverData, SDL_Window *window, Uint32 frames)
++{
++    VulkanRenderer *renderer = (VulkanRenderer *)driverData;
++    WindowData *windowData = VULKAN_INTERNAL_FetchWindowData(window);
++
++    if (windowData == NULL || windowData->renderer != renderer) {
++        SET_STRING_ERROR_AND_RETURN("Cannot set the frame latency of an unclaimed window!", false);
++    }
++    if (!renderer->se.presentId || !renderer->se.presentWait) {
++        return SDL_SetError("The Vulkan device lacks VK_KHR_present_id or VK_KHR_present_wait");
++    }
++    windowData->se.frameLatency = frames;
++    return true;
++}
++
++static SDL_SE_GPUWaitResult SDL_SE_VULKAN_WaitForFrameLatency(SDL_GPURenderer *driverData, SDL_Window *window, Uint64 timeout_ns)
++{
++    VulkanRenderer *renderer = (VulkanRenderer *)driverData;
++    WindowData *windowData = VULKAN_INTERNAL_FetchWindowData(window);
++    Uint64 target;
++    VkResult result;
++
++    if (windowData == NULL || windowData->renderer != renderer || !renderer->se.presentWait ||
++        windowData->se.frameLatency == 0) {
++        return SDL_SE_GPU_WAIT_UNSUPPORTED;
++    }
++    // The next present gets id lastPresentId + 1; with a latency of L it may
++    // be queued once the present L back from it was displayed.
++    if (windowData->se.lastPresentId < windowData->se.frameLatency) {
++        return SDL_SE_GPU_WAIT_READY;
++    }
++    target = windowData->se.lastPresentId + 1 - windowData->se.frameLatency;
++    if (windowData->swapchain == VK_NULL_HANDLE || windowData->se.firstPresentIdOfSwapchain == 0 ||
++        target < windowData->se.firstPresentIdOfSwapchain) {
++        // That present went to an earlier swapchain (or none was made yet).
++        return SDL_SE_GPU_WAIT_READY;
++    }
++    result = renderer->se.vkWaitForPresentKHR(renderer->logicalDevice, windowData->swapchain, target, timeout_ns);
++    if (result == VK_SUCCESS) {
++        return SDL_SE_GPU_WAIT_READY;
++    }
++    if (result == VK_TIMEOUT) {
++        return SDL_SE_GPU_WAIT_TIMEOUT;
++    }
++    // Out of date, surface or device lost: never block on it.
++    SDL_SE_VULKAN_OnResult(renderer, result);
++    return SDL_SE_GPU_WAIT_READY;
++}
++
++// Converts a VK_GOOGLE_display_timing time into the SDL_GetTicksNS() domain.
++// The extension defines the clock as CLOCK_MONOTONIC on Linux; elsewhere the
++// times are taken as nanoseconds of the performance counter (an assumption:
++// no Windows driver on the development machine reports the extension).
++static Uint64 SDL_SE_VULKAN_PresentTimeToTicksNS(Uint64 presentTime)
++{
++#ifdef _WIN32
++    const Uint64 frequency = SDL_GetPerformanceFrequency();
++    const Uint64 counter = (presentTime / SDL_NS_PER_SECOND) * frequency +
++                           ((presentTime % SDL_NS_PER_SECOND) * frequency) / SDL_NS_PER_SECOND;
++    return SDL_SE_PerformanceCounterToTicksNS(counter);
++#else
++    struct timespec now;
++    Uint64 nowNS, ticks;
++    ticks = SDL_GetTicksNS();
++    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
++        return ticks;
++    }
++    nowNS = (Uint64)now.tv_sec * SDL_NS_PER_SECOND + (Uint64)now.tv_nsec;
++    if (presentTime >= nowNS) {
++        return ticks + (presentTime - nowNS);
++    }
++    return (nowNS - presentTime) < ticks ? ticks - (nowNS - presentTime) : 0;
++#endif
++}
++
++static bool SDL_SE_VULKAN_GetPresentStatistics(SDL_GPURenderer *driverData, SDL_Window *window, SDL_SE_GPUPresentStatistics *statistics)
++{
++    VulkanRenderer *renderer = (VulkanRenderer *)driverData;
++    WindowData *windowData = VULKAN_INTERNAL_FetchWindowData(window);
++    VkPastPresentationTimingGOOGLE timings[16];
++    Uint32 count = SDL_arraysize(timings);
++    VkResult result;
++    Uint64 refreshCount;
++
++    if (windowData == NULL || windowData->renderer != renderer) {
++        SET_STRING_ERROR_AND_RETURN("Cannot read present statistics of an unclaimed window!", false);
++    }
++    if (!renderer->se.displayTiming) {
++        return SDL_SetError("The Vulkan device lacks VK_GOOGLE_display_timing");
++    }
++    windowData->se.displayTimingRequested = true;
++    if (windowData->swapchain == VK_NULL_HANDLE || (SDL_GetWindowFlags(window) & SDL_WINDOW_MINIMIZED)) {
++        return false;
++    }
++
++    if (windowData->se.refreshDuration == 0) {
++        VkRefreshCycleDurationGOOGLE refresh;
++        SDL_zero(refresh);
++        result = renderer->se.vkGetRefreshCycleDurationGOOGLE(renderer->logicalDevice, windowData->swapchain, &refresh);
++        if (result != VK_SUCCESS || refresh.refreshDuration == 0) {
++            SDL_SE_VULKAN_OnResult(renderer, result);
++            return false;
++        }
++        windowData->se.refreshDuration = refresh.refreshDuration;
++    }
++
++    // Drain what the driver has; keep the newest displayed present.
++    for (;;) {
++        count = SDL_arraysize(timings);
++        result = renderer->se.vkGetPastPresentationTimingGOOGLE(renderer->logicalDevice, windowData->swapchain, &count, timings);
++        if (result != VK_SUCCESS && result != VK_INCOMPLETE) {
++            SDL_SE_VULKAN_OnResult(renderer, result);
++            break;
++        }
++        for (Uint32 i = 0; i < count; i += 1) {
++            if (!windowData->se.haveDisplayTiming || timings[i].presentID > windowData->se.lastTimingPresentId) {
++                windowData->se.lastTimingPresentId = timings[i].presentID;
++                windowData->se.lastActualPresentTime = timings[i].actualPresentTime;
++                windowData->se.haveDisplayTiming = true;
++            }
++        }
++        if (result != VK_INCOMPLETE) {
++            break;
++        }
++    }
++    if (!windowData->se.haveDisplayTiming) {
++        return false;
++    }
++
++    // Refresh counts from the displayed times: the first displayed present
++    // is refresh 1 of this swapchain.
++    if (windowData->se.baseRefreshCount == 0) {
++        windowData->se.baseActualPresentTime = windowData->se.lastActualPresentTime;
++        windowData->se.baseRefreshCount = 1;
++    }
++    refreshCount = windowData->se.baseRefreshCount;
++    if (windowData->se.lastActualPresentTime > windowData->se.baseActualPresentTime) {
++        refreshCount += (windowData->se.lastActualPresentTime - windowData->se.baseActualPresentTime +
++                         windowData->se.refreshDuration / 2) /
++                        windowData->se.refreshDuration;
++    }
++
++    // The 32-bit timing ids extend with the high bits of the present count.
++    statistics->present_count = (windowData->se.presentCount & ~(Uint64)0xFFFFFFFFu) | windowData->se.lastTimingPresentId;
++    if (statistics->present_count > windowData->se.presentCount) {
++        statistics->present_count -= (Uint64)1 << 32;
++    }
++    statistics->present_refresh_count = refreshCount;
++    statistics->sync_refresh_count = refreshCount;
++    statistics->sync_time_ns = SDL_SE_VULKAN_PresentTimeToTicksNS(windowData->se.lastActualPresentTime);
++    statistics->last_present_count = windowData->se.presentCount;
++    return true;
++}
++
++// Capabilities, status and handles
++
++static SDL_SE_GPUCapabilityFlags SDL_SE_VULKAN_GetCapabilities(SDL_GPURenderer *driverData, SDL_Window *window)
++{
++    VulkanRenderer *renderer = (VulkanRenderer *)driverData;
++    SDL_SE_GPUCapabilityFlags flags = SDL_SE_GPU_CAPABILITY_NATIVE_HANDLES | SDL_SE_GPU_CAPABILITY_DEVICE_STATUS;
++
++    if (renderer->se.presentId && renderer->se.presentWait) {
++        flags |= SDL_SE_GPU_CAPABILITY_FRAME_LATENCY_WAIT;
++    }
++    if (renderer->se.displayTiming) {
++        flags |= SDL_SE_GPU_CAPABILITY_PRESENT_STATISTICS;
++    }
++    if (!renderer->se.timestampsFailed) {
++        flags |= SDL_SE_GPU_CAPABILITY_TIMESTAMPS;
++    }
++    if (window != NULL) {
++        WindowData *windowData = VULKAN_INTERNAL_FetchWindowData(window);
++        if (windowData != NULL && windowData->renderer == renderer &&
++            VULKAN_SupportsPresentMode(driverData, window, SDL_GPU_PRESENTMODE_IMMEDIATE)) {
++            flags |= SDL_SE_GPU_CAPABILITY_TEARING;
++        }
++    }
++    return flags;
++}
++
++static SDL_SE_GPUDeviceStatus SDL_SE_VULKAN_GetDeviceStatus(SDL_GPURenderer *driverData)
++{
++    VulkanRenderer *renderer = (VulkanRenderer *)driverData;
++    VkResult result;
++
++    if (SDL_GetAtomicInt(&renderer->se.deviceLost)) {
++        return SDL_SE_GPU_DEVICE_STATUS_REMOVED;
++    }
++    // A fence that is never submitted reports VK_NOT_READY, or
++    // VK_ERROR_DEVICE_LOST once the device is lost.
++    if (renderer->se.statusFence == VK_NULL_HANDLE) {
++        VkFenceCreateInfo createInfo;
++        SDL_zero(createInfo);
++        createInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
++        result = renderer->vkCreateFence(renderer->logicalDevice, &createInfo, NULL, &renderer->se.statusFence);
++        if (result != VK_SUCCESS) {
++            SDL_SE_VULKAN_OnResult(renderer, result);
++            renderer->se.statusFence = VK_NULL_HANDLE;
++            return result == VK_ERROR_DEVICE_LOST ? SDL_SE_GPU_DEVICE_STATUS_REMOVED : SDL_SE_GPU_DEVICE_STATUS_OK;
++        }
++    }
++    result = renderer->vkGetFenceStatus(renderer->logicalDevice, renderer->se.statusFence);
++    SDL_SE_VULKAN_OnResult(renderer, result);
++    return result == VK_ERROR_DEVICE_LOST ? SDL_SE_GPU_DEVICE_STATUS_REMOVED : SDL_SE_GPU_DEVICE_STATUS_OK;
++}
++
++static bool SDL_SE_VULKAN_GetNativeHandles(SDL_GPURenderer *driverData, SDL_Window *window, SDL_SE_GPUNativeHandles *handles)
++{
++    VulkanRenderer *renderer = (VulkanRenderer *)driverData;
++
++    handles->vk_instance = (void *)renderer->instance;
++    handles->vk_physical_device = (void *)renderer->physicalDevice;
++    handles->vk_device = (void *)renderer->logicalDevice;
++    handles->vk_queue = (void *)renderer->unifiedQueue;
++    handles->vk_queue_family = renderer->queueFamilyIndex;
++    if (window != NULL) {
++        WindowData *windowData = VULKAN_INTERNAL_FetchWindowData(window);
++        if (windowData != NULL && windowData->renderer == renderer) {
++            // A pointer or a 64-bit integer, by platform.
++            SDL_COMPILE_TIME_ASSERT(se_vk_swapchain_size, sizeof(windowData->swapchain) == sizeof(Uint64));
++            SDL_memcpy(&handles->vk_swapchain, &windowData->swapchain, sizeof(Uint64));
++        }
++    }
++    return true;
++}
++
++const SDL_SE_GPUBackend SDL_SE_VulkanBackend = {
++    SDL_SE_VULKAN_GetCapabilities,
++    SDL_SE_VULKAN_SetFrameLatency,
++    SDL_SE_VULKAN_WaitForFrameLatency,
++    SDL_SE_VULKAN_GetPresentStatistics,
++    SDL_SE_VULKAN_BeginTiming,
++    SDL_SE_VULKAN_EndTiming,
++    SDL_SE_VULKAN_GetTiming,
++    SDL_SE_VULKAN_GetDeviceStatus,
++    SDL_SE_VULKAN_GetNativeHandles
++};
++
++#endif // SDL_gpu_vulkan_se_impl_h_

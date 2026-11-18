@@ -1,0 +1,24 @@
+# Review fix F2 in the editor: a state's scene that is read but does not
+# load (here the Pause scene, written by "another program" on the content
+# copy: an unknown component) is not created. 'Play game' faults
+# ("content") as for a text that does not load; Stop returns to Edit.
+write-file assets/scenes/pause.scene.json {"format":"se-scene-v1","name":"pause","entities":[{"guid":"5a4db0c5-0000-4000-8000-0000000000f3","components":{"NoSuchComponent":{}}}]}
+play-game
+wait-top-state title
+wait-ticks 10
+push-key enter
+wait-frames 2
+push-key enter up
+wait-top-state gameplay
+wait-ticks 20
+push-key esc
+wait-frames 2
+push-key esc up
+wait-frames 20
+expect-faulted yes
+expect-state faulted
+stop
+wait-frames 2
+expect-state edit
+expect-hash document initial
+quit discard

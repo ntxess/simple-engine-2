@@ -16,6 +16,7 @@ Editor::Editor()
     , m_enableLogViewer{false}
     , m_startButtonEnabled{false}
     , m_forwardFrameEnabled{false}
+    , m_generateCount{0}
     , m_selectedSceneData{nullptr}
 {}
 
@@ -133,7 +134,8 @@ void Editor::update()
 
 void Editor::render()
 {
-    ImGui::SFML::Update(m_appContext->window, sf::seconds(m_appContext->deltaTime));
+    // ImGui takes the real frame time in seconds (deltaTime used to pass milliseconds as seconds).
+    ImGui::SFML::Update(m_appContext->window, sf::seconds(static_cast<float>(m_appContext->realFrameSeconds)));
 
     // Setup dockspace IDs
     m_dockspaceId1 = ImGui::GetID("Dockspace1");
@@ -328,9 +330,10 @@ void Editor::renderDebugPanel(const ImVec2& pos, const ImVec2& size)
                 prevEntityAmount = 0;
             }
 
+            // The simulation ticks at a fixed rate (sim-tick-rate); this only limits presentation.
             static int frameRateTarget = 60;
             if (ImGui::SliderInt("Frame Rate", &frameRateTarget, 0, 255))
-                m_appContext->deltaTime = static_cast<float>(1000.f / frameRateTarget);
+                m_appContext->window.setFramerateLimit(static_cast<unsigned int>(frameRateTarget));
             ImGui::EndDisabled();
         }
     }
@@ -836,16 +839,14 @@ void Editor::updateWayPointComponent(const entt::entity& entityID, ComponentProp
         {
             // Sprite with a waypoint component but no next waypoint will still have the initial position of the sprite as its sole waypoint
             std::unique_ptr<WayPoint> root = std::make_unique<WayPoint>(sf::Vector2f{ sprite.getPosition().x, sprite.getPosition().y });
-            movement.currentPath = root.get();
-            movement.distance = 0.f;
+            movement.restart();
             m_selectedSceneData->getRegistry().emplace_or_replace<MovementPattern>(entityID, std::move(root), true);
         }
         else
         {
             // Always reset the current movement progress to keep sprite position consistant 
             WayPoint* current = movement.movePattern.get();
-            movement.currentPath = movement.movePattern.get();
-            movement.distance = 0.f;
+            movement.restart();
             sprite.setPosition({ current->coordinate.x, current->coordinate.y });
 
             // Find last and second to last waypoint
@@ -880,7 +881,7 @@ void Editor::updateWayPointComponent(const entt::entity& entityID, ComponentProp
                 {
                     // Reset movement pattern to the current pos of sprite if last waypoint is removed
                     movement.movePattern = std::make_unique<WayPoint>(sf::Vector2f{ sprite.getPosition().x, sprite.getPosition().y });
-                    movement.currentPath = movement.movePattern.get();
+                    movement.restart();
                 }
             }
         }
@@ -935,32 +936,15 @@ void Editor::generateEntities(size_t numOfEntities)
     float width = static_cast<float>(m_appContext->configData.get<int>("width").value());
     float height = static_cast<float>(m_appContext->configData.get<int>("height").value());
 
-    // Generate a ton of sprite for testing in random places within the boundary of the window
-    std::random_device dev;
-    std::mt19937 rng(dev());
-    std::uniform_int_distribution<std::mt19937::result_type> dist6(0, static_cast<unsigned int>(width));
+    // Generate a ton of sprite for testing in random places within the boundary of the window.
+    // Each press draws the next seeded stream, so a session with the same seed generates the same entities.
+    // The paths and their distributions come from util/StressGenerator (shared with legacy_replay --generate).
+    std::mt19937 rng = makeLegacyRng(m_appContext->seed, RngStream::StressGenerator + m_generateCount++);
+    const std::vector<std::vector<sf::Vector2f>> paths = generateStressPaths(rng, width, height, numOfEntities);
 
-    for (size_t i = 0; i < numOfEntities; i++)
+    for (const auto& points : paths)
     {
-        std::unique_ptr<WayPoint> root = nullptr;
-        WayPoint* last = nullptr;
-
-        for (size_t j = 0; j <= size_t(dist6(rng)) % 10; j++)
-        {
-            std::unique_ptr<WayPoint> point = std::make_unique<WayPoint>(sf::Vector2f{ float(dist6(rng) % int(width)), float(dist6(rng) % int(height)) });
-
-            if (j != 0)
-            {
-                last->link(std::move(point));
-                last->nextWP->distanceTotal = last->distanceTotal + last->distanceToNext;
-                last = last->next();
-            }
-            else
-            {
-                root = std::move(point);
-                last = root.get();
-            }
-        }
+        std::unique_ptr<WayPoint> root = WayPoint::makePath(points);
 
         // Entity create and store into the scene's ENTT::entity registry
         entt::entity mob = m_selectedSceneData->createEntity();
@@ -970,11 +954,12 @@ void Editor::generateEntities(size_t numOfEntities)
             LOG_ERROR(Logger::get()) << "Failed to get texture for generated entity!";
             return;
         }
+        assignSpawnIndex(m_selectedSceneData->getRegistry(), mob);
         m_selectedSceneData->getRegistry().emplace<Sprite>(mob, texture.value().get());
         m_selectedSceneData->getRegistry().get<Sprite>(mob).setPosition({ root->coordinate.x, root->coordinate.y });
         m_selectedSceneData->getRegistry().emplace<EntityStatus>(mob);
         m_selectedSceneData->getRegistry().get<EntityStatus>(mob).values["HP"] = 100.f;
-        m_selectedSceneData->getRegistry().get<EntityStatus>(mob).values["Speed"] = 0.5f;
+        m_selectedSceneData->getRegistry().get<EntityStatus>(mob).values["Speed"] = 500.f; // px/s (rule R5)
         m_selectedSceneData->getRegistry().emplace<TeamTag>(mob, Team::ENEMY);
         m_selectedSceneData->getRegistry().emplace<MovementPattern>(mob, std::move(root), true);
         m_selectedSceneData->getRegistry().emplace<UpdateEntityEvent>(mob);

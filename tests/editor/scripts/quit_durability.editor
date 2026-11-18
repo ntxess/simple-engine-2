@@ -1,0 +1,32 @@
+# The design's quit durability test, editor side (M11/M13 integration;
+# editor.script.quit_durability, run 1 of 2): three dirty documents, a scene
+# and two prefabs, quit with Save All on a throttled disk. The quit stays
+# pending until all three Durable saves are renamed into place; the files
+# then hold what each document saves (write-document, compared by
+# run_editor.py after the exit); the shutdown deadline starts after the
+# drain. Runs on a copy of the content (--content-copy).
+open assets/prefabs/enemy.prefab.json
+open assets/prefabs/player.prefab.json
+expect-documents 3
+activate sandbox
+set 5a4db0c5-0000-4000-8000-000000000000 Transform {"pos":{"x":321,"y":234},"rot":0,"scale":{"x":1,"y":1},"teleport_tick":0}
+activate enemy
+set root Collider {"half_extents":{"x":25,"y":25}}
+activate player
+set root Collider {"half_extents":{"x":26,"y":26}}
+wait-frames 1
+activate sandbox
+expect-dirty yes
+activate enemy
+expect-dirty yes
+activate player
+expect-dirty yes
+write-document sandbox expected-sandbox.scene.json
+write-document enemy expected-enemy.prefab.json
+write-document player expected-player.prefab.json
+throttle-disk 400
+quit save
+wait-frames 2
+expect-quit-pending yes
+wait-ms 300
+expect-quit-pending yes

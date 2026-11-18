@@ -1,0 +1,2 @@
+# Golden projections are gzip files; never convert their bytes.
+*.gz binary

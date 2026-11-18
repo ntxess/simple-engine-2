@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <sstream>
@@ -24,6 +25,7 @@
 #include "Systems.hpp"
 #include "interface/IScene.hpp"
 #include "util/Font.hpp"
+#include "util/StressGenerator.hpp"
 #include "util/Logger.hpp"
 #include "util/LogStream.hpp"
 #include "scene/Scenes.hpp"
@@ -118,6 +120,7 @@ private:
 
     std::atomic<bool> m_startButtonEnabled;
     std::atomic<bool> m_forwardFrameEnabled;
+    std::uint64_t m_generateCount;
 
     // Current loaded scene data
     std::unordered_map<std::string, std::unique_ptr<EditorSceneAdapter>> m_editorSceneMap;

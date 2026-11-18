@@ -1,0 +1,544 @@
+{
+  "version": 8,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 31,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "SE_BUILD_PLATFORM": "ON",
+        "SE_SDL_PATCH": "ON"
+      }
+    },
+    {
+      "name": "windows-base",
+      "hidden": true,
+      "inherits": "base",
+      "description": "Run from an MSVC 14.51 (VS 18) environment: scripts\\with-msvc.cmd",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      },
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "cl",
+        "CMAKE_CXX_COMPILER": "cl"
+      }
+    },
+    {
+      "name": "msvc-debug",
+      "inherits": "windows-base",
+      "displayName": "MSVC Debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "msvc-dev",
+      "inherits": "windows-base",
+      "displayName": "MSVC Dev (optimised, asserts on; default for editor work)",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Dev",
+        "SE_TRACY": "ON"
+      }
+    },
+    {
+      "name": "msvc-release",
+      "inherits": "windows-base",
+      "displayName": "MSVC Release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "SE_TRACY": "ON"
+      }
+    },
+    {
+      "name": "msvc-asan",
+      "inherits": "windows-base",
+      "displayName": "MSVC Dev + AddressSanitizer",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Dev",
+        "SE_SANITIZER": "address",
+        "SE_CRASH": "OFF"
+      }
+    },
+    {
+      "name": "msvc-unpatched-dev",
+      "inherits": "windows-base",
+      "displayName": "MSVC Dev without the SDL presentation patch",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Dev",
+        "SE_SDL_PATCH": "OFF",
+        "SE_TRACY": "ON"
+      }
+    },
+    {
+      "name": "clangcl-dev",
+      "inherits": "windows-base",
+      "displayName": "clang-cl Dev (thread-safety analysis as errors)",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Dev",
+        "CMAKE_C_COMPILER": "clang-cl",
+        "CMAKE_CXX_COMPILER": "clang-cl",
+        "SE_THREAD_SAFETY_ERRORS": "ON",
+        "SE_TRACY": "ON"
+      }
+    },
+    {
+      "name": "legacy-msvc-debug",
+      "inherits": "windows-base",
+      "displayName": "Legacy SFML tree, MSVC Debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "SE_BUILD_ENGINE": "OFF",
+        "SE_BUILD_LEGACY": "ON"
+      }
+    },
+    {
+      "name": "legacy-msvc-release",
+      "inherits": "windows-base",
+      "displayName": "Legacy SFML tree, MSVC Release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "SE_BUILD_ENGINE": "OFF",
+        "SE_BUILD_LEGACY": "ON"
+      }
+    },
+    {
+      "name": "deps-smoke",
+      "inherits": "windows-base",
+      "displayName": "Fetch and build every pinned dependency",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Dev",
+        "SE_BUILD_TESTS": "OFF",
+        "SE_DEPS_SMOKE": "ON"
+      }
+    },
+    {
+      "name": "linux-base",
+      "hidden": true,
+      "inherits": "base",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      },
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "clang-20",
+        "CMAKE_CXX_COMPILER": "clang++-20",
+        "SE_CRASH": "OFF",
+        "SE_THREAD_SAFETY_ERRORS": "ON"
+      }
+    },
+    {
+      "name": "linux-clang-debug",
+      "inherits": "linux-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "linux-clang-asan",
+      "inherits": "linux-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Dev",
+        "SE_SANITIZER": "address"
+      }
+    },
+    {
+      "name": "linux-clang-tsan",
+      "inherits": "linux-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Dev",
+        "SE_SANITIZER": "thread"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "msvc-debug",
+      "configurePreset": "msvc-debug"
+    },
+    {
+      "name": "msvc-dev",
+      "configurePreset": "msvc-dev"
+    },
+    {
+      "name": "msvc-release",
+      "configurePreset": "msvc-release"
+    },
+    {
+      "name": "msvc-asan",
+      "configurePreset": "msvc-asan"
+    },
+    {
+      "name": "msvc-unpatched-dev",
+      "configurePreset": "msvc-unpatched-dev"
+    },
+    {
+      "name": "clangcl-dev",
+      "configurePreset": "clangcl-dev"
+    },
+    {
+      "name": "legacy-msvc-debug",
+      "configurePreset": "legacy-msvc-debug"
+    },
+    {
+      "name": "legacy-msvc-release",
+      "configurePreset": "legacy-msvc-release"
+    },
+    {
+      "name": "deps-smoke",
+      "configurePreset": "deps-smoke",
+      "targets": [
+        "se_deps_smoke"
+      ]
+    },
+    {
+      "name": "linux-clang-debug",
+      "configurePreset": "linux-clang-debug"
+    },
+    {
+      "name": "linux-clang-asan",
+      "configurePreset": "linux-clang-asan"
+    },
+    {
+      "name": "linux-clang-tsan",
+      "configurePreset": "linux-clang-tsan"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "test-base",
+      "hidden": true,
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error",
+        "stopOnFailure": false
+      }
+    },
+    {
+      "name": "msvc-debug",
+      "inherits": "test-base",
+      "configurePreset": "msvc-debug",
+      "filter": {
+        "exclude": {
+          "label": "slow|lint|bench|desktop"
+        }
+      }
+    },
+    {
+      "name": "msvc-dev",
+      "inherits": "test-base",
+      "configurePreset": "msvc-dev",
+      "filter": {
+        "exclude": {
+          "label": "bench|desktop"
+        }
+      }
+    },
+    {
+      "name": "msvc-release",
+      "inherits": "test-base",
+      "configurePreset": "msvc-release",
+      "filter": {
+        "exclude": {
+          "label": "lint|desktop"
+        }
+      }
+    },
+    {
+      "name": "msvc-asan",
+      "inherits": "test-base",
+      "configurePreset": "msvc-asan",
+      "filter": {
+        "exclude": {
+          "label": "lint|bench|desktop"
+        }
+      }
+    },
+    {
+      "name": "msvc-unpatched-dev",
+      "inherits": "test-base",
+      "configurePreset": "msvc-unpatched-dev",
+      "filter": {
+        "exclude": {
+          "label": "bench|desktop"
+        }
+      }
+    },
+    {
+      "name": "clangcl-dev",
+      "inherits": "test-base",
+      "configurePreset": "clangcl-dev",
+      "filter": {
+        "exclude": {
+          "label": "bench|desktop"
+        }
+      }
+    },
+    {
+      "name": "legacy-msvc-debug",
+      "inherits": "test-base",
+      "configurePreset": "legacy-msvc-debug",
+      "filter": {
+        "include": {
+          "label": "legacy"
+        },
+        "exclude": {
+          "label": "desktop"
+        }
+      },
+      "execution": {
+        "noTestsAction": "error",
+        "stopOnFailure": false,
+        "jobs": 4
+      }
+    },
+    {
+      "name": "legacy-msvc-release",
+      "inherits": "test-base",
+      "configurePreset": "legacy-msvc-release",
+      "filter": {
+        "include": {
+          "label": "legacy"
+        },
+        "exclude": {
+          "label": "desktop"
+        }
+      },
+      "execution": {
+        "noTestsAction": "error",
+        "stopOnFailure": false,
+        "jobs": 4
+      }
+    },
+    {
+      "name": "linux-clang-debug",
+      "inherits": "test-base",
+      "configurePreset": "linux-clang-debug",
+      "filter": {
+        "exclude": {
+          "label": "slow|lint|desktop|gpu|bench"
+        }
+      }
+    },
+    {
+      "name": "linux-clang-asan",
+      "inherits": "test-base",
+      "configurePreset": "linux-clang-asan",
+      "filter": {
+        "exclude": {
+          "label": "lint|desktop|gpu|bench"
+        }
+      }
+    },
+    {
+      "name": "linux-clang-tsan",
+      "inherits": "test-base",
+      "configurePreset": "linux-clang-tsan",
+      "filter": {
+        "exclude": {
+          "label": "lint|desktop|gpu|bench"
+        }
+      }
+    }
+  ],
+  "workflowPresets": [
+    {
+      "name": "msvc-dev",
+      "steps": [
+        {
+          "type": "configure",
+          "name": "msvc-dev"
+        },
+        {
+          "type": "build",
+          "name": "msvc-dev"
+        },
+        {
+          "type": "test",
+          "name": "msvc-dev"
+        }
+      ]
+    },
+    {
+      "name": "msvc-debug",
+      "steps": [
+        {
+          "type": "configure",
+          "name": "msvc-debug"
+        },
+        {
+          "type": "build",
+          "name": "msvc-debug"
+        },
+        {
+          "type": "test",
+          "name": "msvc-debug"
+        }
+      ]
+    },
+    {
+      "name": "msvc-release",
+      "steps": [
+        {
+          "type": "configure",
+          "name": "msvc-release"
+        },
+        {
+          "type": "build",
+          "name": "msvc-release"
+        },
+        {
+          "type": "test",
+          "name": "msvc-release"
+        }
+      ]
+    },
+    {
+      "name": "msvc-asan",
+      "steps": [
+        {
+          "type": "configure",
+          "name": "msvc-asan"
+        },
+        {
+          "type": "build",
+          "name": "msvc-asan"
+        },
+        {
+          "type": "test",
+          "name": "msvc-asan"
+        }
+      ]
+    },
+    {
+      "name": "msvc-unpatched-dev",
+      "steps": [
+        {
+          "type": "configure",
+          "name": "msvc-unpatched-dev"
+        },
+        {
+          "type": "build",
+          "name": "msvc-unpatched-dev"
+        },
+        {
+          "type": "test",
+          "name": "msvc-unpatched-dev"
+        }
+      ]
+    },
+    {
+      "name": "clangcl-dev",
+      "steps": [
+        {
+          "type": "configure",
+          "name": "clangcl-dev"
+        },
+        {
+          "type": "build",
+          "name": "clangcl-dev"
+        },
+        {
+          "type": "test",
+          "name": "clangcl-dev"
+        }
+      ]
+    },
+    {
+      "name": "legacy-msvc-debug",
+      "steps": [
+        {
+          "type": "configure",
+          "name": "legacy-msvc-debug"
+        },
+        {
+          "type": "build",
+          "name": "legacy-msvc-debug"
+        },
+        {
+          "type": "test",
+          "name": "legacy-msvc-debug"
+        }
+      ]
+    },
+    {
+      "name": "legacy-msvc-release",
+      "steps": [
+        {
+          "type": "configure",
+          "name": "legacy-msvc-release"
+        },
+        {
+          "type": "build",
+          "name": "legacy-msvc-release"
+        },
+        {
+          "type": "test",
+          "name": "legacy-msvc-release"
+        }
+      ]
+    },
+    {
+      "name": "linux-clang-tsan",
+      "steps": [
+        {
+          "type": "configure",
+          "name": "linux-clang-tsan"
+        },
+        {
+          "type": "build",
+          "name": "linux-clang-tsan"
+        },
+        {
+          "type": "test",
+          "name": "linux-clang-tsan"
+        }
+      ]
+    },
+    {
+      "name": "linux-clang-asan",
+      "steps": [
+        {
+          "type": "configure",
+          "name": "linux-clang-asan"
+        },
+        {
+          "type": "build",
+          "name": "linux-clang-asan"
+        },
+        {
+          "type": "test",
+          "name": "linux-clang-asan"
+        }
+      ]
+    },
+    {
+      "name": "linux-clang-debug",
+      "steps": [
+        {
+          "type": "configure",
+          "name": "linux-clang-debug"
+        },
+        {
+          "type": "build",
+          "name": "linux-clang-debug"
+        },
+        {
+          "type": "test",
+          "name": "linux-clang-debug"
+        }
+      ]
+    }
+  ]
+}

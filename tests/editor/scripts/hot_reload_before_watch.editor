@@ -1,0 +1,15 @@
+# Hot reload of a file written after the editor read it but before the
+# lane added its watch (M11b): the scan's baseline would already be the new
+# file, so the editor reads each file once more when it starts watching it.
+# A throttled save keeps the lane busy while the title scene is opened and
+# rewritten. Runs on a copy of the content (--content-copy).
+throttle-disk 3000
+set 5a4db0c5-0000-4000-8000-000000000000 Transform {"pos":{"x":321,"y":250},"rot":0,"scale":{"x":1,"y":1},"teleport_tick":0}
+save
+open assets/scenes/title.scene.json
+expect-entities document 1
+throttle-disk 0
+write-file assets/scenes/title.scene.json {"format":"se-scene-v1","name":"title","settings":{"bounds":{"w":1920,"h":1080},"seed":1},"entities":[{"guid":"7171e000-0000-4000-8000-000000000000","name":"wallpaper","components":{"Transform":{"pos":{"x":0,"y":0}}}},{"guid":"7171e000-0000-4000-8000-000000000001","name":"second","components":{"Transform":{"pos":{"x":10,"y":0}}}}]}
+wait-reload
+expect-entities document 2
+quit discard

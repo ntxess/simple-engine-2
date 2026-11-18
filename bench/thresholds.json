@@ -1,0 +1,243 @@
+{
+  "format": "se-bench-thresholds-v1",
+  "machine": "AMD Ryzen 7 7700X (8 cores, 16 threads), Windows 11, preset msvc-release",
+  "notes": "Gates for CTest bench.<suite> (bench/se_bench/CMakeLists.txt reads n, iterations, warmup and p95_ms). Thresholds hold for Release builds on this machine; other machines are pending gates (docs/gates.md).",
+  "suites": {
+    "renderlist_10k": {
+      "n": 10000,
+      "iterations": 1000,
+      "warmup": 50,
+      "p95_ms": 1.0,
+      "source": "M3 exit gate: RenderList of 10k sprites, p95 <= 1 ms in Release (docs/milestone-specs.md M3c)",
+      "measured": {
+        "date": "2026-11-08",
+        "build": "msvc-release, MSVC 19.51",
+        "runs": 5,
+        "median_ms": [0.387, 0.418],
+        "p95_ms": [0.448, 0.590],
+        "p99_ms": [0.509, 1.019],
+        "max_ms": [0.602, 15.231],
+        "note": "Ranges over 5 runs of 1000 warm iterations (7556 of 10000 sprites visible, 32 batches) while other builds shared the machine; the p99 and max outliers are that load."
+      }
+    },
+    "render_frame_10k": {
+      "n": 10000,
+      "iterations": 1000,
+      "warmup": 50,
+      "p95_ms": 1.0,
+      "source": "M7 exit gate: RenderList plus sprite vertices of 10k visible sprites, CPU side, p95 <= 1 ms in Release (docs/milestone-specs.md M7, Bench)",
+      "measured": {
+        "date": "2026-11-09",
+        "build": "msvc-release, MSVC 19.51",
+        "runs": 6,
+        "median_ms": [0.445, 0.452],
+        "p95_ms": [0.477, 0.513],
+        "p99_ms": [0.580, 0.639],
+        "max_ms": [0.647, 0.761],
+        "note": "Idle machine (CPU load 5% before and after): the ctest run of bench.render_frame_10k in scripts/ci.ps1 -Presets msvc-release plus 5 runs of se_bench --suite render_frame_10k; renderlist_10k in the same minutes: median 0.375-0.402 ms, p95 0.418-0.453 ms. 10000 of 10000 sprites visible, 0 culled. Earlier the same day under other agents' parallel builds (CPU at 100%): median 0.699-0.777 ms, p95 0.868-2.054 ms."
+      }
+    },
+    "lane_steps": {
+      "iterations": 1000,
+      "warmup": 50,
+      "p99_ms": 2.0,
+      "source": "M9 exit gate: the background lane's steps, a 1 MB read, a 256 KB LZ4 block decode and a 256-entity scene chunk parse, each p99 <= 2 ms in Release (docs/milestone-specs.md M9, Bench); bench/lane_steps",
+      "measured": {
+        "date": "2026-11-09",
+        "build": "msvc-release, MSVC 19.51",
+        "runs": 1,
+        "median_ms": {"read_1mb": 0.097, "lz4_block": 0.219, "scene_chunk": 0.121},
+        "p99_ms": {"read_1mb": 0.153, "lz4_block": 0.347, "scene_chunk": 0.197},
+        "max_ms": {"read_1mb": 0.606, "lz4_block": 0.675, "scene_chunk": 0.230},
+        "note": "se_lane_bench --iterations 1000 --warmup 50 with other agents' builds on the machine (CPU load 13%); the read is of a cached 64 MB file, the block of a 64-block page with its hash, the chunk validated by glaze and read by reflection (ADR-082). A chunk parsed into glaze's generic value measured median 1.16 ms, p99 1.81 ms (CPU load 32%). Rerun idle (docs/gates.md)."
+      }
+    },
+    "snapshot_publish_10k": {
+      "n": 10000,
+      "iterations": 1000,
+      "warmup": 50,
+      "p95_ms": 0.28,
+      "source": "M17a bench: one snapshot slot of 10k sprites filled and published, its p95 recorded as a threshold (docs/milestone-specs.md M17a, Bench): 2 x 0.140 ms, the median of five runs' p95, as for rampage_tick_5k",
+      "measured": {
+        "date": "2026-11-09",
+        "build": "msvc-release, MSVC 19.51",
+        "runs": 5,
+        "median_ms": [0.093, 0.094],
+        "p95_ms": [0.105, 0.141],
+        "p99_ms": [0.110, 0.161],
+        "max_ms": [0.149, 0.355],
+        "note": "se_bench --suite snapshot_publish_10k --iterations 1000 --warmup 50, CPU load 8-10% before and after: AppendRenderView of 10000 sprites (680000 bytes of RenderItems plus the sparse index) into one warm slot, its publish and its return. renderlist_10k in the same minutes (after its build moved to src/quad_builder.h, ADR-086): median 0.372-0.386 ms, p95 0.409-0.445 ms, as before."
+      }
+    },
+    "rampage_tick_5k": {
+      "n": 5000,
+      "iterations": 1000,
+      "warmup": 50,
+      "p95_ms": 6.22,
+      "source": "The measured p95 with 2x headroom (docs/milestone-specs.md M3c): 2 x 3.109 ms, the median of five runs' p95; the design's tick budget is 1/160 s = 6.25 ms",
+      "measured": {
+        "date": "2026-11-08",
+        "build": "msvc-release, MSVC 19.51",
+        "runs": 5,
+        "median_ms": [2.697, 2.727],
+        "p95_ms": [3.021, 3.240],
+        "p99_ms": [3.232, 3.647],
+        "max_ms": [3.716, 4.507],
+        "note": "Ranges over 5 runs of 1000 ticks after 50 untimed ones (5000 movers and the player; deterministic: 4995 entities alive at the end, 18 contacts in the last tick). Per-system medians of one run: Cleanup (drain, FinalizeSpawns, world hash) 1.27 ms, Collision 0.91 ms, Path 0.33 ms, Boundary and PrevTransformCopy 0.03 ms each."
+      }
+    },
+    "fork_empty_w1": {
+      "n": 8,
+      "iterations": 5000,
+      "warmup": 200,
+      "p95_ms": 0.003,
+      "source": "M14 bench: one threaded fork of 8 empty chunks back to back (the workers spinning between forks) at W = 1; the limit is about four times the largest measured p95 (0.0006 ms)",
+      "measured": {
+        "date": "2026-11-16",
+        "build": "msvc-release, MSVC 19.51",
+        "runs": 9,
+        "median_ms": [0.0002, 0.0003],
+        "p95_ms": [0.0005, 0.0006],
+        "p99_ms": [0.0043, 0.0073],
+        "max_ms": [0.0094, 0.0178],
+        "note": "9 runs of se_bench --suite fork_empty_w1 --n 8 --iterations 5000 --warmup 200 while other processes took 5-28% of the CPU (quiet, not idle; an idle rerun is a gate in docs/gates.md): participants 2, the site's join p99.9 1.4-1.6 us and max 3.6-12.2 us, the largest wake latency 252-302 us."
+      }
+    },
+    "fork_parked_w1": {
+      "n": 8,
+      "iterations": 1000,
+      "warmup": 50,
+      "p95_ms": 0.03,
+      "source": "M14 bench: one threaded fork of 8 empty chunks, 2 ms between forks (each fork wakes parked workers) at W = 1; the limit is about four times the largest measured p95 (0.0073 ms)",
+      "measured": {
+        "date": "2026-11-16",
+        "build": "msvc-release, MSVC 19.51",
+        "runs": 9,
+        "median_ms": [0.0039, 0.0044],
+        "p95_ms": [0.0064, 0.0073],
+        "p99_ms": [0.0145, 0.0206],
+        "max_ms": [0.0273, 0.0585],
+        "note": "9 runs of se_bench --suite fork_parked_w1 --n 8 --iterations 1000 --warmup 50 while other processes took 5-28% of the CPU (quiet, not idle; an idle rerun is a gate in docs/gates.md): participants 2, the site's join p99.9 8.3-33.3 us and max 13.6-57.9 us, the largest wake latency 246-720 us."
+      }
+    },
+    "fork_50us_w1": {
+      "n": 8,
+      "iterations": 1000,
+      "warmup": 50,
+      "p95_ms": 0.35,
+      "source": "M14 bench: one threaded fork of 8 chunks of 50 us of busy work, 2 ms between forks (parked workers) at W = 1; the limit is about 1.5 times the largest measured p95 (0.2427 ms)",
+      "measured": {
+        "date": "2026-11-16",
+        "build": "msvc-release, MSVC 19.51",
+        "runs": 9,
+        "median_ms": [0.2173, 0.2185],
+        "p95_ms": [0.2268, 0.2427],
+        "p99_ms": [0.2454, 0.3544],
+        "max_ms": [0.2683, 1.2370],
+        "note": "9 runs of se_bench --suite fork_50us_w1 --n 8 --iterations 1000 --warmup 50 while other processes took 5-28% of the CPU (quiet, not idle; an idle rerun is a gate in docs/gates.md): participants 2, the site's join p99.9 256.0-403.3 us and max 272.0-1236.4 us, the median over the ideal 200 us by 17.3-18.5 us, the same fork inline 400 us."
+      }
+    },
+    "fork_empty_w3": {
+      "n": 16,
+      "iterations": 5000,
+      "warmup": 200,
+      "p95_ms": 0.005,
+      "source": "M14 bench: one threaded fork of 16 empty chunks back to back (the workers spinning between forks) at W = 3; the limit is about four times the largest measured p95 (0.0011 ms)",
+      "measured": {
+        "date": "2026-11-16",
+        "build": "msvc-release, MSVC 19.51",
+        "runs": 9,
+        "median_ms": [0.0005, 0.0006],
+        "p95_ms": [0.0009, 0.0011],
+        "p99_ms": [0.0105, 0.0119],
+        "max_ms": [0.0169, 0.2302],
+        "note": "9 runs of se_bench --suite fork_empty_w3 --n 16 --iterations 5000 --warmup 200 while other processes took 5-28% of the CPU (quiet, not idle; an idle rerun is a gate in docs/gates.md): participants 4, the site's join p99.9 3.9-5.5 us and max 6.2-230.0 us, the largest wake latency 360-636 us."
+      }
+    },
+    "fork_parked_w3": {
+      "n": 16,
+      "iterations": 1000,
+      "warmup": 50,
+      "p95_ms": 0.05,
+      "source": "M14 bench: one threaded fork of 16 empty chunks, 2 ms between forks (each fork wakes parked workers) at W = 3; the limit is about four times the largest measured p95 (0.0123 ms)",
+      "measured": {
+        "date": "2026-11-16",
+        "build": "msvc-release, MSVC 19.51",
+        "runs": 9,
+        "median_ms": [0.0069, 0.0079],
+        "p95_ms": [0.0109, 0.0123],
+        "p99_ms": [0.0225, 0.0308],
+        "max_ms": [0.0361, 0.0907],
+        "note": "9 runs of se_bench --suite fork_parked_w3 --n 16 --iterations 1000 --warmup 50 while other processes took 5-28% of the CPU (quiet, not idle; an idle rerun is a gate in docs/gates.md): participants 4, the site's join p99.9 18.4-36.2 us and max 25.9-95.5 us, the largest wake latency 372-1266 us."
+      }
+    },
+    "fork_50us_w3": {
+      "n": 16,
+      "iterations": 1000,
+      "warmup": 50,
+      "p95_ms": 0.4,
+      "source": "M14 bench: one threaded fork of 16 chunks of 50 us of busy work, 2 ms between forks (parked workers) at W = 3; the limit is about 1.5 times the largest measured p95 (0.2670 ms)",
+      "measured": {
+        "date": "2026-11-16",
+        "build": "msvc-release, MSVC 19.51",
+        "runs": 9,
+        "median_ms": [0.2216, 0.2237],
+        "p95_ms": [0.2451, 0.2670],
+        "p99_ms": [0.2688, 0.4555],
+        "max_ms": [0.2954, 2.3432],
+        "note": "9 runs of se_bench --suite fork_50us_w3 --n 16 --iterations 1000 --warmup 50 while other processes took 5-28% of the CPU (quiet, not idle; an idle rerun is a gate in docs/gates.md): participants 4, the site's join p99.9 283.7-1131.2 us and max 305.5-1688.6 us, the median over the ideal 200 us by 21.6-23.7 us, the same fork inline 800 us."
+      }
+    },
+    "fork_empty_w7": {
+      "n": 32,
+      "iterations": 5000,
+      "warmup": 200,
+      "p95_ms": 0.008,
+      "source": "M14 bench: one threaded fork of 32 empty chunks back to back (the workers spinning between forks) at W = 7; the limit is about four times the largest measured p95 (0.0017 ms)",
+      "measured": {
+        "date": "2026-11-16",
+        "build": "msvc-release, MSVC 19.51",
+        "runs": 9,
+        "median_ms": [0.0013, 0.0013],
+        "p95_ms": [0.0016, 0.0017],
+        "p99_ms": [0.0108, 0.0129],
+        "max_ms": [0.0175, 0.1851],
+        "note": "9 runs of se_bench --suite fork_empty_w7 --n 32 --iterations 5000 --warmup 200 while other processes took 5-28% of the CPU (quiet, not idle; an idle rerun is a gate in docs/gates.md): participants 8, the site's join p99.9 2.1-19.0 us and max 17.4-184.8 us, the largest wake latency 593-2043 us."
+      }
+    },
+    "fork_parked_w7": {
+      "n": 32,
+      "iterations": 1000,
+      "warmup": 50,
+      "p95_ms": 0.08,
+      "source": "M14 bench: one threaded fork of 32 empty chunks, 2 ms between forks (each fork wakes parked workers) at W = 7; the limit is about four times the largest measured p95 (0.0232 ms)",
+      "measured": {
+        "date": "2026-11-16",
+        "build": "msvc-release, MSVC 19.51",
+        "runs": 9,
+        "median_ms": [0.0117, 0.0131],
+        "p95_ms": [0.0180, 0.0232],
+        "p99_ms": [0.0312, 0.0418],
+        "max_ms": [0.0484, 0.1012],
+        "note": "9 runs of se_bench --suite fork_parked_w7 --n 32 --iterations 1000 --warmup 50 while other processes took 5-28% of the CPU (quiet, not idle; an idle rerun is a gate in docs/gates.md): participants 8, the site's join p99.9 33.5-67.6 us and max 43.3-142.6 us, the largest wake latency 622-965 us."
+      }
+    },
+    "fork_50us_w7": {
+      "n": 32,
+      "iterations": 1000,
+      "warmup": 50,
+      "p95_ms": 0.55,
+      "source": "M14 bench: one threaded fork of 32 chunks of 50 us of busy work, 2 ms between forks (parked workers) at W = 7; the limit is about 1.5 times the largest measured p95 (0.3653 ms)",
+      "measured": {
+        "date": "2026-11-16",
+        "build": "msvc-release, MSVC 19.51",
+        "runs": 9,
+        "median_ms": [0.2637, 0.2712],
+        "p95_ms": [0.3189, 0.3653],
+        "p99_ms": [0.3620, 0.5280],
+        "max_ms": [0.4296, 2.4758],
+        "note": "9 runs of se_bench --suite fork_50us_w7 --n 32 --iterations 1000 --warmup 50 while other processes took 5-28% of the CPU (quiet, not idle; an idle rerun is a gate in docs/gates.md): participants 8, the site's join p99.9 384.9-1299.3 us and max 429.1-2472.3 us, the median over the ideal 200 us by 63.7-71.2 us, the same fork inline 1600 us."
+      }
+    }
+  }
+}

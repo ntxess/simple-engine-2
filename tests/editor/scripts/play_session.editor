@@ -1,0 +1,24 @@
+# Play 300 ticks, edit the play World, pause, step, resume, stop: the
+# document's hash is unchanged (M10a; headless, desktop and the replay).
+expect-state edit
+play
+wait-ticks 300
+expect-state playing
+set 5a4db0c5-0000-4000-8000-000000000001 Transform {"pos":{"x":100,"y":100},"rot":0,"scale":{"x":1,"y":1},"teleport_tick":0}
+wait-ticks 20
+pause
+expect-state paused
+destroy 5a4db0c5-0000-4000-8000-000000000002
+wait-frames 2
+expect-entities play 16
+step 5
+expect-state paused
+resume
+wait-ticks 30
+stop
+wait-frames 2
+expect-state edit
+expect-hash document initial
+expect-entities document 17
+expect-dirty no
+quit discard

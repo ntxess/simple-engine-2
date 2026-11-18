@@ -1,0 +1,88 @@
+# clang-tidy configuration for new code (docs/style.md). Every enabled check is
+# an error. Naming follows the Google C++ Style Guide.
+Checks: >
+  -*,
+  bugprone-*,
+  -bugprone-easily-swappable-parameters,
+  google-*,
+  performance-*,
+  -performance-enum-size,
+  readability-identifier-naming,
+  readability-avoid-const-params-in-decls,
+  readability-container-size-empty,
+  readability-delete-null-pointer,
+  readability-duplicate-include,
+  readability-else-after-return,
+  readability-inconsistent-declaration-parameter-name,
+  readability-make-member-function-const,
+  readability-misleading-indentation,
+  readability-redundant-control-flow,
+  readability-redundant-declaration,
+  readability-redundant-smartptr-get,
+  readability-redundant-string-cstr,
+  readability-simplify-boolean-expr,
+  readability-static-definition-in-anonymous-namespace,
+  readability-string-compare,
+  readability-uniqueptr-delete-release,
+  modernize-avoid-bind,
+  modernize-deprecated-headers,
+  modernize-loop-convert,
+  modernize-make-shared,
+  modernize-make-unique,
+  modernize-redundant-void-arg,
+  modernize-use-bool-literals,
+  modernize-use-emplace,
+  modernize-use-equals-default,
+  modernize-use-equals-delete,
+  modernize-use-nullptr,
+  modernize-use-override,
+  modernize-use-using,
+  cppcoreguidelines-missing-std-forward,
+  cppcoreguidelines-prefer-member-initializer,
+  cppcoreguidelines-rvalue-reference-param-not-moved,
+  cppcoreguidelines-slicing,
+  cppcoreguidelines-virtual-class-destructor,
+  misc-definitions-in-headers,
+  misc-redundant-expression,
+  misc-unused-alias-decls,
+  misc-unused-parameters,
+  misc-unused-using-decls
+WarningsAsErrors: '*'
+HeaderFilterRegex: '.*[/\\](engine|games|apps|tests|bench|tools)[/\\].*'
+ExcludeHeaderFilterRegex: '.*[/\\](_deps|dep|out|build)[/\\].*'
+FormatStyle: file
+CheckOptions:
+  - { key: readability-identifier-naming.NamespaceCase,            value: lower_case }
+  - { key: readability-identifier-naming.ClassCase,                value: CamelCase }
+  - { key: readability-identifier-naming.StructCase,               value: CamelCase }
+  - { key: readability-identifier-naming.UnionCase,                value: CamelCase }
+  - { key: readability-identifier-naming.EnumCase,                 value: CamelCase }
+  - { key: readability-identifier-naming.TypeAliasCase,            value: CamelCase }
+  - { key: readability-identifier-naming.TypedefCase,              value: CamelCase }
+  - { key: readability-identifier-naming.TemplateParameterCase,    value: CamelCase }
+  - { key: readability-identifier-naming.ConceptCase,              value: CamelCase }
+  - { key: readability-identifier-naming.FunctionCase,             value: CamelCase }
+  - { key: readability-identifier-naming.FunctionIgnoredRegexp,    value: '^(main|SDL_App[A-Za-z]+)$' }
+  - { key: readability-identifier-naming.MethodCase,               value: CamelCase }
+  - { key: readability-identifier-naming.MethodIgnoredRegexp,      value: '^(begin|end|cbegin|cend|rbegin|rend|size|empty|data|swap)$' }
+  - { key: readability-identifier-naming.VariableCase,             value: lower_case }
+  - { key: readability-identifier-naming.ParameterCase,            value: lower_case }
+  - { key: readability-identifier-naming.LocalVariableCase,        value: lower_case }
+  - { key: readability-identifier-naming.LocalConstantCase,        value: lower_case }
+  - { key: readability-identifier-naming.ConstantParameterCase,    value: lower_case }
+  - { key: readability-identifier-naming.MemberCase,               value: lower_case }
+  - { key: readability-identifier-naming.PrivateMemberSuffix,      value: _ }
+  - { key: readability-identifier-naming.ProtectedMemberSuffix,    value: _ }
+  - { key: readability-identifier-naming.ConstexprVariableCase,    value: CamelCase }
+  - { key: readability-identifier-naming.ConstexprVariablePrefix,  value: k }
+  - { key: readability-identifier-naming.GlobalConstantCase,       value: CamelCase }
+  - { key: readability-identifier-naming.GlobalConstantPrefix,     value: k }
+  - { key: readability-identifier-naming.StaticConstantCase,       value: CamelCase }
+  - { key: readability-identifier-naming.StaticConstantPrefix,     value: k }
+  - { key: readability-identifier-naming.ClassConstantCase,        value: CamelCase }
+  - { key: readability-identifier-naming.ClassConstantPrefix,      value: k }
+  - { key: readability-identifier-naming.EnumConstantCase,         value: CamelCase }
+  - { key: readability-identifier-naming.EnumConstantPrefix,       value: k }
+  - { key: readability-identifier-naming.MacroDefinitionCase,      value: UPPER_CASE }
+  - { key: readability-identifier-naming.MacroDefinitionIgnoredRegexp, value: '^[A-Z][A-Z0-9_]*_H_$' }
+  - { key: misc-unused-parameters.StrictMode,                      value: false }

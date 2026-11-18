@@ -1,0 +1,17 @@
+{
+  "format": "se-scene-v1",
+  "name": "added_component",
+  "settings": {"bounds": {"w": 1920, "h": 1080}, "seed": 3, "event_watchdog_ms": 20000},
+  "entities": [
+    {"guid": "11a00000-0000-4000-8000-000000000101", "name": "drifting enemy",
+     "prefab": "prefabs/enemy.prefab.json",
+     "overrides": {"KinematicBody": {"velocity": {"x": 30, "y": -5}},
+                   "Path": {"points": [{"x": 100, "y": 100}, {"x": 300, "y": 120}]}}},
+    {"guid": "11a00000-0000-4000-8000-000000000102", "name": "burning enemy",
+     "prefab": "prefabs/enemy.prefab.json",
+     "overrides": {"EffectSource": {"effects": [{"kind": "over_time", "stat": "HP", "value": -2,
+                                                 "duration_ms": 2000, "interval_ms": 500}],
+                                    "polled": true, "cooldown_ms": 750},
+                   "Path": {"points": [{"x": 700, "y": 640}]}}}
+  ]
+}

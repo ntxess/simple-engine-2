@@ -1,0 +1,38 @@
+# Every command kind through the editor's command path, with undo and redo
+# (M10a, headless).
+expect-state edit
+set 5a4db0c5-0000-4000-8000-000000000000 Transform {"pos":{"x":300,"y":250},"rot":0,"scale":{"x":1,"y":1},"teleport_tick":0}
+expect-dirty yes
+undo
+expect-hash document initial
+redo
+undo
+expect-hash document initial
+path-insert 5a4db0c5-0000-4000-8000-000000000001 0 10 20
+path-move 5a4db0c5-0000-4000-8000-000000000001 0 30 40
+path-delete 5a4db0c5-0000-4000-8000-000000000001 0
+undo
+undo
+undo
+expect-hash document initial
+destroy 5a4db0c5-0000-4000-8000-000000000002
+expect-entities document 16
+undo
+expect-entities document 17
+expect-hash document initial
+create-copy 00000000-0000-0000-0000-0000000000aa 5a4db0c5-0000-4000-8000-000000000003
+expect-entities document 18
+undo
+remove 5a4db0c5-0000-4000-8000-000000000000 Collider
+undo
+add 5a4db0c5-0000-4000-8000-000000000000 Moved {}
+undo
+expect-hash document initial
+coalesce-begin Drag
+path-move 5a4db0c5-0000-4000-8000-000000000001 1 1 1
+path-move 5a4db0c5-0000-4000-8000-000000000001 1 2 2
+path-move 5a4db0c5-0000-4000-8000-000000000001 1 3 3
+coalesce-end
+undo
+expect-hash document initial
+quit discard

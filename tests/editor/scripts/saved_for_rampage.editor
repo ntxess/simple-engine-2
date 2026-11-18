@@ -1,0 +1,20 @@
+# The reverse direction of "the editor and the runtime load identical
+# Worlds" (M11/M13 integration; rampage.plays_an_editor_saved_scene): a
+# Stress generator press of enemy-prefab instances, the scene saved with
+# prefab references (kPrefabs), then a short Play, whose replay
+# (<pref>/sessions/last-play.sereplay) holds the Play-start bytes the test
+# replays with se_replay. Runs on a copy of the content.
+expect-entities document 17
+stress-press 20
+wait-frames 1
+expect-entities document 37
+save
+wait-saves
+expect-dirty no
+play
+wait-ticks 5
+stop
+wait-frames 2
+expect-state edit
+wait-saves
+quit discard

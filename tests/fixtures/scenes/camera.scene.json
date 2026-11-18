@@ -1,0 +1,14 @@
+{
+  "format": "se-scene-v1",
+  "name": "camera",
+  "settings": {"bounds": {"w": 1920, "h": 1080}, "seed": 1, "event_watchdog_ms": 36000},
+  "entities": [
+    {"guid": "11a00000-0000-4000-8000-000000000501", "name": "camera",
+     "components": {"Transform": {},
+                    "Camera2D": {"center": {"x": 960, "y": 540}, "zoom": 2,
+                                 "virtual_size": {"x": 640, "y": 360},
+                                 "integer_scale": true, "primary": true}}},
+    {"guid": "11a00000-0000-4000-8000-000000000502", "name": "player",
+     "prefab": "prefabs/player.prefab.json"}
+  ]
+}

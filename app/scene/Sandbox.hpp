@@ -36,13 +36,12 @@ public:
     entt::registry& getRegistry() override final;
 
     SystemManager* getSystemManager();
-
-private:
-    void checkBoundary(const sf::Vector2u& boundary, sf::Sprite& obj);
+    entt::entity getPlayer() const;
 
 private:
     ApplicationContext* m_appContext;
     entt::entity m_player;
+    sf::Vector2u m_bounds;
     SystemManager m_system;
     entt::registry m_reg;
     entt::registry m_collisionEventReg;

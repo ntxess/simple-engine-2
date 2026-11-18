@@ -1,0 +1,72 @@
+{
+  "format": "se-legacy-scenario-v1",
+  "name": "effects",
+  "description": "A row of test entities at y = 540 that the player walks along and back one lane lower. Covers: an OVERTIME interval that does not divide its duration, a TEMPTIMED longer than the event watchdog, a polled enemy turret that is not ready on start (its 5.5 s cooldown runs from its creation, so the player, which overlaps it from tick 613, is first hit at tick 661 and not on contact), a stationary receiver without a dirty flag, a friendly source (same-team skip), deaths, a rotated collider, a zero-length path segment, a path along the arena edge, and two sources of different kinds (an escort moving with the player and a stationary charger) adding to the player's Charge stat in the same ticks; Charge starts at 1e7, where a float's spacing is 1, so adding 1.5 and 0.75 rounds differently in the two orders and the order of application shows in the result. Below the player's lanes, out of every source's reach, three path cases: a path that pushes its sprite diagonally into the bottom-left corner and ends beyond it, a repeating path with segments shorter than one tick's step (several waypoints in one tick) whose last point is its first, and a repeating path whose points all coincide.",
+  "eventWatchdogMs": 2000,
+  "player": {
+    "position": [300, 540],
+    "stats": {"Charge": 10000000},
+    "polling": {"cooldownMs": 500, "readyOnStart": true},
+    "effects": [
+      {"type": "INSTANT", "stat": "HP", "value": -10, "durationMs": 0, "intervalMs": 0},
+      {"type": "OVERTIME", "stat": "HP", "value": -2, "durationMs": 1100, "intervalMs": 250},
+      {"type": "TEMPTIMED", "stat": "HP", "value": -5, "durationMs": 40000, "intervalMs": 0}
+    ]
+  },
+  "entities": [
+    {"team": "ENEMY", "texture": "player", "position": [500, 540],
+     "stats": {"HP": 100}, "moving": false},
+    {"team": "ENEMY", "texture": "player",
+     "stats": {"HP": 100, "Speed": 250},
+     "path": [[700, 300], [700, 800]], "repeat": true, "moving": true},
+    {"team": "ENEMY", "texture": "player", "position": [900, 540],
+     "stats": {"HP": 100}, "moving": false,
+     "polling": {"cooldownMs": 5500, "readyOnStart": false},
+     "effects": [
+      {"type": "INSTANT", "stat": "HP", "value": -1, "durationMs": 0, "intervalMs": 0}
+     ]},
+    {"team": "FRIENDLY", "texture": "player", "position": [1100, 540],
+     "stats": {"HP": 100}, "moving": false,
+     "polling": {"cooldownMs": 250, "readyOnStart": true},
+     "effects": [
+      {"type": "INSTANT", "stat": "HP", "value": -30, "durationMs": 0, "intervalMs": 0}
+     ]},
+    {"team": "ENEMY", "texture": "player",
+     "stats": {"HP": 100, "Speed": 300},
+     "path": [[1100, 200], [1100, 900]], "repeat": true, "moving": true},
+    {"team": "ENEMY", "texture": "player",
+     "stats": {"HP": 100, "Speed": 500},
+     "path": [[1300, 600], [1300, 600], [1500, 600]], "repeat": true, "moving": true},
+    {"team": "ENEMY", "texture": "player", "position": [1600, 560], "rotation": 45,
+     "stats": {"HP": 100}, "moving": true},
+    {"team": "ENEMY", "texture": "player", "position": [1750, 540],
+     "stats": {"HP": 15}, "moving": true},
+    {"team": "ENEMY", "texture": "player",
+     "stats": {"HP": 100, "Speed": 200},
+     "path": [[1890, 100], [1890, 1000]], "repeat": true, "moving": true},
+    {"team": "ENEMY", "texture": "player",
+     "stats": {"HP": 60, "Speed": 100},
+     "path": [[1500, 760], [400, 760], [400, 700]], "repeat": false, "moving": true},
+    {"team": "ENEMY", "texture": "player",
+     "stats": {"HP": 10000, "Speed": 120},
+     "path": [[240, 540], [1840, 540]], "repeat": false, "moving": true,
+     "effects": [
+      {"type": "INSTANT", "stat": "Charge", "value": 1.5, "durationMs": 0, "intervalMs": 0}
+     ]},
+    {"team": "ENEMY", "texture": "player", "position": [420, 540],
+     "stats": {"HP": 10000}, "moving": false,
+     "polling": {"cooldownMs": 0, "readyOnStart": true},
+     "effects": [
+      {"type": "INSTANT", "stat": "Charge", "value": 0.75, "durationMs": 0, "intervalMs": 0}
+     ]},
+    {"team": "ENEMY", "texture": "player",
+     "stats": {"HP": 100, "Speed": 500},
+     "path": [[150, 930], [-50, 1130]], "repeat": false, "moving": true},
+    {"team": "ENEMY", "texture": "player",
+     "stats": {"HP": 100, "Speed": 500},
+     "path": [[1400, 950], [1401, 950], [1402, 951], [1403, 951], [1500, 1000], [1400, 950]], "repeat": true, "moving": true},
+    {"team": "ENEMY", "texture": "player",
+     "stats": {"HP": 100, "Speed": 500},
+     "path": [[1700, 980], [1700, 980], [1700, 980]], "repeat": true, "moving": true}
+  ]
+}

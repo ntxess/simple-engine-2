@@ -1,0 +1,32 @@
+# 'Play game' in the view (R3 of the M10-M14 review; ADR-113): the Viewport
+# panel takes the focus when Play game starts, and while it has it the
+# game's InputService gets the keys (SDL events the script pushes, never OS
+# input). The session's replay records their four edges (run_editor.py
+# --expect-edges 4). With the focus on another panel the game gets no key
+# down; the release still reaches it and changes nothing.
+wait-frames 30
+expect-viewport yes
+play-game
+wait-frames 10
+expect-state playing
+expect-game-keyboard yes
+push-key d
+wait-ticks 30
+push-key space
+wait-frames 2
+push-key space up
+wait-ticks 30
+push-key d up
+wait-ticks 30
+show-panel Inspector
+wait-frames 5
+expect-game-keyboard no
+push-key d
+wait-ticks 20
+push-key d up
+wait-ticks 10
+stop
+wait-frames 2
+expect-state edit
+expect-hash document initial
+quit discard

@@ -61,3 +61,13 @@
 #*.PDF   diff=astextplain
 #*.rtf   diff=astextplain
 #*.RTF   diff=astextplain
+
+# Generated sounds (tools/audio/make_sounds.py) are compared byte for byte.
+*.wav binary
+
+# Shell scripts run in WSL and must keep LF endings.
+*.sh text eol=lf
+
+# The SDL patch applies to the LF sources of the SDL tarball: keep it byte
+# exact (its SHA256 is part of the build).
+cmake/patches/*.patch -text
